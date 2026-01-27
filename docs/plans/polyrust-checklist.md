@@ -195,23 +195,23 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 
 ### Task 9: Implement paper trading execution backend
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 9](./polyrust-framework-implementation.md#task-9-implement-paper-execution-backend) — PaperBackend/PaperState structs, FillMode enum, fill logic, Python reference (paper/engine.py)
-- [ ] Create `crates/polyrust-execution/src/paper.rs` — `PaperBackend` struct with `Arc<RwLock<PaperState>>` and `FillMode` enum (Immediate, Orderbook)
-- [ ] Define `PaperState` — `usdc_balance: Decimal`, `positions: HashMap<TokenId, Decimal>` (share count), `open_orders: HashMap<OrderId, PaperOrder>`
-- [ ] Define `PaperOrder` — id (UUID), token_id, side, price, size, filled_size, status, created_at
-- [ ] Implement `PaperBackend::new(initial_balance: Decimal, fill_mode: FillMode)`
-- [ ] Implement `place_order()`:
+- [x] Create `crates/polyrust-execution/src/paper.rs` — `PaperBackend` struct with `Arc<RwLock<PaperState>>` and `FillMode` enum (Immediate, Orderbook)
+- [x] Define `PaperState` — `usdc_balance: Decimal`, `positions: HashMap<TokenId, Decimal>` (share count), `open_orders: HashMap<OrderId, PaperOrder>`
+- [x] Define `PaperOrder` — id (UUID), token_id, side, price, size, filled_size, status, created_at
+- [x] Implement `PaperBackend::new(initial_balance: Decimal, fill_mode: FillMode)`
+- [x] Implement `place_order()`:
   - BUY: validate `usdc_balance >= price * size`, deduct balance, add to positions (Immediate mode) or add to open_orders (Orderbook mode)
   - SELL: validate `positions[token_id] >= size`, deduct position, add USDC revenue
   - Generate synthetic OrderId via UUID
   - Return OrderResult with success/failure
-- [ ] Implement `cancel_order()` — remove from open_orders, restore locked balance
-- [ ] Implement `cancel_all_orders()` — cancel all, restore all locked balance
-- [ ] Implement `get_open_orders()` — return open_orders values mapped to Order
-- [ ] Implement `get_positions()` — return positions mapped to Position structs
-- [ ] Implement `get_balance()` — return usdc_balance
-- [ ] Implement `update_orders_with_orderbook(token_id, orderbook: &OrderbookSnapshot)` — for Orderbook fill mode: match pending BUY orders against asks, SELL orders against bids, update filled_size, emit fills
-- [ ] Export PaperBackend and FillMode from `crates/polyrust-execution/src/lib.rs`
-- [ ] Write tests:
+- [x] Implement `cancel_order()` — remove from open_orders, restore locked balance
+- [x] Implement `cancel_all_orders()` — cancel all, restore all locked balance
+- [x] Implement `get_open_orders()` — return open_orders values mapped to Order
+- [x] Implement `get_positions()` — return positions mapped to Position structs
+- [x] Implement `get_balance()` — return usdc_balance
+- [x] Implement `update_orders_with_orderbook(token_id, orderbook: &OrderbookSnapshot)` — for Orderbook fill mode: match pending BUY orders against asks, SELL orders against bids, update filled_size, emit fills
+- [x] Export PaperBackend and FillMode from `crates/polyrust-execution/src/lib.rs`
+- [x] Write tests:
   - Test: BUY order with sufficient balance succeeds, balance reduced by price*size, position created
   - Test: BUY order with insufficient balance fails with error, balance unchanged
   - Test: SELL order with sufficient position succeeds, position reduced, balance increased
@@ -221,8 +221,8 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
   - Test: Orderbook fill mode matches BUY at ask price, SELL at bid price
   - Test: Immediate fill mode fills instantly at order price
   - Test: partial fill tracking — order partially matched against orderbook
-- [ ] Verify `cargo test --workspace` passes
-- [ ] Mark completed
+- [x] Verify `cargo test --workspace` passes
+- [x] Mark completed
 
 ---
 
