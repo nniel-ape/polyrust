@@ -4,8 +4,8 @@ use polyrust_core::prelude::*;
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
-use crate::error::{StoreError, StoreResult};
 use crate::Store;
+use crate::error::{StoreError, StoreResult};
 
 impl Store {
     /// Insert an order record.
@@ -43,7 +43,11 @@ impl Store {
             .await
             .map_err(|e| StoreError::Query(e.to_string()))?;
 
-        match rows.next().await.map_err(|e| StoreError::Query(e.to_string()))? {
+        match rows
+            .next()
+            .await
+            .map_err(|e| StoreError::Query(e.to_string()))?
+        {
             Some(row) => Ok(Some(parse_order_row(&row)?)),
             None => Ok(None),
         }
@@ -90,7 +94,11 @@ impl Store {
         }
         .map_err(|e| StoreError::Query(e.to_string()))?;
 
-        while let Some(row) = rows.next().await.map_err(|e| StoreError::Query(e.to_string()))? {
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| StoreError::Query(e.to_string()))?
+        {
             orders.push(parse_order_row(&row)?);
         }
         Ok(orders)

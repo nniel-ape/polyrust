@@ -212,15 +212,9 @@ fn config_env_overrides_apply() {
 
     let config = Config::default().with_env_overrides();
 
-    assert_eq!(
-        config.polymarket.private_key.as_deref(),
-        Some("0xdeadbeef")
-    );
+    assert_eq!(config.polymarket.private_key.as_deref(), Some("0xdeadbeef"));
     assert_eq!(config.polymarket.safe_address.as_deref(), Some("0xsafe"));
-    assert_eq!(
-        config.polymarket.builder_api_key.as_deref(),
-        Some("key123")
-    );
+    assert_eq!(config.polymarket.builder_api_key.as_deref(), Some("key123"));
     assert_eq!(
         config.polymarket.builder_api_secret.as_deref(),
         Some("secret123")

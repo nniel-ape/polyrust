@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::routing::get;
-use axum::Router;
 use polyrust_core::prelude::*;
-use polyrust_dashboard::server::AppState;
 use polyrust_dashboard::handlers;
+use polyrust_dashboard::server::AppState;
 use polyrust_store::Store;
 use tower::ServiceExt;
 
@@ -148,7 +148,10 @@ async fn positions_handler_reads_context() {
         .await
         .unwrap();
     let html = String::from_utf8(body.to_vec()).unwrap();
-    assert!(html.contains("test-strategy"), "should display strategy name");
+    assert!(
+        html.contains("test-strategy"),
+        "should display strategy name"
+    );
     assert!(html.contains("Up"), "should display position side");
 }
 

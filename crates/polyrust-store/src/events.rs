@@ -3,8 +3,8 @@ use libsql::params;
 use polyrust_core::prelude::Event;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{StoreError, StoreResult};
 use crate::Store;
+use crate::error::{StoreError, StoreResult};
 
 /// A persisted event record (read back from the database).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,10 +20,13 @@ impl Store {
     /// Persist an event as a JSON payload.
     pub async fn insert_event(&self, event: &Event) -> StoreResult<()> {
         let conn = self.conn();
-        let event_type = format!("{:?}", event).split('(').next().unwrap_or("Unknown").to_string();
+        let event_type = format!("{:?}", event)
+            .split('(')
+            .next()
+            .unwrap_or("Unknown")
+            .to_string();
         let topic = event.topic().to_string();
-        let payload =
-            serde_json::to_string(event).map_err(|e| StoreError::Query(e.to_string()))?;
+        let payload = serde_json::to_string(event).map_err(|e| StoreError::Query(e.to_string()))?;
 
         conn.execute(
             "INSERT INTO events (event_type, topic, payload) VALUES (?1, ?2, ?3)",
@@ -63,7 +66,11 @@ impl Store {
         }
         .map_err(|e| StoreError::Query(e.to_string()))?;
 
-        while let Some(row) = rows.next().await.map_err(|e| StoreError::Query(e.to_string()))? {
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| StoreError::Query(e.to_string()))?
+        {
             events.push(parse_event_row(&row)?);
         }
         Ok(events)

@@ -37,18 +37,13 @@ pub struct ArbitrageConfig {
 impl Default for ArbitrageConfig {
     fn default() -> Self {
         Self {
-            coins: vec![
-                "BTC".into(),
-                "ETH".into(),
-                "SOL".into(),
-                "XRP".into(),
-            ],
+            coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
             position_size: Decimal::new(5, 0),
             max_positions: 5,
-            min_profit_margin: Decimal::new(3, 2),       // 0.03
-            late_window_margin: Decimal::new(2, 2),       // 0.02
-            stop_loss_reversal_pct: Decimal::new(5, 3),   // 0.005
-            stop_loss_min_drop: Decimal::new(5, 2),       // 0.05
+            min_profit_margin: Decimal::new(3, 2),      // 0.03
+            late_window_margin: Decimal::new(2, 2),     // 0.02
+            stop_loss_reversal_pct: Decimal::new(5, 3), // 0.005
+            stop_loss_min_drop: Decimal::new(5, 2),     // 0.05
             scan_interval_secs: 30,
             use_chainlink: true,
         }
@@ -242,9 +237,7 @@ impl CryptoArbitrageStrategy {
             {
                 // For TwoSided mode, compute equal share count across both outcomes
                 // so total cost = position_size and each side gets N shares.
-                let two_sided_size = if opps.len() == 2
-                    && opps[0].mode == ArbitrageMode::TwoSided
-                {
+                let two_sided_size = if opps.len() == 2 && opps[0].mode == ArbitrageMode::TwoSided {
                     let combined_price = opps[0].buy_price + opps[1].buy_price;
                     if combined_price > Decimal::ZERO {
                         Some(self.config.position_size / combined_price)
@@ -260,8 +253,8 @@ impl CryptoArbitrageStrategy {
                         warn!(market = %market_id, "skipping opportunity with zero buy_price");
                         continue;
                     }
-                    let size = two_sided_size
-                        .unwrap_or_else(|| self.config.position_size / opp.buy_price);
+                    let size =
+                        two_sided_size.unwrap_or_else(|| self.config.position_size / opp.buy_price);
                     let order = OrderRequest {
                         token_id: opp.token_id.clone(),
                         price: opp.buy_price,
@@ -319,10 +312,13 @@ impl CryptoArbitrageStrategy {
             return Ok(vec![]);
         }
         // Check if any pending orders target this market's tokens
-        if self.pending_orders.values().any(|p| p.market_id == market.market.id) {
+        if self
+            .pending_orders
+            .values()
+            .any(|p| p.market_id == market.market.id)
+        {
             return Ok(vec![]);
         }
-
 
         let md = ctx.market_data.read().await;
 
@@ -340,9 +336,7 @@ impl CryptoArbitrageStrategy {
             && let Some(predicted) = market.predict_winner(current_price)
         {
             let (token_id, ask) = match predicted {
-                OutcomeSide::Up | OutcomeSide::Yes => {
-                    (&market.market.token_ids.outcome_a, up_ask)
-                }
+                OutcomeSide::Up | OutcomeSide::Yes => (&market.market.token_ids.outcome_a, up_ask),
                 OutcomeSide::Down | OutcomeSide::No => {
                     (&market.market.token_ids.outcome_b, down_ask)
                 }
@@ -396,17 +390,14 @@ impl CryptoArbitrageStrategy {
         // 3. Confirmed mode: confidence >= threshold + sufficient margin
         if let Some(predicted) = market.predict_winner(current_price) {
             let (token_id, ask) = match predicted {
-                OutcomeSide::Up | OutcomeSide::Yes => {
-                    (&market.market.token_ids.outcome_a, up_ask)
-                }
+                OutcomeSide::Up | OutcomeSide::Yes => (&market.market.token_ids.outcome_a, up_ask),
                 OutcomeSide::Down | OutcomeSide::No => {
                     (&market.market.token_ids.outcome_b, down_ask)
                 }
             };
 
             if let Some(ask_price) = ask {
-                let confidence =
-                    market.get_confidence(current_price, ask_price, time_remaining);
+                let confidence = market.get_confidence(current_price, ask_price, time_remaining);
                 let profit_margin = Decimal::ONE - ask_price;
                 let min_margin = if time_remaining < 300 {
                     self.config.late_window_margin
@@ -766,15 +757,11 @@ impl Strategy for CryptoArbitrageStrategy {
         Ok(())
     }
 
-    async fn on_event(
-        &mut self,
-        event: &Event,
-        ctx: &StrategyContext,
-    ) -> Result<Vec<Action>> {
+    async fn on_event(&mut self, event: &Event, ctx: &StrategyContext) -> Result<Vec<Action>> {
         match event {
-            Event::MarketData(MarketDataEvent::ExternalPrice {
-                symbol, price, ..
-            }) => self.on_crypto_price(symbol, *price, ctx).await,
+            Event::MarketData(MarketDataEvent::ExternalPrice { symbol, price, .. }) => {
+                self.on_crypto_price(symbol, *price, ctx).await
+            }
 
             Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot)) => {
                 self.on_orderbook_update(snapshot, ctx).await
@@ -788,9 +775,7 @@ impl Strategy for CryptoArbitrageStrategy {
                 self.on_market_expired(id, ctx).await
             }
 
-            Event::OrderUpdate(OrderEvent::Placed(result)) => {
-                Ok(self.on_order_placed(result))
-            }
+            Event::OrderUpdate(OrderEvent::Placed(result)) => Ok(self.on_order_placed(result)),
 
             Event::OrderUpdate(OrderEvent::Rejected { token_id, .. }) => {
                 if let Some(token_id) = token_id {
@@ -866,10 +851,7 @@ mod tests {
         }
     }
 
-    fn make_mwr(
-        reference_price: Decimal,
-        time_remaining_secs: i64,
-    ) -> MarketWithReference {
+    fn make_mwr(reference_price: Decimal, time_remaining_secs: i64) -> MarketWithReference {
         MarketWithReference {
             market: make_market_info(
                 "market1",
@@ -882,11 +864,7 @@ mod tests {
         }
     }
 
-    fn make_orderbook(
-        token_id: &str,
-        best_bid: Decimal,
-        best_ask: Decimal,
-    ) -> OrderbookSnapshot {
+    fn make_orderbook(token_id: &str, best_bid: Decimal, best_ask: Decimal) -> OrderbookSnapshot {
         OrderbookSnapshot {
             token_id: token_id.to_string(),
             bids: vec![OrderbookLevel {
@@ -1112,9 +1090,7 @@ mod tests {
         let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
 
         let mwr = make_mwr(dec!(50000), 300);
-        strategy
-            .active_markets
-            .insert("market1".to_string(), mwr);
+        strategy.active_markets.insert("market1".to_string(), mwr);
 
         // We bet Up at reference 50000 with entry price 0.60
         let pos = ArbitragePosition {
@@ -1132,9 +1108,7 @@ mod tests {
         // Price reversed: BTC dropped from 50000 to 49500 = -1% > 0.5%
         let mut history = VecDeque::new();
         history.push_back((Utc::now(), dec!(49500)));
-        strategy
-            .price_history
-            .insert("BTC".to_string(), history);
+        strategy.price_history.insert("BTC".to_string(), history);
 
         // Market bid dropped from 0.60 to 0.50 = 10¢ > 5¢
         let snapshot = make_orderbook("token_up", dec!(0.50), dec!(0.55));
@@ -1149,9 +1123,7 @@ mod tests {
 
         // Only 30 seconds left
         let mwr = make_mwr(dec!(50000), 30);
-        strategy
-            .active_markets
-            .insert("market1".to_string(), mwr);
+        strategy.active_markets.insert("market1".to_string(), mwr);
 
         let pos = ArbitragePosition {
             market_id: "market1".to_string(),
@@ -1167,9 +1139,7 @@ mod tests {
 
         let mut history = VecDeque::new();
         history.push_back((Utc::now(), dec!(49500)));
-        strategy
-            .price_history
-            .insert("BTC".to_string(), history);
+        strategy.price_history.insert("BTC".to_string(), history);
 
         let snapshot = make_orderbook("token_up", dec!(0.50), dec!(0.55));
         let action = strategy.check_stop_loss(&pos, &snapshot).unwrap();
@@ -1181,9 +1151,7 @@ mod tests {
         let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
 
         let mwr = make_mwr(dec!(50000), 300);
-        strategy
-            .active_markets
-            .insert("market1".to_string(), mwr);
+        strategy.active_markets.insert("market1".to_string(), mwr);
 
         let pos = ArbitragePosition {
             market_id: "market1".to_string(),
@@ -1200,9 +1168,7 @@ mod tests {
         // Crypto reversed, but market price only dropped 3¢ < 5¢
         let mut history = VecDeque::new();
         history.push_back((Utc::now(), dec!(49500)));
-        strategy
-            .price_history
-            .insert("BTC".to_string(), history);
+        strategy.price_history.insert("BTC".to_string(), history);
 
         let snapshot = make_orderbook("token_up", dec!(0.57), dec!(0.60));
         let action = strategy.check_stop_loss(&pos, &snapshot).unwrap();
@@ -1219,19 +1185,12 @@ mod tests {
         // Set BTC price in context
         {
             let mut md = ctx.market_data.write().await;
-            md.external_prices
-                .insert("BTC".to_string(), dec!(50000));
+            md.external_prices.insert("BTC".to_string(), dec!(50000));
         }
 
-        let market = make_market_info(
-            "btc-market-1",
-            Utc::now() + Duration::seconds(900),
-        );
+        let market = make_market_info("btc-market-1", Utc::now() + Duration::seconds(900));
 
-        let actions = strategy
-            .on_market_discovered(&market, &ctx)
-            .await
-            .unwrap();
+        let actions = strategy.on_market_discovered(&market, &ctx).await.unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::SubscribeMarket(_)));
         assert!(strategy.active_markets.contains_key("btc-market-1"));
@@ -1247,14 +1206,9 @@ mod tests {
         let ctx = StrategyContext::new();
 
         let mwr = make_mwr(dec!(50000), 0);
-        strategy
-            .active_markets
-            .insert("market1".to_string(), mwr);
+        strategy.active_markets.insert("market1".to_string(), mwr);
 
-        let actions = strategy
-            .on_market_expired("market1", &ctx)
-            .await
-            .unwrap();
+        let actions = strategy.on_market_expired("market1", &ctx).await.unwrap();
         assert!(!strategy.active_markets.contains_key("market1"));
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::UnsubscribeMarket(_)));
@@ -1273,9 +1227,6 @@ mod tests {
             strategy.extract_coin("Will ETH be above $2000?"),
             Some("ETH".to_string())
         );
-        assert_eq!(
-            strategy.extract_coin("Random question about stocks"),
-            None
-        );
+        assert_eq!(strategy.extract_coin("Random question about stocks"), None);
     }
 }

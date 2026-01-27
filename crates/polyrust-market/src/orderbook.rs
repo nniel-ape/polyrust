@@ -44,23 +44,17 @@ impl OrderbookManager {
 
     /// Get the best bid price for a token.
     pub async fn get_best_bid(&self, token_id: &str) -> Option<Decimal> {
-        self.get_snapshot(token_id)
-            .await
-            .and_then(|s| s.best_bid())
+        self.get_snapshot(token_id).await.and_then(|s| s.best_bid())
     }
 
     /// Get the best ask price for a token.
     pub async fn get_best_ask(&self, token_id: &str) -> Option<Decimal> {
-        self.get_snapshot(token_id)
-            .await
-            .and_then(|s| s.best_ask())
+        self.get_snapshot(token_id).await.and_then(|s| s.best_ask())
     }
 
     /// Get the spread for a token.
     pub async fn get_spread(&self, token_id: &str) -> Option<Decimal> {
-        self.get_snapshot(token_id)
-            .await
-            .and_then(|s| s.spread())
+        self.get_snapshot(token_id).await.and_then(|s| s.spread())
     }
 
     /// Get all tracked token IDs.
@@ -94,7 +88,11 @@ mod tests {
     use chrono::Utc;
     use rust_decimal_macros::dec;
 
-    fn make_snapshot(token_id: &str, bids: Vec<(Decimal, Decimal)>, asks: Vec<(Decimal, Decimal)>) -> OrderbookSnapshot {
+    fn make_snapshot(
+        token_id: &str,
+        bids: Vec<(Decimal, Decimal)>,
+        asks: Vec<(Decimal, Decimal)>,
+    ) -> OrderbookSnapshot {
         OrderbookSnapshot {
             token_id: token_id.to_string(),
             bids: bids

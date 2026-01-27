@@ -20,7 +20,12 @@ pub struct AppError(String);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let escaped = self.0.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+        let escaped = self
+            .0
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Html(format!("<h1>Error</h1><pre>{}</pre>", escaped)),
@@ -126,15 +131,16 @@ fn short_id(s: &str, len: usize) -> String {
 // ---------------------------------------------------------------------------
 
 /// GET / — overview page
-pub async fn index(
-    State(state): State<AppState>,
-) -> std::result::Result<Html<String>, AppError> {
+pub async fn index(State(state): State<AppState>) -> std::result::Result<Html<String>, AppError> {
     let pos_state = state.context.positions.read().await;
     let bal_state = state.context.balance.read().await;
     let pnl = pos_state.total_unrealized_pnl();
 
     let tmpl = IndexTemplate {
-        strategy_count: state.context.strategy_count.load(std::sync::atomic::Ordering::Relaxed),
+        strategy_count: state
+            .context
+            .strategy_count
+            .load(std::sync::atomic::Ordering::Relaxed),
         position_count: pos_state.position_count(),
         order_count: pos_state.open_orders.len(),
         total_unrealized_pnl: pnl.to_string(),
@@ -175,14 +181,8 @@ pub async fn positions(
 }
 
 /// GET /trades — recent trade history
-pub async fn trades(
-    State(state): State<AppState>,
-) -> std::result::Result<Html<String>, AppError> {
-    let trade_list = state
-        .store
-        .list_trades(None, 50)
-        .await
-        .unwrap_or_default();
+pub async fn trades(State(state): State<AppState>) -> std::result::Result<Html<String>, AppError> {
+    let trade_list = state.store.list_trades(None, 50).await.unwrap_or_default();
 
     let rows: Vec<TradeRow> = trade_list
         .iter()
@@ -206,9 +206,7 @@ pub async fn trades(
 }
 
 /// GET /health — system health
-pub async fn health(
-    State(state): State<AppState>,
-) -> std::result::Result<Html<String>, AppError> {
+pub async fn health(State(state): State<AppState>) -> std::result::Result<Html<String>, AppError> {
     let pos_state = state.context.positions.read().await;
     let bal_state = state.context.balance.read().await;
 

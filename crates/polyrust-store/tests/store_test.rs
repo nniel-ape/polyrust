@@ -53,7 +53,11 @@ async fn insert_and_get_trade_roundtrip() {
     let trade = sample_trade();
 
     store.insert_trade(&trade).await.unwrap();
-    let fetched = store.get_trade(&trade.id.to_string()).await.unwrap().unwrap();
+    let fetched = store
+        .get_trade(&trade.id.to_string())
+        .await
+        .unwrap()
+        .unwrap();
 
     assert_eq!(fetched.id, trade.id);
     assert_eq!(fetched.order_id, trade.order_id);

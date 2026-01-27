@@ -130,7 +130,9 @@ impl PaperBackend {
                         if price_improvement > Decimal::ZERO {
                             state.usdc_balance += price_improvement * fill_size;
                         }
-                        let pos = state.positions.entry(order.token_id.clone())
+                        let pos = state
+                            .positions
+                            .entry(order.token_id.clone())
                             .or_insert_with(|| PaperPosition {
                                 id: Uuid::new_v4(),
                                 token_id: order.token_id.clone(),
@@ -325,8 +327,7 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
                                 entry_time: Utc::now(),
                             });
                         // Weighted average entry price
-                        let total_cost =
-                            pos.entry_price * pos.size + price * size;
+                        let total_cost = pos.entry_price * pos.size + price * size;
                         pos.size += size;
                         if pos.size > Decimal::ZERO {
                             pos.entry_price = total_cost / pos.size;
@@ -451,9 +452,10 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
     async fn cancel_order(&self, order_id: &str) -> Result<()> {
         let mut state = self.state.write().await;
 
-        let order = state.open_orders.remove(order_id).ok_or_else(|| {
-            PolyError::Execution(format!("Order not found: {order_id}"))
-        })?;
+        let order = state
+            .open_orders
+            .remove(order_id)
+            .ok_or_else(|| PolyError::Execution(format!("Order not found: {order_id}")))?;
 
         // Restore locked resources for unfilled portion
         let unfilled = order.size - order.filled_size;
@@ -588,11 +590,21 @@ mod tests {
         }
     }
 
-    fn make_orderbook(token_id: &str, bids: Vec<(Decimal, Decimal)>, asks: Vec<(Decimal, Decimal)>) -> OrderbookSnapshot {
+    fn make_orderbook(
+        token_id: &str,
+        bids: Vec<(Decimal, Decimal)>,
+        asks: Vec<(Decimal, Decimal)>,
+    ) -> OrderbookSnapshot {
         OrderbookSnapshot {
             token_id: token_id.to_string(),
-            bids: bids.into_iter().map(|(price, size)| OrderbookLevel { price, size }).collect(),
-            asks: asks.into_iter().map(|(price, size)| OrderbookLevel { price, size }).collect(),
+            bids: bids
+                .into_iter()
+                .map(|(price, size)| OrderbookLevel { price, size })
+                .collect(),
+            asks: asks
+                .into_iter()
+                .map(|(price, size)| OrderbookLevel { price, size })
+                .collect(),
             timestamp: Utc::now(),
         }
     }
@@ -603,7 +615,10 @@ mod tests {
     async fn buy_order_sufficient_balance_succeeds() {
         let backend = PaperBackend::new(dec!(1000), FillMode::Immediate);
 
-        let result = backend.place_order(&buy_order("token1", dec!(0.50), dec!(10))).await.unwrap();
+        let result = backend
+            .place_order(&buy_order("token1", dec!(0.50), dec!(10)))
+            .await
+            .unwrap();
         assert!(result.success);
         assert!(result.order_id.is_some());
 
@@ -622,7 +637,10 @@ mod tests {
     async fn buy_order_insufficient_balance_fails() {
         let backend = PaperBackend::new(dec!(1), FillMode::Immediate);
 
-        let result = backend.place_order(&buy_order("token1", dec!(0.50), dec!(10))).await.unwrap();
+        let result = backend
+            .place_order(&buy_order("token1", dec!(0.50), dec!(10)))
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.message.contains("Insufficient balance"));
 
@@ -640,12 +658,18 @@ mod tests {
         let backend = PaperBackend::new(dec!(1000), FillMode::Immediate);
 
         // First buy to create position
-        backend.place_order(&buy_order("token1", dec!(0.40), dec!(20))).await.unwrap();
+        backend
+            .place_order(&buy_order("token1", dec!(0.40), dec!(20)))
+            .await
+            .unwrap();
         let balance_after_buy = backend.get_balance().await.unwrap();
         assert_eq!(balance_after_buy, dec!(992)); // 1000 - 0.40*20
 
         // Sell 10 shares at 0.60
-        let result = backend.place_order(&sell_order("token1", dec!(0.60), dec!(10))).await.unwrap();
+        let result = backend
+            .place_order(&sell_order("token1", dec!(0.60), dec!(10)))
+            .await
+            .unwrap();
         assert!(result.success);
 
         // Balance increased by 0.60 * 10 = 6.00
@@ -662,7 +686,10 @@ mod tests {
     async fn sell_order_no_position_fails() {
         let backend = PaperBackend::new(dec!(1000), FillMode::Immediate);
 
-        let result = backend.place_order(&sell_order("token1", dec!(0.50), dec!(10))).await.unwrap();
+        let result = backend
+            .place_order(&sell_order("token1", dec!(0.50), dec!(10)))
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.message.contains("Insufficient position"));
     }
@@ -672,7 +699,10 @@ mod tests {
         let backend = PaperBackend::new(dec!(100), FillMode::Orderbook);
 
         // Place a buy order (locks 0.50 * 10 = 5.00 USDC)
-        let result = backend.place_order(&buy_order("token1", dec!(0.50), dec!(10))).await.unwrap();
+        let result = backend
+            .place_order(&buy_order("token1", dec!(0.50), dec!(10)))
+            .await
+            .unwrap();
         assert!(result.success);
         let order_id = result.order_id.unwrap();
 
@@ -694,8 +724,14 @@ mod tests {
         let backend = PaperBackend::new(dec!(100), FillMode::Orderbook);
 
         // Place two buy orders
-        backend.place_order(&buy_order("token1", dec!(0.40), dec!(10))).await.unwrap();
-        backend.place_order(&buy_order("token2", dec!(0.30), dec!(10))).await.unwrap();
+        backend
+            .place_order(&buy_order("token1", dec!(0.40), dec!(10)))
+            .await
+            .unwrap();
+        backend
+            .place_order(&buy_order("token2", dec!(0.30), dec!(10)))
+            .await
+            .unwrap();
 
         // Balance reduced by 4.00 + 3.00 = 7.00
         assert_eq!(backend.get_balance().await.unwrap(), dec!(93));
@@ -718,11 +754,18 @@ mod tests {
         let backend = PaperBackend::new(dec!(100), FillMode::Orderbook);
 
         // Place buy order at 0.55
-        let result = backend.place_order(&buy_order("token1", dec!(0.55), dec!(10))).await.unwrap();
+        let result = backend
+            .place_order(&buy_order("token1", dec!(0.55), dec!(10)))
+            .await
+            .unwrap();
         assert!(result.success);
 
         // Create orderbook with ask at 0.50 (below our bid -> should fill)
-        let ob = make_orderbook("token1", vec![(dec!(0.48), dec!(100))], vec![(dec!(0.50), dec!(20))]);
+        let ob = make_orderbook(
+            "token1",
+            vec![(dec!(0.48), dec!(100))],
+            vec![(dec!(0.50), dec!(20))],
+        );
 
         let fills = backend.update_orders_with_orderbook("token1", &ob).await;
         assert_eq!(fills.len(), 1);
@@ -743,7 +786,10 @@ mod tests {
         let backend = PaperBackend::new(dec!(100), FillMode::Immediate);
 
         // Create position first (using Immediate to simplify setup)
-        backend.place_order(&buy_order("token1", dec!(0.40), dec!(20))).await.unwrap();
+        backend
+            .place_order(&buy_order("token1", dec!(0.40), dec!(20)))
+            .await
+            .unwrap();
 
         // Now create an Orderbook backend sharing the same state
         // Instead, let's use a single Orderbook backend and set up the position manually
@@ -752,21 +798,31 @@ mod tests {
         // Buy immediately doesn't work in orderbook mode, so set up state directly
         {
             let mut state = ob_backend.state.write().await;
-            state.positions.insert("token1".to_string(), PaperPosition {
-                id: Uuid::new_v4(),
-                token_id: "token1".to_string(),
-                size: dec!(20),
-                entry_price: dec!(0.40),
-                entry_time: Utc::now(),
-            });
+            state.positions.insert(
+                "token1".to_string(),
+                PaperPosition {
+                    id: Uuid::new_v4(),
+                    token_id: "token1".to_string(),
+                    size: dec!(20),
+                    entry_price: dec!(0.40),
+                    entry_time: Utc::now(),
+                },
+            );
         }
 
         // Place sell order at 0.50
-        let result = ob_backend.place_order(&sell_order("token1", dec!(0.50), dec!(10))).await.unwrap();
+        let result = ob_backend
+            .place_order(&sell_order("token1", dec!(0.50), dec!(10)))
+            .await
+            .unwrap();
         assert!(result.success);
 
         // Create orderbook with bid at 0.55 (above our ask -> should fill)
-        let ob = make_orderbook("token1", vec![(dec!(0.55), dec!(20))], vec![(dec!(0.60), dec!(100))]);
+        let ob = make_orderbook(
+            "token1",
+            vec![(dec!(0.55), dec!(20))],
+            vec![(dec!(0.60), dec!(100))],
+        );
 
         let fills = ob_backend.update_orders_with_orderbook("token1", &ob).await;
         assert_eq!(fills.len(), 1);
@@ -782,7 +838,10 @@ mod tests {
     async fn immediate_fill_mode_fills_instantly() {
         let backend = PaperBackend::new(dec!(100), FillMode::Immediate);
 
-        let result = backend.place_order(&buy_order("token1", dec!(0.50), dec!(10))).await.unwrap();
+        let result = backend
+            .place_order(&buy_order("token1", dec!(0.50), dec!(10)))
+            .await
+            .unwrap();
         assert!(result.success);
 
         // No open orders (filled immediately)
@@ -799,7 +858,10 @@ mod tests {
         let backend = PaperBackend::new(dec!(100), FillMode::Orderbook);
 
         // Place buy order for 20 shares at 0.55
-        let result = backend.place_order(&buy_order("token1", dec!(0.55), dec!(20))).await.unwrap();
+        let result = backend
+            .place_order(&buy_order("token1", dec!(0.55), dec!(20)))
+            .await
+            .unwrap();
         assert!(result.success);
 
         // Orderbook with only 8 shares available at ask
@@ -842,17 +904,23 @@ mod tests {
         // Set up position manually
         {
             let mut state = backend.state.write().await;
-            state.positions.insert("token1".to_string(), PaperPosition {
-                id: Uuid::new_v4(),
-                token_id: "token1".to_string(),
-                size: dec!(20),
-                entry_price: dec!(0.50),
-                entry_time: Utc::now(),
-            });
+            state.positions.insert(
+                "token1".to_string(),
+                PaperPosition {
+                    id: Uuid::new_v4(),
+                    token_id: "token1".to_string(),
+                    size: dec!(20),
+                    entry_price: dec!(0.50),
+                    entry_time: Utc::now(),
+                },
+            );
         }
 
         // Place sell order for 10 shares
-        let result = backend.place_order(&sell_order("token1", dec!(0.60), dec!(10))).await.unwrap();
+        let result = backend
+            .place_order(&sell_order("token1", dec!(0.60), dec!(10)))
+            .await
+            .unwrap();
         assert!(result.success);
         let order_id = result.order_id.unwrap();
 

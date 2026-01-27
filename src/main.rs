@@ -37,8 +37,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Choose execution backend based on paper trading config
     let execution_backend: Box<dyn ExecutionBackend> = if config.paper.enabled {
-        info!("paper trading mode enabled (initial balance: {})", config.paper.initial_balance);
-        Box::new(PaperBackend::new(config.paper.initial_balance, FillMode::Immediate))
+        info!(
+            "paper trading mode enabled (initial balance: {})",
+            config.paper.initial_balance
+        );
+        Box::new(PaperBackend::new(
+            config.paper.initial_balance,
+            FillMode::Immediate,
+        ))
     } else {
         info!("live trading mode enabled");
         Box::new(LiveBackend::new(&config).await?)
@@ -77,13 +83,12 @@ async fn main() -> anyhow::Result<()> {
     // Start dashboard if enabled
     let dashboard_config = engine.config().dashboard.clone();
     if dashboard_config.enabled {
-        let dashboard = Dashboard::new(
-            engine.context().clone(),
-            Arc::clone(&store),
-            event_bus,
-        );
+        let dashboard = Dashboard::new(engine.context().clone(), Arc::clone(&store), event_bus);
         tokio::spawn(async move {
-            if let Err(e) = dashboard.serve(&dashboard_config.host, dashboard_config.port).await {
+            if let Err(e) = dashboard
+                .serve(&dashboard_config.host, dashboard_config.port)
+                .await
+            {
                 error!("dashboard error: {e}");
             }
         });

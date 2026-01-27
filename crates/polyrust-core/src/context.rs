@@ -1,8 +1,8 @@
 use crate::types::*;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use tokio::sync::RwLock;
 
 /// Thread-safe shared state accessible by all strategies
@@ -50,7 +50,10 @@ impl PositionState {
     }
 
     pub fn total_unrealized_pnl(&self) -> Decimal {
-        self.open_positions.values().map(|p| p.unrealized_pnl()).sum()
+        self.open_positions
+            .values()
+            .map(|p| p.unrealized_pnl())
+            .sum()
     }
 }
 

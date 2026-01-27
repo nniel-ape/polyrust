@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use polymarket_client_sdk::POLYGON;
 use polymarket_client_sdk::auth::{LocalSigner, Signer};
 use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, OrdersRequest};
 use polymarket_client_sdk::clob::types::{
@@ -8,7 +9,6 @@ use polymarket_client_sdk::clob::types::{
 };
 use polymarket_client_sdk::clob::{Client, Config as SdkConfig};
 use polymarket_client_sdk::types::{Address as SdkAddress, U256 as SdkU256};
-use polymarket_client_sdk::POLYGON;
 use rust_decimal::Decimal;
 use tracing::{debug, info, warn};
 
@@ -51,13 +51,9 @@ impl LiveBackend {
     /// Authenticates with Polymarket using the private key from config.
     /// If `safe_address` is set, uses GnosisSafe signature type; otherwise EOA.
     pub async fn new(config: &Config) -> Result<Self> {
-        let private_key = config
-            .polymarket
-            .private_key
-            .as_deref()
-            .ok_or_else(|| {
-                PolyError::Config("POLY_PRIVATE_KEY is required for live trading".into())
-            })?;
+        let private_key = config.polymarket.private_key.as_deref().ok_or_else(|| {
+            PolyError::Config("POLY_PRIVATE_KEY is required for live trading".into())
+        })?;
 
         let signer = LocalSigner::from_str(private_key)
             .map_err(|e| PolyError::Config(format!("Invalid private key: {e}")))?

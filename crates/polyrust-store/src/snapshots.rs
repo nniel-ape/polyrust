@@ -4,8 +4,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-use crate::error::{StoreError, StoreResult};
 use crate::Store;
+use crate::error::{StoreError, StoreResult};
 
 /// Point-in-time PnL snapshot for the dashboard / analytics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,7 +56,11 @@ impl Store {
             .await
             .map_err(|e| StoreError::Query(e.to_string()))?;
 
-        while let Some(row) = rows.next().await.map_err(|e| StoreError::Query(e.to_string()))? {
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| StoreError::Query(e.to_string()))?
+        {
             snaps.push(parse_snapshot_row(&row)?);
         }
         Ok(snaps)

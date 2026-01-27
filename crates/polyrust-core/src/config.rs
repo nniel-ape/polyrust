@@ -50,14 +50,29 @@ pub struct PolymarketConfig {
 }
 
 impl Serialize for PolymarketConfig {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let mut s = serializer.serialize_struct("PolymarketConfig", 5)?;
-        s.serialize_field("private_key", &self.private_key.as_ref().map(|_| "[REDACTED]"))?;
+        s.serialize_field(
+            "private_key",
+            &self.private_key.as_ref().map(|_| "[REDACTED]"),
+        )?;
         s.serialize_field("safe_address", &self.safe_address)?;
-        s.serialize_field("builder_api_key", &self.builder_api_key.as_ref().map(|_| "[REDACTED]"))?;
-        s.serialize_field("builder_api_secret", &self.builder_api_secret.as_ref().map(|_| "[REDACTED]"))?;
-        s.serialize_field("builder_api_passphrase", &self.builder_api_passphrase.as_ref().map(|_| "[REDACTED]"))?;
+        s.serialize_field(
+            "builder_api_key",
+            &self.builder_api_key.as_ref().map(|_| "[REDACTED]"),
+        )?;
+        s.serialize_field(
+            "builder_api_secret",
+            &self.builder_api_secret.as_ref().map(|_| "[REDACTED]"),
+        )?;
+        s.serialize_field(
+            "builder_api_passphrase",
+            &self.builder_api_passphrase.as_ref().map(|_| "[REDACTED]"),
+        )?;
         s.end()
     }
 }
@@ -65,11 +80,23 @@ impl Serialize for PolymarketConfig {
 impl std::fmt::Debug for PolymarketConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PolymarketConfig")
-            .field("private_key", &self.private_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "private_key",
+                &self.private_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("safe_address", &self.safe_address)
-            .field("builder_api_key", &self.builder_api_key.as_ref().map(|_| "[REDACTED]"))
-            .field("builder_api_secret", &self.builder_api_secret.as_ref().map(|_| "[REDACTED]"))
-            .field("builder_api_passphrase", &self.builder_api_passphrase.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "builder_api_key",
+                &self.builder_api_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "builder_api_secret",
+                &self.builder_api_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "builder_api_passphrase",
+                &self.builder_api_passphrase.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }

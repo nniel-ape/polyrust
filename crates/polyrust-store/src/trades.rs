@@ -5,8 +5,8 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 use uuid::Uuid;
 
-use crate::error::{StoreError, StoreResult};
 use crate::Store;
+use crate::error::{StoreError, StoreResult};
 
 impl Store {
     /// Insert a trade record.
@@ -45,7 +45,11 @@ impl Store {
             .await
             .map_err(|e| StoreError::Query(e.to_string()))?;
 
-        match rows.next().await.map_err(|e| StoreError::Query(e.to_string()))? {
+        match rows
+            .next()
+            .await
+            .map_err(|e| StoreError::Query(e.to_string()))?
+        {
             Some(row) => Ok(Some(parse_trade_row(&row)?)),
             None => Ok(None),
         }
@@ -81,7 +85,11 @@ impl Store {
         }
         .map_err(|e| StoreError::Query(e.to_string()))?;
 
-        while let Some(row) = rows.next().await.map_err(|e| StoreError::Query(e.to_string()))? {
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| StoreError::Query(e.to_string()))?
+        {
             trades.push(parse_trade_row(&row)?);
         }
         Ok(trades)
@@ -89,36 +97,16 @@ impl Store {
 }
 
 fn parse_trade_row(row: &libsql::Row) -> StoreResult<Trade> {
-    let id_str: String = row
-        .get(0)
-        .map_err(|e| StoreError::Query(e.to_string()))?;
-    let order_id: String = row
-        .get(1)
-        .map_err(|e| StoreError::Query(e.to_string()))?;
-    let market_id: String = row
-        .get(2)
-        .map_err(|e| StoreError::Query(e.to_string()))?;
-    let token_id: String = row
-        .get(3)
-        .map_err(|e| StoreError::Query(e.to_string()))?;
-    let side_str: String = row
-        .get(4)
-        .map_err(|e| StoreError::Query(e.to_string()))?;
-    let price_str: String = row
-        .get(5)
-        .map_err(|e| StoreError::Query(e.to_string()))?;
-    let size_str: String = row
-        .get(6)
-        .map_err(|e| StoreError::Query(e.to_string()))?;
-    let pnl_str: Option<String> = row
-        .get(7)
-        .map_err(|e| StoreError::Query(e.to_string()))?;
-    let strategy_name: String = row
-        .get(8)
-        .map_err(|e| StoreError::Query(e.to_string()))?;
-    let ts_str: String = row
-        .get(9)
-        .map_err(|e| StoreError::Query(e.to_string()))?;
+    let id_str: String = row.get(0).map_err(|e| StoreError::Query(e.to_string()))?;
+    let order_id: String = row.get(1).map_err(|e| StoreError::Query(e.to_string()))?;
+    let market_id: String = row.get(2).map_err(|e| StoreError::Query(e.to_string()))?;
+    let token_id: String = row.get(3).map_err(|e| StoreError::Query(e.to_string()))?;
+    let side_str: String = row.get(4).map_err(|e| StoreError::Query(e.to_string()))?;
+    let price_str: String = row.get(5).map_err(|e| StoreError::Query(e.to_string()))?;
+    let size_str: String = row.get(6).map_err(|e| StoreError::Query(e.to_string()))?;
+    let pnl_str: Option<String> = row.get(7).map_err(|e| StoreError::Query(e.to_string()))?;
+    let strategy_name: String = row.get(8).map_err(|e| StoreError::Query(e.to_string()))?;
+    let ts_str: String = row.get(9).map_err(|e| StoreError::Query(e.to_string()))?;
 
     Ok(Trade {
         id: Uuid::parse_str(&id_str).map_err(|e| StoreError::Query(e.to_string()))?,
