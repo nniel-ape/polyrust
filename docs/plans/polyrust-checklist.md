@@ -230,18 +230,18 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 
 ### Task 10: Implement Axum + HTMX monitoring dashboard
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 10](./polyrust-framework-implementation.md#task-10-implement-axum--htmx-monitoring-dashboard) — Dashboard struct, Axum router setup, handler signatures, SSE endpoint, Askama template structure, HTMX attributes
-- [ ] Add dependencies to `crates/polyrust-dashboard/Cargo.toml`: polyrust-core, polyrust-store, axum 0.8, askama 0.13, askama_axum 0.5, tower-http 0.6 (features: fs, cors), tokio, tokio-stream, serde, serde_json, tracing
-- [ ] Create `crates/polyrust-dashboard/src/server.rs` — `Dashboard` struct with StrategyContext, Arc<Store>, EventBus
-- [ ] Implement `Dashboard::new(context, store, event_bus)` and `async fn serve(self, host: &str, port: u16)`
-- [ ] Define `AppState` (Clone) with Arc references to context, store, event_bus for Axum state extraction
-- [ ] Set up Axum Router with routes: `GET /` (index), `GET /positions` (positions table), `GET /trades` (trade history), `GET /health` (system health), `GET /events/stream` (SSE endpoint)
-- [ ] Create `crates/polyrust-dashboard/src/handlers.rs`:
+- [x] Add dependencies to `crates/polyrust-dashboard/Cargo.toml`: polyrust-core, polyrust-store, axum 0.8, askama 0.13, askama_axum 0.5, tower-http 0.6 (features: fs, cors), tokio, tokio-stream, serde, serde_json, tracing
+- [x] Create `crates/polyrust-dashboard/src/server.rs` — `Dashboard` struct with StrategyContext, Arc<Store>, EventBus
+- [x] Implement `Dashboard::new(context, store, event_bus)` and `async fn serve(self, host: &str, port: u16)`
+- [x] Define `AppState` (Clone) with Arc references to context, store, event_bus for Axum state extraction
+- [x] Set up Axum Router with routes: `GET /` (index), `GET /positions` (positions table), `GET /trades` (trade history), `GET /health` (system health), `GET /events/stream` (SSE endpoint)
+- [x] Create `crates/polyrust-dashboard/src/handlers.rs`:
   - `index` handler — render overview page: active strategy count, total PnL, unrealized PnL, available balance, system uptime
   - `positions` handler — render table of open positions from StrategyContext (id, market, side, entry_price, current_price, unrealized_pnl, strategy_name)
   - `trades` handler — query Store for recent trades, render paginated table (id, market, side, price, size, realized_pnl, timestamp)
   - `health` handler — render system health: uptime, event bus subscriber count, open position count, open order count
-- [ ] Implement `sse_events` handler — subscribe to EventBus, stream events as SSE with `axum::response::sse::Sse`, format events as partial HTML fragments for HTMX swap
-- [ ] Create Askama HTML templates in `crates/polyrust-dashboard/src/templates/`:
+- [x] Implement `sse_events` handler — subscribe to EventBus, stream events as SSE with `axum::response::sse::Sse`, format events as partial HTML fragments for HTMX swap
+- [x] Create Askama HTML templates in `crates/polyrust-dashboard/src/templates/`:
   - `base.html` — layout with nav bar, HTMX script (`<script src="https://unpkg.com/htmx.org@2.0.0"></script>`), Tailwind CSS CDN
   - `index.html` — extends base, overview cards + SSE connection (`hx-sse="connect:/events/stream"`)
   - `positions.html` — extends base, positions table with SSE live updates
@@ -249,14 +249,14 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
   - `health.html` — extends base, health metrics cards
   - `partials/position_row.html` — single position table row (for SSE swap)
   - `partials/pnl_summary.html` — PnL summary card (for SSE swap)
-- [ ] Update `crates/polyrust-dashboard/src/lib.rs` with module declarations and public exports
-- [ ] Write tests:
+- [x] Update `crates/polyrust-dashboard/src/lib.rs` with module declarations and public exports
+- [x] Write tests:
   - Test: all routes return 200 status with mock AppState
   - Test: SSE endpoint produces events when EventBus publishes
   - Test: positions handler reads from StrategyContext correctly
   - Test: trades handler queries Store and returns results
-- [ ] Verify `cargo test --workspace` passes
-- [ ] Mark completed
+- [x] Verify `cargo test --workspace` passes
+- [x] Mark completed
 
 ---
 

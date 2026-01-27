@@ -6,8 +6,19 @@ edition = "2024"
 [dependencies]
 polyrust-core = { path = "../polyrust-core" }
 polyrust-store = { path = "../polyrust-store" }
+axum = "0.8"
+askama = "0.13"
+tower-http = { version = "0.6", features = ["fs", "cors"] }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+rust_decimal = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+rust_decimal_macros = { workspace = true }

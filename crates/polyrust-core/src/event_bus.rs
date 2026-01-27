@@ -70,6 +70,14 @@ pub struct EventSubscriber {
 }
 
 impl EventSubscriber {
+    /// Consume the subscriber and return the raw broadcast receiver.
+    /// Useful for wrapping in `BroadcastStream` for SSE endpoints.
+    pub fn into_receiver(self) -> broadcast::Receiver<Event> {
+        self.receiver
+    }
+}
+
+impl EventSubscriber {
     /// Receive the next event, respecting topic filter.
     /// Returns None if the channel is closed.
     pub async fn recv(&mut self) -> Option<Event> {

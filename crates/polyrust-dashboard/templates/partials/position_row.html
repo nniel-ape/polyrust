@@ -1,0 +1,10 @@
+<tr class="border-b border-gray-800/50">
+  <td class="py-2 font-mono text-xs">{{ pos.id_short }}</td>
+  <td class="py-2">{{ pos.market_id_short }}</td>
+  <td class="py-2">{{ pos.side }}</td>
+  <td class="py-2 text-right">{{ pos.entry_price }}</td>
+  <td class="py-2 text-right">{{ pos.current_price }}</td>
+  <td class="py-2 text-right">{{ pos.size }}</td>
+  <td class="py-2 text-right {{ pos.pnl_class }}">{{ pos.unrealized_pnl }}</td>
+  <td class="py-2">{{ pos.strategy_name }}</td>
+</tr>

@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">Trade History</h1>
+
+<table class="w-full text-sm">
+  <thead class="text-gray-400 border-b border-gray-800">
+    <tr>
+      <th class="text-left py-2">ID</th>
+      <th class="text-left py-2">Market</th>
+      <th class="text-left py-2">Side</th>
+      <th class="text-right py-2">Price</th>
+      <th class="text-right py-2">Size</th>
+      <th class="text-right py-2">PnL</th>
+      <th class="text-left py-2">Strategy</th>
+      <th class="text-left py-2">Time</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for trade in trades %}
+    <tr class="border-b border-gray-800/50">
+      <td class="py-2 font-mono text-xs">{{ trade.id_short }}</td>
+      <td class="py-2">{{ trade.market_id_short }}</td>
+      <td class="py-2">{{ trade.side }}</td>
+      <td class="py-2 text-right">{{ trade.price }}</td>
+      <td class="py-2 text-right">{{ trade.size }}</td>
+      <td class="py-2 text-right">{{ trade.realized_pnl }}</td>
+      <td class="py-2">{{ trade.strategy_name }}</td>
+      <td class="py-2 text-gray-400">{{ trade.timestamp }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if trades.is_empty() %}
+<p class="text-gray-500 mt-4">No trades recorded.</p>
+{% endif %}
+{% endblock %}

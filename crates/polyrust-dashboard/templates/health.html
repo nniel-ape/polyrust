@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">System Health</h1>
+
+<div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+  <div class="bg-gray-900 rounded p-4">
+    <div class="text-gray-400 text-sm">EventBus Subscribers</div>
+    <div class="text-xl font-bold">{{ subscriber_count }}</div>
+  </div>
+  <div class="bg-gray-900 rounded p-4">
+    <div class="text-gray-400 text-sm">Open Positions</div>
+    <div class="text-xl font-bold">{{ position_count }}</div>
+  </div>
+  <div class="bg-gray-900 rounded p-4">
+    <div class="text-gray-400 text-sm">Open Orders</div>
+    <div class="text-xl font-bold">{{ order_count }}</div>
+  </div>
+  <div class="bg-gray-900 rounded p-4">
+    <div class="text-gray-400 text-sm">Available USDC</div>
+    <div class="text-xl font-bold">{{ available_usdc }}</div>
+  </div>
+</div>
+{% endblock %}
