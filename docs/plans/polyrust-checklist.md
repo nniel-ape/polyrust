@@ -372,18 +372,18 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 
 ### Task 14: End-to-end validation and cleanup
 > **Detailed reference:** [polyrust-framework-implementation.md → Definition of Done](./polyrust-framework-implementation.md#7-definition-of-done) — full acceptance criteria checklist, testing strategy, coverage expectations
-- [ ] Run `cargo build --workspace` — zero errors
-- [ ] Run `cargo test --workspace` — all tests pass
-- [ ] Run `cargo clippy --workspace -- -D warnings` — zero warnings
-- [ ] Run `cargo run --example simple_strategy` — starts, logs events, Ctrl+C exits cleanly
-- [ ] Run `cargo run` — starts in paper mode, dashboard accessible at http://127.0.0.1:3000
-- [ ] Verify dashboard pages load: /, /positions, /trades, /health
-- [ ] Verify SSE endpoint /events/stream connects and receives events
-- [ ] Run `cargo build --release` — produces single binary at target/release/polyrust
-- [ ] Verify no TODO/FIXME/placeholder code remains in shipped crates (except clearly marked future work in comments)
-- [ ] Verify no secrets, private keys, or API credentials in committed code
-- [ ] Verify .gitignore covers: target/, *.db, *.db-journal, .env, config/local.toml
-- [ ] Mark completed
+- [x] Run `cargo build --workspace` — zero errors
+- [x] Run `cargo test --workspace` — all tests pass
+- [x] Run `cargo clippy --workspace -- -D warnings` — zero warnings
+- [x] Run `cargo run --example simple_strategy` — starts, logs events, Ctrl+C exits cleanly
+- [x] Run `cargo run` — starts in paper mode, dashboard accessible at http://127.0.0.1:3000
+- [x] Verify dashboard pages load: /, /positions, /trades, /health
+- [x] Verify SSE endpoint /events/stream connects and receives events
+- [x] Run `cargo build --release` — produces single binary at target/release/polyrust
+- [x] Verify no TODO/FIXME/placeholder code remains in shipped crates (except clearly marked future work in comments)
+- [x] Verify no secrets, private keys, or API credentials in committed code
+- [x] Verify .gitignore covers: target/, *.db, *.db-journal, .env, config/local.toml
+- [x] Mark completed
 
 ---
 
