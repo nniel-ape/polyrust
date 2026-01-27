@@ -3,13 +3,13 @@ use crate::config::Config;
 use crate::context::StrategyContext;
 use crate::error::{PolyError, Result};
 use crate::event_bus::EventBus;
-use crate::events::{Event, OrderEvent, SignalEvent, SystemEvent};
+use crate::events::{Event, MarketDataEvent, OrderEvent, SignalEvent, SystemEvent};
 use crate::execution::ExecutionBackend;
 use crate::strategy::Strategy;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Main engine that orchestrates strategies, execution, and event routing.
 pub struct Engine {
@@ -134,6 +134,31 @@ impl Engine {
 
         self.event_bus
             .publish(Event::System(SystemEvent::EngineStarted));
+
+        // Spawn context-update task: updates shared state from external price events
+        {
+            let mut ctx_subscriber = self.event_bus.subscribe();
+            let context = self.context.clone();
+            tokio::spawn(async move {
+                loop {
+                    let event = match ctx_subscriber.recv().await {
+                        Some(e) => e,
+                        None => break,
+                    };
+                    if matches!(&event, Event::System(SystemEvent::EngineStopping)) {
+                        break;
+                    }
+                    if let Event::MarketData(MarketDataEvent::ExternalPrice {
+                        symbol, price, ..
+                    }) = &event
+                    {
+                        let mut md = context.market_data.write().await;
+                        md.external_prices.insert(symbol.clone(), *price);
+                        debug!(symbol = %symbol, price = %price, "Updated external price in context");
+                    }
+                }
+            });
+        }
 
         // Spawn strategy event loops
         let mut strategy_handles = Vec::new();

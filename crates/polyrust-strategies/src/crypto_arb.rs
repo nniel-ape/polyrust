@@ -76,7 +76,7 @@ impl MarketWithReference {
     /// Predict winner based on current crypto price vs reference.
     /// If the current price exceeds reference, "Up" wins; otherwise "Down".
     pub fn predict_winner(&self, current_price: Decimal) -> OutcomeSide {
-        if current_price > self.reference_price {
+        if current_price >= self.reference_price {
             OutcomeSide::Up
         } else {
             OutcomeSide::Down
@@ -166,7 +166,7 @@ pub struct CryptoArbitrageStrategy {
     config: ArbitrageConfig,
     active_markets: HashMap<MarketId, MarketWithReference>,
     price_history: HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>,
-    positions: HashMap<MarketId, ArbitragePosition>,
+    positions: HashMap<MarketId, Vec<ArbitragePosition>>,
     last_scan: Option<tokio::time::Instant>,
 }
 
@@ -213,7 +213,8 @@ impl CryptoArbitrageStrategy {
             };
 
             let opps = self.evaluate_opportunity(&market, price, ctx).await?;
-            if !opps.is_empty() && self.positions.len() < self.config.max_positions {
+            let total_positions: usize = self.positions.values().map(|v| v.len()).sum();
+            if !opps.is_empty() && total_positions < self.config.max_positions {
                 for opp in &opps {
                     let order = OrderRequest {
                         token_id: opp.token_id.clone(),
@@ -233,22 +234,22 @@ impl CryptoArbitrageStrategy {
                     );
                     actions.push(Action::PlaceOrder(order));
                 }
-                // Record position using the first opportunity's details
-                let first = &opps[0];
-                self.positions.insert(
-                    market_id.clone(),
-                    ArbitragePosition {
+                // Record all positions (two-sided mode produces two)
+                let positions: Vec<ArbitragePosition> = opps
+                    .iter()
+                    .map(|opp| ArbitragePosition {
                         market_id: market_id.clone(),
-                        token_id: first.token_id.clone(),
-                        side: first.outcome_to_buy,
-                        entry_price: first.buy_price,
-                        size: self.config.position_size / first.buy_price,
+                        token_id: opp.token_id.clone(),
+                        side: opp.outcome_to_buy,
+                        entry_price: opp.buy_price,
+                        size: self.config.position_size / opp.buy_price,
                         reference_price: market.reference_price,
                         coin: market.coin.clone(),
                         order_id: None,
                         entry_time: Utc::now(),
-                    },
-                );
+                    })
+                    .collect();
+                self.positions.insert(market_id.clone(), positions);
             }
         }
 
@@ -274,6 +275,7 @@ impl CryptoArbitrageStrategy {
         if self.positions.contains_key(&market.market.id) {
             return Ok(vec![]);
         }
+
 
         let md = ctx.market_data.read().await;
 
@@ -397,24 +399,39 @@ impl CryptoArbitrageStrategy {
         let position_ids: Vec<MarketId> = self.positions.keys().cloned().collect();
 
         for market_id in position_ids {
-            let pos = match self.positions.get(&market_id) {
+            let positions = match self.positions.get(&market_id) {
                 Some(p) => p.clone(),
                 None => continue,
             };
 
-            // Only check if this snapshot is for the position's token
-            if pos.token_id != snapshot.token_id {
-                continue;
+            let mut triggered_indices = Vec::new();
+            for (i, pos) in positions.iter().enumerate() {
+                // Only check if this snapshot is for the position's token
+                if pos.token_id != snapshot.token_id {
+                    continue;
+                }
+
+                if let Some(action) = self.check_stop_loss(pos, snapshot)? {
+                    info!(
+                        market = %market_id,
+                        entry = %pos.entry_price,
+                        side = ?pos.side,
+                        "Stop-loss triggered, selling position"
+                    );
+                    triggered_indices.push(i);
+                    actions.push(action);
+                }
             }
 
-            if let Some(action) = self.check_stop_loss(&pos, snapshot)? {
-                info!(
-                    market = %market_id,
-                    entry = %pos.entry_price,
-                    "Stop-loss triggered, selling position"
-                );
-                self.positions.remove(&market_id);
-                actions.push(action);
+            if !triggered_indices.is_empty()
+                && let Some(remaining) = self.positions.get_mut(&market_id)
+            {
+                for i in triggered_indices.into_iter().rev() {
+                    remaining.remove(i);
+                }
+                if remaining.is_empty() {
+                    self.positions.remove(&market_id);
+                }
             }
         }
 
@@ -543,18 +560,21 @@ impl CryptoArbitrageStrategy {
             );
         }
 
-        if let Some(pos) = self.positions.remove(market_id) {
-            warn!(
-                market = %market_id,
-                side = ?pos.side,
-                entry = %pos.entry_price,
-                "Position in expired market — awaiting resolution"
-            );
+        if let Some(positions) = self.positions.remove(market_id) {
+            for pos in &positions {
+                warn!(
+                    market = %market_id,
+                    side = ?pos.side,
+                    entry = %pos.entry_price,
+                    "Position in expired market — awaiting resolution"
+                );
+            }
             return Ok(vec![Action::Log {
                 level: LogLevel::Info,
                 message: format!(
-                    "Market {} expired with open position (side={:?}, entry={})",
-                    market_id, pos.side, pos.entry_price
+                    "Market {} expired with {} open position(s)",
+                    market_id,
+                    positions.len()
                 ),
             }]);
         }
@@ -565,11 +585,25 @@ impl CryptoArbitrageStrategy {
     // -- Helpers ------------------------------------------------------------
 
     /// Extract coin symbol from market question string.
-    /// Looks for known coin names in the question text.
+    /// Looks for known coin names as whole words in the question text.
     fn extract_coin(&self, question: &str) -> Option<String> {
         let upper = question.to_uppercase();
         for coin in &self.config.coins {
-            if upper.contains(coin) {
+            // Match coin as a whole word to avoid false positives
+            // (e.g. "SOL" should not match "SOLVE" or "resolution")
+            let mut found = false;
+            for (idx, _) in upper.match_indices(coin.as_str()) {
+                let before_ok = idx == 0
+                    || !upper.as_bytes()[idx - 1].is_ascii_alphanumeric();
+                let after_idx = idx + coin.len();
+                let after_ok = after_idx >= upper.len()
+                    || !upper.as_bytes()[after_idx].is_ascii_alphanumeric();
+                if before_ok && after_ok {
+                    found = true;
+                    break;
+                }
+            }
+            if found {
                 return Some(coin.clone());
             }
         }
@@ -625,14 +659,16 @@ impl Strategy for CryptoArbitrageStrategy {
     }
 
     async fn on_stop(&mut self, _ctx: &StrategyContext) -> Result<()> {
+        let total_positions: usize = self.positions.values().map(|v| v.len()).sum();
         info!(
             active_markets = self.active_markets.len(),
-            open_positions = self.positions.len(),
+            open_positions = total_positions,
             "Crypto arbitrage strategy stopping"
         );
         if !self.positions.is_empty() {
             warn!(
-                positions = self.positions.len(),
+                markets_with_positions = self.positions.len(),
+                total_positions = total_positions,
                 "Strategy stopping with open positions — consider cancelling orders"
             );
         }

@@ -65,11 +65,10 @@ impl Default for PriceFeed {
 fn normalize_symbol(raw: &str) -> String {
     let upper = raw.to_uppercase();
     // Chainlink format: "ETH/USD" -> "ETH"
-    if let Some(base) = upper.split('/').next() {
-        let base = base.trim();
-        if base != upper {
-            return base.to_string();
-        }
+    if upper.contains('/')
+        && let Some(base) = upper.split('/').next()
+    {
+        return base.trim().to_string();
     }
     // Binance format: "BTCUSDT" -> "BTC"
     // Try longer suffixes first to avoid partial matches (BUSD before USD)
@@ -188,7 +187,11 @@ impl MarketDataFeed for PriceFeed {
                             {
                                 let mut c = cache.write().await;
                                 let should_update = c.get(&symbol).is_none_or(|existing| {
+                                    // Prefer Chainlink but allow Binance to overwrite
+                                    // stale Chainlink data (>30s old)
                                     existing.source != "chainlink"
+                                        || (timestamp - existing.timestamp)
+                                            > chrono::Duration::seconds(30)
                                 });
                                 if should_update {
                                     c.insert(

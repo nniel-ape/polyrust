@@ -33,11 +33,21 @@ struct PaperOrder {
     created_at: DateTime<Utc>,
 }
 
+/// Tracked position metadata for the paper backend.
+#[derive(Debug, Clone)]
+struct PaperPosition {
+    id: Uuid,
+    token_id: TokenId,
+    size: Decimal,
+    entry_price: Decimal,
+    entry_time: DateTime<Utc>,
+}
+
 /// Internal state for the paper trading backend.
 struct PaperState {
     usdc_balance: Decimal,
-    /// token_id -> share count (net position in shares)
-    positions: HashMap<TokenId, Decimal>,
+    /// token_id -> tracked position with metadata
+    positions: HashMap<TokenId, PaperPosition>,
     open_orders: HashMap<OrderId, PaperOrder>,
 }
 
@@ -120,8 +130,20 @@ impl PaperBackend {
                         if price_improvement > Decimal::ZERO {
                             state.usdc_balance += price_improvement * fill_size;
                         }
-                        let entry = state.positions.entry(order.token_id.clone()).or_insert(Decimal::ZERO);
-                        *entry += fill_size;
+                        let pos = state.positions.entry(order.token_id.clone())
+                            .or_insert_with(|| PaperPosition {
+                                id: Uuid::new_v4(),
+                                token_id: order.token_id.clone(),
+                                size: Decimal::ZERO,
+                                entry_price: fill_price,
+                                entry_time: Utc::now(),
+                            });
+                        // Weighted average entry price
+                        let total_cost = pos.entry_price * pos.size + fill_price * fill_size;
+                        pos.size += fill_size;
+                        if pos.size > Decimal::ZERO {
+                            pos.entry_price = total_cost / pos.size;
+                        }
                     }
                     OrderSide::Sell => {
                         // Position was already deducted when order was placed
@@ -256,11 +278,23 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
                 match self.fill_mode {
                     FillMode::Immediate => {
                         // Fill instantly: add shares to position
-                        let entry = state
+                        let pos = state
                             .positions
                             .entry(order.token_id.clone())
-                            .or_insert(Decimal::ZERO);
-                        *entry += order.size;
+                            .or_insert_with(|| PaperPosition {
+                                id: Uuid::new_v4(),
+                                token_id: order.token_id.clone(),
+                                size: Decimal::ZERO,
+                                entry_price: order.price,
+                                entry_time: Utc::now(),
+                            });
+                        // Weighted average entry price
+                        let total_cost =
+                            pos.entry_price * pos.size + order.price * order.size;
+                        pos.size += order.size;
+                        if pos.size > Decimal::ZERO {
+                            pos.entry_price = total_cost / pos.size;
+                        }
 
                         info!(
                             order_id = %order_id,
@@ -294,34 +328,31 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
                 }
             }
             OrderSide::Sell => {
-                let current_position = state
+                let current_size = state
                     .positions
                     .get(&order.token_id)
-                    .copied()
+                    .map(|p| p.size)
                     .unwrap_or(Decimal::ZERO);
 
-                if current_position < order.size {
+                if current_size < order.size {
                     return Ok(OrderResult {
                         success: false,
                         order_id: None,
                         status: None,
                         message: format!(
                             "Insufficient position: need {} shares, have {}",
-                            order.size, current_position
+                            order.size, current_size
                         ),
                     });
                 }
 
                 // Deduct position immediately (locked for order)
-                let entry = state
-                    .positions
-                    .entry(order.token_id.clone())
-                    .or_insert(Decimal::ZERO);
-                *entry -= order.size;
-
-                // Clean up zero positions
-                if *entry == Decimal::ZERO {
-                    state.positions.remove(&order.token_id);
+                if let Some(pos) = state.positions.get_mut(&order.token_id) {
+                    pos.size -= order.size;
+                    // Clean up zero positions
+                    if pos.size == Decimal::ZERO {
+                        state.positions.remove(&order.token_id);
+                    }
                 }
 
                 match self.fill_mode {
@@ -389,11 +420,17 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
             }
             OrderSide::Sell => {
                 // Restore locked shares for unfilled portion
-                let entry = state
+                let pos = state
                     .positions
                     .entry(order.token_id.clone())
-                    .or_insert(Decimal::ZERO);
-                *entry += unfilled;
+                    .or_insert_with(|| PaperPosition {
+                        id: Uuid::new_v4(),
+                        token_id: order.token_id.clone(),
+                        size: Decimal::ZERO,
+                        entry_price: order.price,
+                        entry_time: Utc::now(),
+                    });
+                pos.size += unfilled;
             }
         }
 
@@ -414,11 +451,17 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
                     state.usdc_balance += order.price * unfilled;
                 }
                 OrderSide::Sell => {
-                    let entry = state
+                    let pos = state
                         .positions
                         .entry(order.token_id.clone())
-                        .or_insert(Decimal::ZERO);
-                    *entry += unfilled;
+                        .or_insert_with(|| PaperPosition {
+                            id: Uuid::new_v4(),
+                            token_id: order.token_id.clone(),
+                            size: Decimal::ZERO,
+                            entry_price: order.price,
+                            entry_time: Utc::now(),
+                        });
+                    pos.size += unfilled;
                 }
             }
         }
@@ -450,17 +493,17 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
         let state = self.state.read().await;
         let positions = state
             .positions
-            .iter()
-            .filter(|(_, size)| **size > Decimal::ZERO)
-            .map(|(token_id, &size)| Position {
-                id: Uuid::new_v4(),
+            .values()
+            .filter(|pos| pos.size > Decimal::ZERO)
+            .map(|pos| Position {
+                id: pos.id,
                 market_id: String::new(),
-                token_id: token_id.clone(),
+                token_id: pos.token_id.clone(),
                 side: OutcomeSide::Yes,
-                entry_price: Decimal::ZERO,
-                size,
-                current_price: Decimal::ZERO,
-                entry_time: Utc::now(),
+                entry_price: pos.entry_price,
+                size: pos.size,
+                current_price: Decimal::ZERO, // Updated by engine from market data
+                entry_time: pos.entry_time,
                 strategy_name: "paper".to_string(),
             })
             .collect();
@@ -665,7 +708,13 @@ mod tests {
         // Buy immediately doesn't work in orderbook mode, so set up state directly
         {
             let mut state = ob_backend.state.write().await;
-            state.positions.insert("token1".to_string(), dec!(20));
+            state.positions.insert("token1".to_string(), PaperPosition {
+                id: Uuid::new_v4(),
+                token_id: "token1".to_string(),
+                size: dec!(20),
+                entry_price: dec!(0.40),
+                entry_time: Utc::now(),
+            });
         }
 
         // Place sell order at 0.50
@@ -749,7 +798,13 @@ mod tests {
         // Set up position manually
         {
             let mut state = backend.state.write().await;
-            state.positions.insert("token1".to_string(), dec!(20));
+            state.positions.insert("token1".to_string(), PaperPosition {
+                id: Uuid::new_v4(),
+                token_id: "token1".to_string(),
+                size: dec!(20),
+                entry_price: dec!(0.50),
+                entry_time: Utc::now(),
+            });
         }
 
         // Place sell order for 10 shares
