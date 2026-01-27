@@ -3435,8 +3435,11 @@ name = "polyrust-execution"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
+ "polymarket-client-sdk",
  "polyrust-core",
  "rust_decimal",
+ "rust_decimal_macros",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

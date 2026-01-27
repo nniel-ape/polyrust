@@ -174,24 +174,24 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 
 ### Task 8: Implement live execution backend (rs-clob-client)
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 8](./polyrust-framework-implementation.md#task-8-implement-live-execution-backend) — LiveBackend struct, SDK auth wiring, order mapping, tick size rounding, Python reference (bot.py, client.py)
-- [ ] Add dependencies to `crates/polyrust-execution/Cargo.toml`: polyrust-core, polymarket-client-sdk (workspace), tokio, tracing, thiserror, async-trait
-- [ ] Create `crates/polyrust-execution/src/live.rs` — `LiveBackend` struct wrapping authenticated rs-clob-client Client
-- [ ] Implement `LiveBackend::new(config: &Config)` — create signer from private_key, build Client with authentication_builder, authenticate (support EOA and GnosisSafe signature types based on config)
-- [ ] Implement `ExecutionBackend::place_order()` — build limit_order or market_order via client builder, sign with signer, post_order, map response to OrderResult
-- [ ] Implement `ExecutionBackend::cancel_order()` — delegate to client cancel
-- [ ] Implement `ExecutionBackend::cancel_all_orders()` — delegate to client cancel_all
-- [ ] Implement `ExecutionBackend::get_open_orders()` — query client, map SDK Order types to domain Order types
-- [ ] Implement `ExecutionBackend::get_positions()` — use data API feature, map to domain Position types
-- [ ] Implement `ExecutionBackend::get_balance()` — query USDC balance via SDK
-- [ ] Handle tick size rounding per market (reference: Python `src/signer.py` ROUNDING_CONFIG — 0.01 tick = 2 decimal price, 2 decimal size, 4 decimal amount)
-- [ ] Update `crates/polyrust-execution/src/lib.rs` with module declaration and public exports
-- [ ] Write tests:
+- [x] Add dependencies to `crates/polyrust-execution/Cargo.toml`: polyrust-core, polymarket-client-sdk (workspace), tokio, tracing, thiserror, async-trait
+- [x] Create `crates/polyrust-execution/src/live.rs` — `LiveBackend` struct wrapping authenticated rs-clob-client Client
+- [x] Implement `LiveBackend::new(config: &Config)` — create signer from private_key, build Client with authentication_builder, authenticate (support EOA and GnosisSafe signature types based on config)
+- [x] Implement `ExecutionBackend::place_order()` — build limit_order or market_order via client builder, sign with signer, post_order, map response to OrderResult
+- [x] Implement `ExecutionBackend::cancel_order()` — delegate to client cancel
+- [x] Implement `ExecutionBackend::cancel_all_orders()` — delegate to client cancel_all
+- [x] Implement `ExecutionBackend::get_open_orders()` — query client, map SDK Order types to domain Order types
+- [x] Implement `ExecutionBackend::get_positions()` — use data API feature, map to domain Position types
+- [x] Implement `ExecutionBackend::get_balance()` — query USDC balance via SDK
+- [x] Handle tick size rounding per market (reference: Python `src/signer.py` ROUNDING_CONFIG — 0.01 tick = 2 decimal price, 2 decimal size, 4 decimal amount)
+- [x] Update `crates/polyrust-execution/src/lib.rs` with module declaration and public exports
+- [x] Write tests:
   - Test: OrderRequest → SDK order type mapping is correct (price, size, side, order_type)
   - Test: SDK response → OrderResult mapping handles success and failure cases
   - Test: tick size rounding applied correctly for 0.01, 0.001 tick sizes
   - Live tests marked `#[ignore]`
-- [ ] Verify `cargo test --workspace` passes
-- [ ] Mark completed
+- [x] Verify `cargo test --workspace` passes
+- [x] Mark completed
 
 ### Task 9: Implement paper trading execution backend
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 9](./polyrust-framework-implementation.md#task-9-implement-paper-execution-backend) — PaperBackend/PaperState structs, FillMode enum, fill logic, Python reference (paper/engine.py)

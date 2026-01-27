@@ -5,9 +5,15 @@ edition = "2024"
 
 [dependencies]
 polyrust-core = { path = "../polyrust-core" }
+polymarket-client-sdk = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 rust_decimal = { workspace = true }
+chrono = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+rust_decimal_macros = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
