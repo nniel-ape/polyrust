@@ -109,13 +109,13 @@ Add custom per-strategy dashboard views so each strategy can render its own HTMX
 - [x] Run `cargo test --workspace` — must pass before next task
 
 ### Task 7: Verify acceptance criteria
-- [ ] Verify Strategy trait backward-compatible (strategies without views compile unchanged)
-- [ ] Verify crypto arb view shows reference prices, predictions, and active markets
-- [ ] Verify new `/strategy/crypto-arb` route returns 200 with correct content
-- [ ] Verify 404 returned for `/strategy/nonexistent`
-- [ ] Verify nav bar shows "crypto-arb" link when strategy is registered
-- [ ] Run full test suite: `cargo test --workspace`
-- [ ] Run linter: `cargo clippy --workspace -- -D warnings`
+- [x] Verify Strategy trait backward-compatible (strategies without views compile unchanged)
+- [x] Verify crypto arb view shows reference prices, predictions, and active markets
+- [x] Verify new `/strategy/crypto-arb` route returns 200 with correct content
+- [x] Verify 404 returned for `/strategy/nonexistent`
+- [x] Verify nav bar shows "crypto-arb" link when strategy is registered
+- [x] Run full test suite: `cargo test --workspace`
+- [x] Run linter: `cargo clippy --workspace -- -D warnings`
 
 ### Task 8: [Final] Update documentation
 - [ ] Update CLAUDE.md Architecture section to mention strategy dashboard views
