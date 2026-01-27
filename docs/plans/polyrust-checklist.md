@@ -264,44 +264,44 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 
 ### Task 11: Port crypto arbitrage strategy from Python
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 11](./polyrust-framework-implementation.md#task-11-port-crypto-arbitrage-strategy) — MarketWithReference, ArbitrageOpportunity structs, confidence model formulas, Strategy trait impl, 4-step porting order, Python reference (crypto_arbitrage.py key methods at lines ~600, ~700, ~1200, ~1400)
-- [ ] Add dependencies to `crates/polyrust-strategies/Cargo.toml`: polyrust-core, serde, chrono, rust_decimal, tracing, async-trait
-- [ ] Create `crates/polyrust-strategies/src/crypto_arb.rs` (or submodule `crypto_arb/` if > 500 lines)
-- [ ] Define `ArbitrageConfig` struct: coins (Vec<String>, default ["BTC","ETH","SOL","XRP"]), position_size (Decimal, 5.0), max_positions (usize, 5), min_profit_margin (Decimal, 0.03), late_window_margin (Decimal, 0.02), stop_loss_reversal_pct (Decimal, 0.005), stop_loss_min_drop (Decimal, 0.05), scan_interval_secs (u64, 30), use_chainlink (bool, true)
-- [ ] Define `MarketWithReference` struct: market (MarketInfo), reference_price (Decimal), reference_approximate (bool), discovery_time (DateTime<Utc>), coin (String)
-- [ ] Implement `MarketWithReference::predict_winner(current_price)` — if current_price > reference_price → Up, else → Down (reference: crypto_arbitrage.py)
-- [ ] Implement `MarketWithReference::get_confidence(current_price, market_price, time_remaining_secs)` — multi-signal confidence 0-1:
+- [x] Add dependencies to `crates/polyrust-strategies/Cargo.toml`: polyrust-core, serde, chrono, rust_decimal, tracing, async-trait
+- [x] Create `crates/polyrust-strategies/src/crypto_arb.rs` (or submodule `crypto_arb/` if > 500 lines)
+- [x] Define `ArbitrageConfig` struct: coins (Vec<String>, default ["BTC","ETH","SOL","XRP"]), position_size (Decimal, 5.0), max_positions (usize, 5), min_profit_margin (Decimal, 0.03), late_window_margin (Decimal, 0.02), stop_loss_reversal_pct (Decimal, 0.005), stop_loss_min_drop (Decimal, 0.05), scan_interval_secs (u64, 30), use_chainlink (bool, true)
+- [x] Define `MarketWithReference` struct: market (MarketInfo), reference_price (Decimal), reference_approximate (bool), discovery_time (DateTime<Utc>), coin (String)
+- [x] Implement `MarketWithReference::predict_winner(current_price)` — if current_price > reference_price → Up, else → Down (reference: crypto_arbitrage.py)
+- [x] Implement `MarketWithReference::get_confidence(current_price, market_price, time_remaining_secs)` — multi-signal confidence 0-1:
   - Tail-end (< 120s + market_price >= 0.90): return 1.0
   - Late window (120-300s): base = distance_pct * 66, market_boost = 1.0 + (market_price - 0.5) * 0.5, return min(1.0, base * market_boost)
   - Early window (> 300s): return min(1.0, distance_pct * 50)
-- [ ] Define `ArbitrageMode` enum: TailEnd, TwoSided, Confirmed
-- [ ] Define `ArbitrageOpportunity` struct: mode, market_id, outcome_to_buy (OutcomeSide), token_id, buy_price (Decimal), confidence (Decimal), profit_margin (Decimal)
-- [ ] Define `ArbitragePosition` struct: market_id, token_id, side, entry_price, size, reference_price, coin, order_id (Option), entry_time
-- [ ] Define `CryptoArbitrageStrategy` struct: config (ArbitrageConfig), active_markets (HashMap<MarketId, MarketWithReference>), price_history (HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>), positions (HashMap<MarketId, ArbitragePosition>), last_scan (Option<Instant>)
-- [ ] Implement `CryptoArbitrageStrategy::new(config: ArbitrageConfig)`
-- [ ] Implement `Strategy` trait for CryptoArbitrageStrategy:
+- [x] Define `ArbitrageMode` enum: TailEnd, TwoSided, Confirmed
+- [x] Define `ArbitrageOpportunity` struct: mode, market_id, outcome_to_buy (OutcomeSide), token_id, buy_price (Decimal), confidence (Decimal), profit_margin (Decimal)
+- [x] Define `ArbitragePosition` struct: market_id, token_id, side, entry_price, size, reference_price, coin, order_id (Option), entry_time
+- [x] Define `CryptoArbitrageStrategy` struct: config (ArbitrageConfig), active_markets (HashMap<MarketId, MarketWithReference>), price_history (HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>), positions (HashMap<MarketId, ArbitragePosition>), last_scan (Option<Instant>)
+- [x] Implement `CryptoArbitrageStrategy::new(config: ArbitrageConfig)`
+- [x] Implement `Strategy` trait for CryptoArbitrageStrategy:
   - `name()` → "crypto-arbitrage"
   - `description()` → "Exploits mispricing in 15-min Up/Down crypto markets"
   - `on_start()` — emit SubscribeMarket actions for initial markets (use Gamma API via rs-clob-client)
   - `on_event()` — match on MarketDataEvent variants: ExternalPrice → on_crypto_price(), OrderbookUpdate → on_orderbook_update(), MarketDiscovered → on_market_discovered(), MarketExpired → on_market_expired()
   - `on_stop()` — cancel all open orders, log final PnL
-- [ ] Implement `on_crypto_price(symbol, price, ctx)`:
+- [x] Implement `on_crypto_price(symbol, price, ctx)`:
   - Record price in price_history VecDeque (keep last 12 entries = 60s at 5s intervals)
   - For each active market matching this coin: call evaluate_opportunity()
   - If opportunity found and position_count < max_positions: emit PlaceOrder action
-- [ ] Implement `evaluate_opportunity(market, current_price, ctx)` — check 3 modes in priority order:
+- [x] Implement `evaluate_opportunity(market, current_price, ctx)` — check 3 modes in priority order:
   1. TailEnd: time_remaining < 120s AND market best_ask >= 0.90 → buy predicted winner
   2. TwoSided: up_ask + down_ask < 0.98 → buy both (guaranteed profit)
   3. Confirmed: confidence >= threshold AND profit_margin >= min → buy predicted winner
   - Return Option<ArbitrageOpportunity>
-- [ ] Implement `on_orderbook_update(snapshot, ctx)`:
+- [x] Implement `on_orderbook_update(snapshot, ctx)`:
   - Update market prices in context
   - Check stop-losses on open positions: trigger if crypto price reversed by stop_loss_reversal_pct (0.5%) AND market price dropped by stop_loss_min_drop (5¢) AND time_remaining > 60s
   - If stop-loss triggered: emit PlaceOrder SELL action
-- [ ] Implement `on_market_discovered(market, ctx)` — lookup current crypto price, create MarketWithReference with reference_price, add to active_markets
-- [ ] Implement `on_market_expired(market_id, ctx)` — remove from active_markets, clean up positions (attempt redemption via EmitSignal or Log)
-- [ ] Implement `compute_volatility(prices: &VecDeque)` — standard deviation of last N price points, return as Decimal
-- [ ] Update `crates/polyrust-strategies/src/lib.rs` with module declaration and public export of CryptoArbitrageStrategy
-- [ ] Write tests:
+- [x] Implement `on_market_discovered(market, ctx)` — lookup current crypto price, create MarketWithReference with reference_price, add to active_markets
+- [x] Implement `on_market_expired(market_id, ctx)` — remove from active_markets, clean up positions (attempt redemption via EmitSignal or Log)
+- [x] Implement `compute_volatility(prices: &VecDeque)` — standard deviation of last N price points, return as Decimal
+- [x] Update `crates/polyrust-strategies/src/lib.rs` with module declaration and public export of CryptoArbitrageStrategy
+- [x] Write tests:
   - Test: predict_winner — BTC up → OutcomeSide::Up, BTC down → OutcomeSide::Down
   - Test: get_confidence tail-end — time < 120s, market >= 0.90 → confidence 1.0
   - Test: get_confidence late window — time 200s, distance 2% → expected confidence value
@@ -316,8 +316,8 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
   - Test: on_market_discovered creates MarketWithReference with correct reference_price
   - Test: on_market_expired removes market from active_markets
   - Test: volatility calculation returns correct std dev for known price series
-- [ ] Verify `cargo test --workspace` passes
-- [ ] Mark completed
+- [x] Verify `cargo test --workspace` passes
+- [x] Mark completed
 
 ---
 
