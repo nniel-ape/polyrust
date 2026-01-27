@@ -75,11 +75,15 @@ pub struct MarketWithReference {
 impl MarketWithReference {
     /// Predict winner based on current crypto price vs reference.
     /// If the current price exceeds reference, "Up" wins; otherwise "Down".
-    pub fn predict_winner(&self, current_price: Decimal) -> OutcomeSide {
-        if current_price >= self.reference_price {
-            OutcomeSide::Up
+    /// Predict the winning outcome based on current price vs reference.
+    /// Returns `None` when price equals reference (no directional signal).
+    pub fn predict_winner(&self, current_price: Decimal) -> Option<OutcomeSide> {
+        if current_price > self.reference_price {
+            Some(OutcomeSide::Up)
+        } else if current_price < self.reference_price {
+            Some(OutcomeSide::Down)
         } else {
-            OutcomeSide::Down
+            None
         }
     }
 
@@ -231,7 +235,9 @@ impl CryptoArbitrageStrategy {
             let opps = self.evaluate_opportunity(&market, price, ctx).await?;
             let total_positions: usize = self.positions.values().map(|v| v.len()).sum();
             let total_pending = self.pending_orders.len();
-            if !opps.is_empty() && (total_positions + total_pending) < self.config.max_positions {
+            if !opps.is_empty()
+                && (total_positions + total_pending + opps.len()) <= self.config.max_positions
+            {
                 // For TwoSided mode, compute equal share count across both outcomes
                 // so total cost = position_size and each side gets N shares.
                 let two_sided_size = if opps.len() == 2
@@ -328,8 +334,9 @@ impl CryptoArbitrageStrategy {
             .and_then(|ob| ob.best_ask());
 
         // 1. Tail-End mode: < 120s remaining + predicted winner ask >= 0.90
-        if time_remaining < 120 {
-            let predicted = market.predict_winner(current_price);
+        if time_remaining < 120
+            && let Some(predicted) = market.predict_winner(current_price)
+        {
             let (token_id, ask) = match predicted {
                 OutcomeSide::Up | OutcomeSide::Yes => {
                     (&market.market.token_ids.outcome_a, up_ask)
@@ -385,36 +392,37 @@ impl CryptoArbitrageStrategy {
         }
 
         // 3. Confirmed mode: confidence >= threshold + sufficient margin
-        let predicted = market.predict_winner(current_price);
-        let (token_id, ask) = match predicted {
-            OutcomeSide::Up | OutcomeSide::Yes => {
-                (&market.market.token_ids.outcome_a, up_ask)
-            }
-            OutcomeSide::Down | OutcomeSide::No => {
-                (&market.market.token_ids.outcome_b, down_ask)
-            }
-        };
-
-        if let Some(ask_price) = ask {
-            let confidence =
-                market.get_confidence(current_price, ask_price, time_remaining);
-            let profit_margin = Decimal::ONE - ask_price;
-            let min_margin = if time_remaining < 300 {
-                self.config.late_window_margin
-            } else {
-                self.config.min_profit_margin
+        if let Some(predicted) = market.predict_winner(current_price) {
+            let (token_id, ask) = match predicted {
+                OutcomeSide::Up | OutcomeSide::Yes => {
+                    (&market.market.token_ids.outcome_a, up_ask)
+                }
+                OutcomeSide::Down | OutcomeSide::No => {
+                    (&market.market.token_ids.outcome_b, down_ask)
+                }
             };
 
-            if confidence >= Decimal::new(50, 2) && profit_margin >= min_margin {
-                return Ok(vec![ArbitrageOpportunity {
-                    mode: ArbitrageMode::Confirmed,
-                    market_id: market.market.id.clone(),
-                    outcome_to_buy: predicted,
-                    token_id: token_id.clone(),
-                    buy_price: ask_price,
-                    confidence,
-                    profit_margin,
-                }]);
+            if let Some(ask_price) = ask {
+                let confidence =
+                    market.get_confidence(current_price, ask_price, time_remaining);
+                let profit_margin = Decimal::ONE - ask_price;
+                let min_margin = if time_remaining < 300 {
+                    self.config.late_window_margin
+                } else {
+                    self.config.min_profit_margin
+                };
+
+                if confidence >= Decimal::new(50, 2) && profit_margin >= min_margin {
+                    return Ok(vec![ArbitrageOpportunity {
+                        mode: ArbitrageMode::Confirmed,
+                        market_id: market.market.id.clone(),
+                        outcome_to_buy: predicted,
+                        token_id: token_id.clone(),
+                        buy_price: ask_price,
+                        confidence,
+                        profit_margin,
+                    }]);
+                }
             }
         }
 
@@ -683,10 +691,18 @@ impl CryptoArbitrageStrategy {
             let mut found = false;
             for (idx, _) in upper.match_indices(coin.as_str()) {
                 let before_ok = idx == 0
-                    || !upper.as_bytes()[idx - 1].is_ascii_alphanumeric();
+                    || !upper[..idx]
+                        .chars()
+                        .next_back()
+                        .unwrap()
+                        .is_ascii_alphanumeric();
                 let after_idx = idx + coin.len();
                 let after_ok = after_idx >= upper.len()
-                    || !upper.as_bytes()[after_idx].is_ascii_alphanumeric();
+                    || !upper[after_idx..]
+                        .chars()
+                        .next()
+                        .unwrap()
+                        .is_ascii_alphanumeric();
                 if before_ok && after_ok {
                     found = true;
                     break;
@@ -840,14 +856,21 @@ mod tests {
     fn predict_winner_btc_up() {
         let mwr = make_mwr(dec!(50000), 600);
         // Current price above reference => Up
-        assert_eq!(mwr.predict_winner(dec!(50100)), OutcomeSide::Up);
+        assert_eq!(mwr.predict_winner(dec!(50100)), Some(OutcomeSide::Up));
     }
 
     #[test]
     fn predict_winner_btc_down() {
         let mwr = make_mwr(dec!(50000), 600);
         // Current price below reference => Down
-        assert_eq!(mwr.predict_winner(dec!(49900)), OutcomeSide::Down);
+        assert_eq!(mwr.predict_winner(dec!(49900)), Some(OutcomeSide::Down));
+    }
+
+    #[test]
+    fn predict_winner_at_reference_returns_none() {
+        let mwr = make_mwr(dec!(50000), 600);
+        // Price equals reference => no directional signal
+        assert_eq!(mwr.predict_winner(dec!(50000)), None);
     }
 
     // --- get_confidence tests ---

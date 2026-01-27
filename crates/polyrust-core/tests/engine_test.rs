@@ -191,7 +191,7 @@ fn config_defaults_are_correct() {
     assert_eq!(config.dashboard.port, 3000);
     assert_eq!(config.dashboard.host, "127.0.0.1");
     assert_eq!(config.store.db_path, "polyrust.db");
-    assert!(!config.paper.enabled);
+    assert!(config.paper.enabled);
     assert_eq!(config.paper.initial_balance, Decimal::new(10_000, 0));
     assert!(config.polymarket.private_key.is_none());
 }
@@ -256,5 +256,5 @@ fn config_from_minimal_toml() {
     let config = Config::from_file(tmp.path()).unwrap();
     assert_eq!(config.engine.event_bus_capacity, 4096);
     assert!(config.dashboard.enabled);
-    assert!(!config.paper.enabled);
+    assert!(config.paper.enabled);
 }

@@ -120,7 +120,7 @@ pub struct PaperConfig {
 impl Default for PaperConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             initial_balance: default_initial_balance(),
         }
     }
