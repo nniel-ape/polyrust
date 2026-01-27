@@ -92,29 +92,29 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 
 ### Task 5: Implement engine core with builder pattern and lifecycle
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 5](./polyrust-framework-implementation.md#task-5-implement-engine-core) — full Config struct with TOML/env parsing, EngineBuilder, Engine::run() with strategy dispatch loop, execute_action() helper
-- [ ] Create `crates/polyrust-core/src/config.rs` — `Config` struct with sections: `EngineConfig` (event_bus_capacity: 4096, health_check_interval_secs: 30), `PolymarketConfig` (private_key, safe_address, builder API creds — all Option), `DashboardConfig` (enabled: true, port: 3000, host: "127.0.0.1"), `StoreConfig` (db_path: "polyrust.db"), `PaperConfig` (enabled: false, initial_balance: 10000)
-- [ ] Implement `Config::from_file(path)` — reads TOML, returns Result
-- [ ] Implement `Config::with_env_overrides()` — overrides from POLY_PRIVATE_KEY, POLY_SAFE_ADDRESS, POLY_BUILDER_API_KEY, POLY_BUILDER_API_SECRET, POLY_BUILDER_API_PASSPHRASE, POLY_DASHBOARD_PORT, POLY_DB_PATH, POLY_PAPER_TRADING
-- [ ] Add `toml = "0.8"` to workspace dependencies and polyrust-core
-- [ ] Create `crates/polyrust-core/src/engine.rs` — `EngineBuilder` struct with `new()`, `config(Config)`, `strategy(impl Strategy + 'static)`, `execution(impl ExecutionBackend + 'static)`, `async build() -> Result<Engine>`
-- [ ] Implement `EngineBuilder::build()` — validates execution backend present, creates EventBus with config capacity, creates StrategyContext, queries initial balance from backend
-- [ ] Implement `Engine` struct with fields: config, event_bus, strategies (Vec<Arc<RwLock<Box<dyn Strategy>>>>), execution (Arc<dyn ExecutionBackend>), context (StrategyContext), start_time
-- [ ] Implement `Engine::builder()`, `event_bus()`, `context()`, `config()` accessors
-- [ ] Implement `Engine::run()`:
+- [x] Create `crates/polyrust-core/src/config.rs` — `Config` struct with sections: `EngineConfig` (event_bus_capacity: 4096, health_check_interval_secs: 30), `PolymarketConfig` (private_key, safe_address, builder API creds — all Option), `DashboardConfig` (enabled: true, port: 3000, host: "127.0.0.1"), `StoreConfig` (db_path: "polyrust.db"), `PaperConfig` (enabled: false, initial_balance: 10000)
+- [x] Implement `Config::from_file(path)` — reads TOML, returns Result
+- [x] Implement `Config::with_env_overrides()` — overrides from POLY_PRIVATE_KEY, POLY_SAFE_ADDRESS, POLY_BUILDER_API_KEY, POLY_BUILDER_API_SECRET, POLY_BUILDER_API_PASSPHRASE, POLY_DASHBOARD_PORT, POLY_DB_PATH, POLY_PAPER_TRADING
+- [x] Add `toml = "0.8"` to workspace dependencies and polyrust-core
+- [x] Create `crates/polyrust-core/src/engine.rs` — `EngineBuilder` struct with `new()`, `config(Config)`, `strategy(impl Strategy + 'static)`, `execution(impl ExecutionBackend + 'static)`, `async build() -> Result<Engine>`
+- [x] Implement `EngineBuilder::build()` — validates execution backend present, creates EventBus with config capacity, creates StrategyContext, queries initial balance from backend
+- [x] Implement `Engine` struct with fields: config, event_bus, strategies (Vec<Arc<RwLock<Box<dyn Strategy>>>>), execution (Arc<dyn ExecutionBackend>), context (StrategyContext), start_time
+- [x] Implement `Engine::builder()`, `event_bus()`, `context()`, `config()` accessors
+- [x] Implement `Engine::run()`:
   1. Set start_time, log engine starting
   2. Call `on_start()` on each strategy, publish StrategyStarted events
   3. Publish EngineStarted event
   4. Spawn tokio task per strategy: loop recv from EventBus, call `on_event()`, execute returned Actions via `execute_action()` helper, break on EngineStopping
   5. Wait for `tokio::signal::ctrl_c()`
   6. Publish EngineStopping, call `on_stop()` per strategy, await task handles
-- [ ] Implement `execute_action()` helper — match on Action variants: PlaceOrder → backend.place_order() + publish Placed event, CancelOrder → backend.cancel_order() + publish Cancelled, CancelAllOrders → backend.cancel_all_orders(), Log → tracing macro, EmitSignal → publish Signal event, Subscribe/Unsubscribe → warn not yet implemented
-- [ ] Add `config` and `engine` modules to `lib.rs`, add `Config` and `Engine` to prelude
-- [ ] Write tests:
+- [x] Implement `execute_action()` helper — match on Action variants: PlaceOrder → backend.place_order() + publish Placed event, CancelOrder → backend.cancel_order() + publish Cancelled, CancelAllOrders → backend.cancel_all_orders(), Log → tracing macro, EmitSignal → publish Signal event, Subscribe/Unsubscribe → warn not yet implemented
+- [x] Add `config` and `engine` modules to `lib.rs`, add `Config` and `Engine` to prelude
+- [x] Write tests:
   - Test: EngineBuilder without execution backend returns PolyError::Config
   - Test: Config::from_file with valid TOML string (write temp file) parses correctly
   - Test: Config env overrides apply (set env vars in test, verify config fields)
-- [ ] Verify `cargo test --workspace` passes
-- [ ] Mark completed
+- [x] Verify `cargo test --workspace` passes
+- [x] Mark completed
 
 ---
 

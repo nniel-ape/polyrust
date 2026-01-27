@@ -3,3 +3,6 @@ target/
 *.db-journal
 .env
 config/local.toml
+
+# ralphex progress logs
+progress*.txt
