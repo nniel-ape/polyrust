@@ -17,6 +17,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 ## Milestone 1: Workspace Scaffolding & Core Types
 
 ### Task 1: Create Cargo workspace with 6 crates
+> **Detailed reference:** [polyrust-framework-implementation.md → Task 1](./polyrust-framework-implementation.md#task-1-create-cargo-workspace) — full Cargo.toml contents, crate Cargo.toml template, .gitignore
 - [ ] Create workspace `Cargo.toml` with `resolver = "2"`, all 6 members, and `[workspace.dependencies]` for shared versions (tokio 1, serde 1, tracing 0.1, thiserror 2, async-trait 0.1, chrono 0.4, rust_decimal 1, uuid 1, tokio-stream 0.1, polymarket-client-sdk 0.4 with features: clob, ws, rtds, data, gamma, tracing, heartbeats, ctf)
 - [ ] Create `crates/polyrust-core/Cargo.toml` + `src/lib.rs` — engine, event bus, traits, shared state
 - [ ] Create `crates/polyrust-market/Cargo.toml` + `src/lib.rs` — market data feeds
@@ -30,6 +31,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 - [ ] Mark completed
 
 ### Task 2: Define core domain types in polyrust-core
+> **Detailed reference:** [polyrust-framework-implementation.md → Task 2](./polyrust-framework-implementation.md#task-2-define-core-domain-types) — full type definitions, serde attributes, method implementations, test code
 - [ ] Create `crates/polyrust-core/src/types.rs` with type aliases: `MarketId = String`, `TokenId = String`, `OrderId = String`
 - [ ] Add enum `OutcomeSide { Up, Down, Yes, No }` with serde rename_all lowercase, derive Hash
 - [ ] Add enum `OrderSide { Buy, Sell }` with serde rename_all UPPERCASE
@@ -51,6 +53,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 - [ ] Mark completed
 
 ### Task 3: Define core traits — Strategy, ExecutionBackend, events, actions, context
+> **Detailed reference:** [polyrust-framework-implementation.md → Task 3](./polyrust-framework-implementation.md#task-3-define-core-traits-strategy-executionbackend-marketdatafeed) — full Event enum, Action enum, StrategyContext, Strategy trait, ExecutionBackend trait with code
 - [ ] Create `crates/polyrust-core/src/events.rs` — `Event` enum with variants: `MarketData(MarketDataEvent)`, `OrderUpdate(OrderEvent)`, `PositionChange(PositionEvent)`, `Signal(SignalEvent)`, `System(SystemEvent)` plus `topic()` method returning `&'static str`
 - [ ] Define `MarketDataEvent` — variants: `OrderbookUpdate(OrderbookSnapshot)`, `PriceChange { token_id, price, side, best_bid, best_ask }`, `Trade { token_id, price, size, timestamp }`, `ExternalPrice { symbol, price, source, timestamp }`, `MarketDiscovered(MarketInfo)`, `MarketExpired(MarketId)`
 - [ ] Define `OrderEvent` — variants: `Placed(OrderResult)`, `Filled { order_id, token_id, price, size }`, `PartiallyFilled { order_id, filled_size, remaining_size }`, `Cancelled(OrderId)`, `Rejected { order_id: Option, reason }`
@@ -70,6 +73,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 ## Milestone 2: Event Bus & Engine
 
 ### Task 4: Implement typed event bus with topic filtering
+> **Detailed reference:** [polyrust-framework-implementation.md → Task 4](./polyrust-framework-implementation.md#task-4-implement-typed-event-bus) — full EventBus and EventSubscriber implementation with broadcast channel, topic filtering, lag handling
 - [ ] Create `crates/polyrust-core/src/event_bus.rs` — `EventBus` struct wrapping `broadcast::Sender<Event>` with const `DEFAULT_CAPACITY = 4096`
 - [ ] Implement `EventBus::new()`, `with_capacity(usize)`, `Default` trait
 - [ ] Implement `publish(Event)` — sends via broadcast, logs topic + receiver count, warns on no subscribers
@@ -87,6 +91,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 - [ ] Mark completed
 
 ### Task 5: Implement engine core with builder pattern and lifecycle
+> **Detailed reference:** [polyrust-framework-implementation.md → Task 5](./polyrust-framework-implementation.md#task-5-implement-engine-core) — full Config struct with TOML/env parsing, EngineBuilder, Engine::run() with strategy dispatch loop, execute_action() helper
 - [ ] Create `crates/polyrust-core/src/config.rs` — `Config` struct with sections: `EngineConfig` (event_bus_capacity: 4096, health_check_interval_secs: 30), `PolymarketConfig` (private_key, safe_address, builder API creds — all Option), `DashboardConfig` (enabled: true, port: 3000, host: "127.0.0.1"), `StoreConfig` (db_path: "polyrust.db"), `PaperConfig` (enabled: false, initial_balance: 10000)
 - [ ] Implement `Config::from_file(path)` — reads TOML, returns Result
 - [ ] Implement `Config::with_env_overrides()` — overrides from POLY_PRIVATE_KEY, POLY_SAFE_ADDRESS, POLY_BUILDER_API_KEY, POLY_BUILDER_API_SECRET, POLY_BUILDER_API_PASSPHRASE, POLY_DASHBOARD_PORT, POLY_DB_PATH, POLY_PAPER_TRADING
@@ -116,6 +121,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 ## Milestone 3: Persistence Layer (Turso)
 
 ### Task 6: Implement Turso persistence layer
+> **Detailed reference:** [polyrust-framework-implementation.md → Task 6](./polyrust-framework-implementation.md#task-6-implement-turso-store) — full Store struct, migration SQL, StoreError, libsql fallback note, CRUD method patterns
 - [ ] Add dependencies to `crates/polyrust-store/Cargo.toml`: polyrust-core, turso (or libsql as fallback), serde, serde_json, chrono, rust_decimal, uuid, tracing, thiserror
 - [ ] Create `crates/polyrust-store/src/error.rs` — `StoreError` enum (Connection, Migration, Query) + `StoreResult<T>` type alias
 - [ ] Create `crates/polyrust-store/src/db.rs` — `Store` struct wrapping turso::Database
@@ -143,6 +149,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 ## Milestone 4: Market Data & Execution Backends
 
 ### Task 7: Implement market data feeds (CLOB orderbook + RTDS prices)
+> **Detailed reference:** [polyrust-framework-implementation.md → Task 7](./polyrust-framework-implementation.md#task-7-implement-market-data-feeds) — MarketDataFeed trait, ClobFeed/PriceFeed implementation notes, OrderbookManager, Python reference files
 - [ ] Add dependencies to `crates/polyrust-market/Cargo.toml`: polyrust-core, polymarket-client-sdk (workspace), tokio, tracing, thiserror, async-trait
 - [ ] Create `crates/polyrust-market/src/feed.rs` — `MarketDataFeed` trait: `async fn start(&mut self, event_bus: EventBus)`, `async fn subscribe_market(&mut self, market: &MarketInfo)`, `async fn unsubscribe_market(&mut self, market_id: &str)`, `async fn stop(&mut self)`
 - [ ] Create `crates/polyrust-market/src/clob_feed.rs` — `ClobFeed` struct implementing MarketDataFeed
@@ -166,6 +173,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 - [ ] Mark completed
 
 ### Task 8: Implement live execution backend (rs-clob-client)
+> **Detailed reference:** [polyrust-framework-implementation.md → Task 8](./polyrust-framework-implementation.md#task-8-implement-live-execution-backend) — LiveBackend struct, SDK auth wiring, order mapping, tick size rounding, Python reference (bot.py, client.py)
 - [ ] Add dependencies to `crates/polyrust-execution/Cargo.toml`: polyrust-core, polymarket-client-sdk (workspace), tokio, tracing, thiserror, async-trait
 - [ ] Create `crates/polyrust-execution/src/live.rs` — `LiveBackend` struct wrapping authenticated rs-clob-client Client
 - [ ] Implement `LiveBackend::new(config: &Config)` — create signer from private_key, build Client with authentication_builder, authenticate (support EOA and GnosisSafe signature types based on config)
@@ -186,6 +194,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 - [ ] Mark completed
 
 ### Task 9: Implement paper trading execution backend
+> **Detailed reference:** [polyrust-framework-implementation.md → Task 9](./polyrust-framework-implementation.md#task-9-implement-paper-execution-backend) — PaperBackend/PaperState structs, FillMode enum, fill logic, Python reference (paper/engine.py)
 - [ ] Create `crates/polyrust-execution/src/paper.rs` — `PaperBackend` struct with `Arc<RwLock<PaperState>>` and `FillMode` enum (Immediate, Orderbook)
 - [ ] Define `PaperState` — `usdc_balance: Decimal`, `positions: HashMap<TokenId, Decimal>` (share count), `open_orders: HashMap<OrderId, PaperOrder>`
 - [ ] Define `PaperOrder` — id (UUID), token_id, side, price, size, filled_size, status, created_at
@@ -220,6 +229,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 ## Milestone 5: Dashboard
 
 ### Task 10: Implement Axum + HTMX monitoring dashboard
+> **Detailed reference:** [polyrust-framework-implementation.md → Task 10](./polyrust-framework-implementation.md#task-10-implement-axum--htmx-monitoring-dashboard) — Dashboard struct, Axum router setup, handler signatures, SSE endpoint, Askama template structure, HTMX attributes
 - [ ] Add dependencies to `crates/polyrust-dashboard/Cargo.toml`: polyrust-core, polyrust-store, axum 0.8, askama 0.13, askama_axum 0.5, tower-http 0.6 (features: fs, cors), tokio, tokio-stream, serde, serde_json, tracing
 - [ ] Create `crates/polyrust-dashboard/src/server.rs` — `Dashboard` struct with StrategyContext, Arc<Store>, EventBus
 - [ ] Implement `Dashboard::new(context, store, event_bus)` and `async fn serve(self, host: &str, port: u16)`
@@ -253,6 +263,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 ## Milestone 6: Reference Strategy (Crypto Arbitrage)
 
 ### Task 11: Port crypto arbitrage strategy from Python
+> **Detailed reference:** [polyrust-framework-implementation.md → Task 11](./polyrust-framework-implementation.md#task-11-port-crypto-arbitrage-strategy) — MarketWithReference, ArbitrageOpportunity structs, confidence model formulas, Strategy trait impl, 4-step porting order, Python reference (crypto_arbitrage.py key methods at lines ~600, ~700, ~1200, ~1400)
 - [ ] Add dependencies to `crates/polyrust-strategies/Cargo.toml`: polyrust-core, serde, chrono, rust_decimal, tracing, async-trait
 - [ ] Create `crates/polyrust-strategies/src/crypto_arb.rs` (or submodule `crypto_arb/` if > 500 lines)
 - [ ] Define `ArbitrageConfig` struct: coins (Vec<String>, default ["BTC","ETH","SOL","XRP"]), position_size (Decimal, 5.0), max_positions (usize, 5), min_profit_margin (Decimal, 0.03), late_window_margin (Decimal, 0.02), stop_loss_reversal_pct (Decimal, 0.005), stop_loss_min_drop (Decimal, 0.05), scan_interval_secs (u64, 30), use_chainlink (bool, true)
@@ -313,6 +324,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 ## Milestone 7: Binary Entry Point & Integration
 
 ### Task 12: Wire binary entry point, config, example strategy
+> **Detailed reference:** [polyrust-framework-implementation.md → Task 12](./polyrust-framework-implementation.md#task-12-wire-everything-together-in-mainrs) — full default.toml contents, complete main.rs code, simple_strategy.rs example code
 - [ ] Create `config/default.toml` with all config sections: [engine] (event_bus_capacity=4096, health_check_interval_secs=30), [polymarket] (comment: set via env vars), [dashboard] (enabled=true, port=3000, host="127.0.0.1"), [store] (db_path="polyrust.db"), [paper] (enabled=true, initial_balance=10000)
 - [ ] Update `src/main.rs`:
   - Initialize tracing with EnvFilter (default: "info,polyrust=debug")
@@ -331,6 +343,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 - [ ] Mark completed
 
 ### Task 13: Add CLAUDE.md developer guide and README
+> **Detailed reference:** [polyrust-framework-implementation.md → Task 13](./polyrust-framework-implementation.md#task-13-add-claudemd-developer-guide) — CLAUDE.md content outline, documentation update table
 - [ ] Create `CLAUDE.md` with sections:
   - Project overview (Polyrust = autonomous Polymarket trading framework in Rust)
   - Build commands: `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace`
@@ -358,6 +371,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 ## Final Validation
 
 ### Task 14: End-to-end validation and cleanup
+> **Detailed reference:** [polyrust-framework-implementation.md → Definition of Done](./polyrust-framework-implementation.md#7-definition-of-done) — full acceptance criteria checklist, testing strategy, coverage expectations
 - [ ] Run `cargo build --workspace` — zero errors
 - [ ] Run `cargo test --workspace` — all tests pass
 - [ ] Run `cargo clippy --workspace -- -D warnings` — zero warnings
