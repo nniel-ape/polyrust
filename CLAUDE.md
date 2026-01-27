@@ -59,6 +59,13 @@ src/main.rs → wires all crates into a single binary
 - `PositionState` — open positions and orders
 - `MarketDataState` — orderbooks, market info, external prices
 - `BalanceState` — available and locked USDC
+- `strategy_views` — registered `DashboardViewProvider` implementations (keyed by strategy name)
+
+### Strategy Dashboard Views
+
+Strategies can expose custom dashboard pages via the `DashboardViewProvider` trait (`crates/polyrust-core/src/dashboard_view.rs`). Each strategy optionally returns a view provider from `dashboard_view()`, which renders an HTML fragment for `/strategy/:name`. The dashboard auto-generates nav links for all registered strategy views.
+
+Real-time updates use SSE: strategies emit `"dashboard-update"` signals, the SSE handler re-renders the view, and HTMX swaps the content in the browser. See the crypto arbitrage strategy for a reference implementation.
 
 ## Domain Concepts
 
@@ -82,6 +89,7 @@ Paper mode: `[paper] enabled = true` or `POLY_PAPER_TRADING=true`
 1. Add `polyrust-core` as a dependency in your crate
 2. Implement the `Strategy` trait on your struct
 3. Register with `Engine::builder().strategy(YourStrategy::new())`
+4. (Optional) Implement `DashboardViewProvider` for a custom dashboard page
 
 ```rust
 use polyrust_core::prelude::*;
@@ -101,6 +109,18 @@ impl Strategy for MyStrategy {
             }
             _ => Ok(vec![]),
         }
+    }
+
+    // Optional: provide a custom dashboard view at /strategy/my-strategy
+    fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> {
+        Some(self)
+    }
+}
+
+impl DashboardViewProvider for MyStrategy {
+    fn view_name(&self) -> &str { "my-strategy" }
+    fn render_view(&self) -> Result<String> {
+        Ok("<div>Strategy-specific HTML here</div>".to_string())
     }
 }
 ```

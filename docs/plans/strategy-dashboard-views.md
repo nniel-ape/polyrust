@@ -118,8 +118,8 @@ Add custom per-strategy dashboard views so each strategy can render its own HTMX
 - [x] Run linter: `cargo clippy --workspace -- -D warnings`
 
 ### Task 8: [Final] Update documentation
-- [ ] Update CLAUDE.md Architecture section to mention strategy dashboard views
-- [ ] Add dashboard view info to "Adding a New Strategy" section
+- [x] Update CLAUDE.md Architecture section to mention strategy dashboard views
+- [x] Add dashboard view info to "Adding a New Strategy" section
 
 ## Technical Details
 
