@@ -4,7 +4,7 @@ use std::fmt::Write as FmtWrite;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use polyrust_core::prelude::*;
 
@@ -58,6 +58,38 @@ impl Default for ArbitrageConfig {
             use_chainlink: true,
         }
     }
+}
+
+/// Format a USD price with 2 decimal places and thousands separators (e.g. `$88,959.37`).
+fn fmt_usd(price: Decimal) -> String {
+    let rounded = price.round_dp(2);
+    let s = format!("{:.2}", rounded);
+    // Split on decimal point and add thousands separators to integer part
+    let parts: Vec<&str> = s.split('.').collect();
+    let int_part = parts[0];
+    let dec_part = parts.get(1).unwrap_or(&"00");
+
+    let negative = int_part.starts_with('-');
+    let digits: &str = if negative { &int_part[1..] } else { int_part };
+
+    let with_commas: String = digits
+        .as_bytes()
+        .rchunks(3)
+        .rev()
+        .map(|chunk| std::str::from_utf8(chunk).unwrap())
+        .collect::<Vec<&str>>()
+        .join(",");
+
+    if negative {
+        format!("$-{}.{}", with_commas, dec_part)
+    } else {
+        format!("${}.{}", with_commas, dec_part)
+    }
+}
+
+/// Format a market probability price with 2 decimal places (e.g. `0.50`).
+fn fmt_market_price(price: Decimal) -> String {
+    format!("{:.2}", price.round_dp(2))
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +230,9 @@ pub struct CryptoArbitrageStrategy {
     /// Cached best-ask prices per token_id, updated on orderbook events.
     /// Used by render_view() to display UP/DOWN market prices.
     cached_asks: HashMap<TokenId, Decimal>,
+    /// Markets discovered before prices were available, keyed by coin.
+    /// Promoted to active_markets once a price arrives for the coin.
+    pending_discovery: HashMap<String, MarketInfo>,
 }
 
 impl CryptoArbitrageStrategy {
@@ -212,6 +247,7 @@ impl CryptoArbitrageStrategy {
             last_scan: None,
             last_dashboard_emit: None,
             cached_asks: HashMap::new(),
+            pending_discovery: HashMap::new(),
         }
     }
 
@@ -231,6 +267,25 @@ impl CryptoArbitrageStrategy {
         }
 
         let mut actions = Vec::new();
+
+        // Promote any pending market for this coin now that we have a price
+        if let Some(market) = self.pending_discovery.remove(symbol) {
+            let mwr = MarketWithReference {
+                market: market.clone(),
+                reference_price: price,
+                reference_approximate: false,
+                discovery_time: Utc::now(),
+                coin: symbol.to_string(),
+            };
+            info!(
+                coin = %symbol,
+                market = %market.id,
+                reference = %price,
+                "Activated buffered market (price now available)"
+            );
+            self.active_markets.insert(market.id.clone(), mwr);
+            actions.push(Action::SubscribeMarket(market.id.clone()));
+        }
 
         // Evaluate each active market for this coin
         let matching_market_ids: Vec<MarketId> = self
@@ -582,7 +637,8 @@ impl CryptoArbitrageStrategy {
         let reference_price = match md.external_prices.get(&coin) {
             Some(&p) => p,
             None => {
-                debug!(coin = %coin, market = %market.id, "No price available for coin, skipping market");
+                info!(coin = %coin, market = %market.id, "No price yet for coin, buffering market for later activation");
+                self.pending_discovery.insert(coin, market.clone());
                 return Ok(vec![]);
             }
         };
@@ -754,7 +810,22 @@ impl CryptoArbitrageStrategy {
     /// Extract coin symbol from market question string.
     /// Looks for known coin names as whole words in the question text.
     fn extract_coin(&self, question: &str) -> Option<String> {
+        const COIN_NAMES: &[(&str, &str)] = &[
+            ("BITCOIN", "BTC"),
+            ("ETHEREUM", "ETH"),
+            ("SOLANA", "SOL"),
+        ];
+
         let upper = question.to_uppercase();
+
+        // First, check for full coin names (e.g. "Bitcoin" → "BTC")
+        for &(name, ticker) in COIN_NAMES {
+            if upper.contains(name) {
+                return Some(ticker.to_string());
+            }
+        }
+
+        // Then, check for ticker symbols as whole words (e.g. "XRP")
         for coin in &self.config.coins {
             // Match coin as a whole word to avoid false positives
             // (e.g. "SOL" should not match "SOLVE" or "resolution")
@@ -854,12 +925,12 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
 
                 let _ = write!(
                     html,
-                    r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="text-right py-1">{ref_label}${ref_price}</td><td class="text-right py-1">{current}</td><td class="text-right py-1 {change_class}">{change}</td><td class="text-right py-1 font-bold">{prediction}</td></tr>"#,
+                    r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="text-right py-1">{ref_label}{ref_price}</td><td class="text-right py-1">{current}</td><td class="text-right py-1 {change_class}">{change}</td><td class="text-right py-1 font-bold">{prediction}</td></tr>"#,
                     coin = escape_html(&mwr.coin),
                     ref_label = ref_label,
-                    ref_price = mwr.reference_price,
+                    ref_price = fmt_usd(mwr.reference_price),
                     current = current_price
-                        .map(|p| format!("${}", p))
+                        .map(fmt_usd)
                         .unwrap_or_else(|| "-".to_string()),
                     change_class = change_class,
                     change = change_str,
@@ -902,12 +973,12 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
                 let up_price = self
                     .cached_asks
                     .get(&mwr.market.token_ids.outcome_a)
-                    .map(|p| p.to_string())
+                    .map(|p| fmt_market_price(*p))
                     .unwrap_or_else(|| "-".to_string());
                 let down_price = self
                     .cached_asks
                     .get(&mwr.market.token_ids.outcome_b)
-                    .map(|p| p.to_string())
+                    .map(|p| fmt_market_price(*p))
                     .unwrap_or_else(|| "-".to_string());
 
                 let _ = write!(
@@ -1483,6 +1554,23 @@ mod tests {
             Some("ETH".to_string())
         );
         assert_eq!(strategy.extract_coin("Random question about stocks"), None);
+        // Full coin names (as used by Polymarket)
+        assert_eq!(
+            strategy.extract_coin("Bitcoin Up or Down - January 27, 4:45PM-5:00PM ET"),
+            Some("BTC".to_string())
+        );
+        assert_eq!(
+            strategy.extract_coin("Ethereum Up or Down - January 27, 4:45PM-5:00PM ET"),
+            Some("ETH".to_string())
+        );
+        assert_eq!(
+            strategy.extract_coin("Solana Up or Down - January 27, 4:45PM-5:00PM ET"),
+            Some("SOL".to_string())
+        );
+        assert_eq!(
+            strategy.extract_coin("XRP Up or Down - January 27, 4:45PM-5:00PM ET"),
+            Some("XRP".to_string())
+        );
     }
 
     // --- DashboardViewProvider tests ---
@@ -1525,10 +1613,10 @@ mod tests {
 
         let html = strategy.render_view().unwrap();
 
-        // Reference price section should show coin data
+        // Reference price section should show coin data with formatted prices
         assert!(html.contains("BTC"));
-        assert!(html.contains("50000"));
-        assert!(html.contains("50500"));
+        assert!(html.contains("$50,000.00"));
+        assert!(html.contains("$50,500.00"));
         assert!(html.contains("UP")); // 50500 > 50000 => UP prediction
 
         // Active markets section should show the market
@@ -1610,7 +1698,7 @@ mod tests {
             .insert("market1".to_string(), mwr);
 
         let html = strategy.render_view().unwrap();
-        // Approximate reference should show ~ prefix
-        assert!(html.contains("~$50000"));
+        // Approximate reference should show ~ prefix with formatted price
+        assert!(html.contains("~$50,000.00"));
     }
 }
