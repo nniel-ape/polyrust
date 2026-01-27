@@ -3,7 +3,7 @@ use std::sync::Arc;
 use polyrust_core::prelude::*;
 use polyrust_dashboard::Dashboard;
 use polyrust_execution::{FillMode, LiveBackend, PaperBackend};
-use polyrust_market::{ClobFeed, MarketDataFeed, PriceFeed};
+use polyrust_market::{ClobFeed, DiscoveryConfig, DiscoveryFeed, MarketDataFeed, PriceFeed};
 use polyrust_store::Store;
 use polyrust_strategies::CryptoArbitrageStrategy;
 use tracing::{error, info};
@@ -50,23 +50,29 @@ async fn main() -> anyhow::Result<()> {
         Box::new(LiveBackend::new(&config).await?)
     };
 
+    // Create feed command channel for engine → ClobFeed communication
+    let (feed_cmd_tx, feed_cmd_rx) = feed_command_channel();
+
     // Build engine with crypto arbitrage strategy
     let strategy = CryptoArbitrageStrategy::new(Default::default());
     let mut engine = Engine::builder()
         .config(config.clone())
         .strategy(strategy)
         .execution(execution_backend)
+        .feed_commands(feed_cmd_tx)
         .build()
         .await?;
 
     // Start market data feeds
     let event_bus = engine.event_bus().clone();
 
-    let mut clob_feed = ClobFeed::new();
+    let mut clob_feed = ClobFeed::new().with_command_receiver(feed_cmd_rx);
     let mut price_feed = PriceFeed::new();
+    let mut discovery_feed = DiscoveryFeed::new(DiscoveryConfig::default());
 
     let clob_bus = event_bus.clone();
     let price_bus = event_bus.clone();
+    let discovery_bus = event_bus.clone();
 
     tokio::spawn(async move {
         if let Err(e) = clob_feed.start(clob_bus).await {
@@ -77,6 +83,12 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         if let Err(e) = price_feed.start(price_bus).await {
             error!("price feed failed to start: {e}");
+        }
+    });
+
+    tokio::spawn(async move {
+        if let Err(e) = discovery_feed.start(discovery_bus).await {
+            error!("discovery feed failed to start: {e}");
         }
     });
 
