@@ -174,3 +174,5 @@ Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-min
 - `docs/plans/polyrust-framework-implementation.md` — detailed implementation guide (2400 lines)
 - `docs/plans/polyrust-checklist.md` — 14-milestone task checklist with validation commands
 - `docs/plans/strategy-dashboard-views.md` — strategy dashboard views design and implementation plan
+- `docs/research/polymarket-price-discovery.md` — how Polymarket discovers reference prices (CLOB midpoint, RTDS feeds, Chainlink/Binance oracles, confidence model)
+- `docs/research/crypto-arb-reference-price.md` — crypto arb strategy reference price mechanics for 15-min markets (capture flow, confidence model, three trading modes, fee impact)
