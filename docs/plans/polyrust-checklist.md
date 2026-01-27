@@ -344,7 +344,7 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 
 ### Task 13: Add CLAUDE.md developer guide and README
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 13](./polyrust-framework-implementation.md#task-13-add-claudemd-developer-guide) — CLAUDE.md content outline, documentation update table
-- [ ] Create `CLAUDE.md` with sections:
+- [x] Create `CLAUDE.md` with sections:
   - Project overview (Polyrust = autonomous Polymarket trading framework in Rust)
   - Build commands: `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace`
   - Never commit binary artifacts, never run `go build`
@@ -356,15 +356,15 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
   - rs-clob-client features in use: clob, ws, rtds, data, gamma, tracing, heartbeats, ctf
   - Testing patterns: mock ExecutionBackend, in-memory Turso, dec!() macro, tokio::time::timeout for event tests
   - Polymarket API endpoints: CLOB (clob.polymarket.com), Gamma (gamma-api.polymarket.com), Data (data-api.polymarket.com), WS (ws-subscriptions-clob.polymarket.com)
-- [ ] Create `README.md` with:
+- [x] Create `README.md` with:
   - Project title and one-line description
   - Architecture diagram (ASCII from design doc)
   - Quickstart (clone, cargo build, cargo run)
   - Configuration reference
   - Strategy plugin example
   - License
-- [ ] Verify all docs reference correct file paths
-- [ ] Mark completed
+- [x] Verify all docs reference correct file paths
+- [x] Mark completed
 
 ---
 

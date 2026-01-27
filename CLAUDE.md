@@ -77,6 +77,45 @@ TOML config at `config/default.toml` with `POLY_*` environment variable override
 
 Paper mode: `[paper] enabled = true` or `POLY_PAPER_TRADING=true`
 
+## Adding a New Strategy
+
+1. Add `polyrust-core` as a dependency in your crate
+2. Implement the `Strategy` trait on your struct
+3. Register with `Engine::builder().strategy(YourStrategy::new())`
+
+```rust
+use polyrust_core::prelude::*;
+
+struct MyStrategy;
+
+#[async_trait]
+impl Strategy for MyStrategy {
+    fn name(&self) -> &str { "my-strategy" }
+    fn description(&self) -> &str { "My custom strategy" }
+
+    async fn on_event(&mut self, event: &Event, ctx: &StrategyContext) -> Result<Vec<Action>> {
+        match event {
+            Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot)) => {
+                // Analyze orderbook, return PlaceOrder actions
+                Ok(vec![])
+            }
+            _ => Ok(vec![]),
+        }
+    }
+}
+```
+
+See `examples/simple_strategy.rs` for a complete runnable example.
+
+## Paper Mode vs Live Mode
+
+- Paper mode (default): `[paper] enabled = true` in `config/default.toml` or `POLY_PAPER_TRADING=true`
+  - Simulated fills, no real orders, configurable initial balance
+  - Supports Immediate and Orderbook fill modes
+- Live mode: `[paper] enabled = false` with valid Polymarket credentials
+  - Requires `POLY_PRIVATE_KEY`, `POLY_SAFE_ADDRESS`, and builder API credentials
+  - Uses `rs-clob-client` SDK for real CLOB interaction
+
 ## Key Dependencies
 
 - **`polymarket-client-sdk`** (rs-clob-client) v0.4.1 — all Polymarket interactions. Features: `clob`, `ws`, `rtds`, `data`, `gamma`, `tracing`, `heartbeats`, `ctf`
@@ -100,6 +139,13 @@ Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-min
 1. **Tail-End** (<2 min remaining, market >= 90%) — highest confidence
 2. **Two-Sided** (both outcomes < $1 combined) — guaranteed profit
 3. **Confirmed** (dynamic confidence model) — standard directional trading
+
+## Polymarket API Endpoints
+
+- CLOB API: `https://clob.polymarket.com`
+- Gamma API: `https://gamma-api.polymarket.com` (market discovery, metadata)
+- Data API: `https://data-api.polymarket.com` (positions, balances)
+- WebSocket: `wss://ws-subscriptions-clob.polymarket.com` (orderbook streams)
 
 ## Design Documents
 
