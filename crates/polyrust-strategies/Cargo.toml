@@ -1,0 +1,12 @@
+[package]
+name = "polyrust-strategies"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+polyrust-core = { path = "../polyrust-core" }
+serde = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }

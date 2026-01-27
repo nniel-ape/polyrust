@@ -1,0 +1,13 @@
+[package]
+name = "polyrust-execution"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+polyrust-core = { path = "../polyrust-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+rust_decimal = { workspace = true }
+uuid = { workspace = true }
