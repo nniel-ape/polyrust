@@ -9,29 +9,49 @@ members = [
     "crates/polyrust-strategies",
 ]
 
+[workspace.dependencies]
+# Shared versions across all crates
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+tokio-stream = "0.1"
+
+polymarket-client-sdk = { version = "0.4", features = [
+    "clob", "ws", "rtds", "data", "gamma", "tracing", "heartbeats", "ctf"
+] }
+
+# Internal crates
+polyrust-core = { path = "crates/polyrust-core" }
+polyrust-market = { path = "crates/polyrust-market" }
+polyrust-execution = { path = "crates/polyrust-execution" }
+polyrust-store = { path = "crates/polyrust-store" }
+polyrust-dashboard = { path = "crates/polyrust-dashboard" }
+polyrust-strategies = { path = "crates/polyrust-strategies" }
+
 [package]
 name = "polyrust"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-polyrust-core = { path = "crates/polyrust-core" }
-tokio = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-
-[workspace.dependencies]
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-thiserror = "2"
-async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
-rust_decimal = { version = "1", features = ["serde-with-str"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-tokio-stream = "0.1"
+polyrust-core.workspace = true
+polyrust-market.workspace = true
+polyrust-execution.workspace = true
+polyrust-store.workspace = true
+polyrust-dashboard.workspace = true
+polyrust-strategies.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros = "1"

@@ -18,17 +18,17 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 
 ### Task 1: Create Cargo workspace with 6 crates
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 1](./polyrust-framework-implementation.md#task-1-create-cargo-workspace) — full Cargo.toml contents, crate Cargo.toml template, .gitignore
-- [ ] Create workspace `Cargo.toml` with `resolver = "2"`, all 6 members, and `[workspace.dependencies]` for shared versions (tokio 1, serde 1, tracing 0.1, thiserror 2, async-trait 0.1, chrono 0.4, rust_decimal 1, uuid 1, tokio-stream 0.1, polymarket-client-sdk 0.4 with features: clob, ws, rtds, data, gamma, tracing, heartbeats, ctf)
-- [ ] Create `crates/polyrust-core/Cargo.toml` + `src/lib.rs` — engine, event bus, traits, shared state
-- [ ] Create `crates/polyrust-market/Cargo.toml` + `src/lib.rs` — market data feeds
-- [ ] Create `crates/polyrust-execution/Cargo.toml` + `src/lib.rs` — live + paper execution backends
-- [ ] Create `crates/polyrust-store/Cargo.toml` + `src/lib.rs` — Turso persistence
-- [ ] Create `crates/polyrust-dashboard/Cargo.toml` + `src/lib.rs` — Axum + HTMX monitoring
-- [ ] Create `crates/polyrust-strategies/Cargo.toml` + `src/lib.rs` — reference strategy implementations
-- [ ] Create `src/main.rs` with placeholder `fn main() { println!("polyrust"); }`
-- [ ] Create `.gitignore` (target/, *.db, *.db-journal, .env, config/local.toml)
-- [ ] Verify `cargo build --workspace` compiles with zero errors
-- [ ] Mark completed
+- [x] Create workspace `Cargo.toml` with `resolver = "2"`, all 6 members, and `[workspace.dependencies]` for shared versions (tokio 1, serde 1, tracing 0.1, thiserror 2, async-trait 0.1, chrono 0.4, rust_decimal 1, uuid 1, tokio-stream 0.1, polymarket-client-sdk 0.4 with features: clob, ws, rtds, data, gamma, tracing, heartbeats, ctf)
+- [x] Create `crates/polyrust-core/Cargo.toml` + `src/lib.rs` — engine, event bus, traits, shared state
+- [x] Create `crates/polyrust-market/Cargo.toml` + `src/lib.rs` — market data feeds
+- [x] Create `crates/polyrust-execution/Cargo.toml` + `src/lib.rs` — live + paper execution backends
+- [x] Create `crates/polyrust-store/Cargo.toml` + `src/lib.rs` — Turso persistence
+- [x] Create `crates/polyrust-dashboard/Cargo.toml` + `src/lib.rs` — Axum + HTMX monitoring
+- [x] Create `crates/polyrust-strategies/Cargo.toml` + `src/lib.rs` — reference strategy implementations
+- [x] Create `src/main.rs` with placeholder `fn main() { println!("polyrust"); }`
+- [x] Create `.gitignore` (target/, *.db, *.db-journal, .env, config/local.toml)
+- [x] Verify `cargo build --workspace` compiles with zero errors
+- [x] Mark completed
 
 ### Task 2: Define core domain types in polyrust-core
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 2](./polyrust-framework-implementation.md#task-2-define-core-domain-types) — full type definitions, serde attributes, method implementations, test code

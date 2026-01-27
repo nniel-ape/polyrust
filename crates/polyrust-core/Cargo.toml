@@ -13,3 +13,4 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
 uuid = { workspace = true }
+tokio-stream = { workspace = true }
