@@ -1,3 +1,4 @@
+use crate::strategy::Strategy;
 use crate::types::*;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -5,13 +6,18 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::RwLock;
 
+/// A thread-safe handle to a boxed strategy.
+pub type StrategyHandle = Arc<RwLock<Box<dyn Strategy>>>;
+
 /// Thread-safe shared state accessible by all strategies
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StrategyContext {
     pub positions: Arc<RwLock<PositionState>>,
     pub market_data: Arc<RwLock<MarketDataState>>,
     pub balance: Arc<RwLock<BalanceState>>,
     pub strategy_count: Arc<AtomicUsize>,
+    /// Strategies that provide custom dashboard views, keyed by view name.
+    pub strategy_views: Arc<RwLock<HashMap<String, StrategyHandle>>>,
 }
 
 impl StrategyContext {
@@ -21,13 +27,34 @@ impl StrategyContext {
             market_data: Arc::new(RwLock::new(MarketDataState::default())),
             balance: Arc::new(RwLock::new(BalanceState::default())),
             strategy_count: Arc::new(AtomicUsize::new(0)),
+            strategy_views: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Returns the view names of all strategies that have custom dashboard views.
+    pub async fn strategy_names(&self) -> Vec<String> {
+        let views = self.strategy_views.read().await;
+        let mut names: Vec<String> = views.keys().cloned().collect();
+        names.sort();
+        names
     }
 }
 
 impl Default for StrategyContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::fmt::Debug for StrategyContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StrategyContext")
+            .field("positions", &self.positions)
+            .field("market_data", &self.market_data)
+            .field("balance", &self.balance)
+            .field("strategy_count", &self.strategy_count)
+            .field("strategy_views", &"<strategy_views>")
+            .finish()
     }
 }
 

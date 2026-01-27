@@ -47,12 +47,12 @@ Add custom per-strategy dashboard views so each strategy can render its own HTMX
 - [x] Run `cargo test -p polyrust-core` — must pass before next task
 
 ### Task 2: Expose strategy dashboard views through StrategyContext
-- [ ] Add `strategy_views: Arc<RwLock<HashMap<String, Arc<dyn DashboardViewProvider + Send + Sync>>>>` to `StrategyContext`
-- [ ] Initialize empty in `StrategyContext::new()`
-- [ ] In `Engine::build()`, after wrapping strategies, collect `dashboard_view()` from each strategy and populate `strategy_views`
-- [ ] Add `pub fn strategy_names(&self) -> Vec<String>` helper to StrategyContext (reads strategy_views keys)
-- [ ] Write tests for strategy_views registration and lookup
-- [ ] Run `cargo test -p polyrust-core` — must pass before next task
+- [x] Add `strategy_views: Arc<RwLock<HashMap<String, Arc<dyn DashboardViewProvider + Send + Sync>>>>` to `StrategyContext`
+- [x] Initialize empty in `StrategyContext::new()`
+- [x] In `Engine::build()`, after wrapping strategies, collect `dashboard_view()` from each strategy and populate `strategy_views`
+- [x] Add `pub fn strategy_names(&self) -> Vec<String>` helper to StrategyContext (reads strategy_views keys)
+- [x] Write tests for strategy_views registration and lookup
+- [x] Run `cargo test -p polyrust-core` — must pass before next task
 
 ### Task 3: Add `/strategy/:name` route and handler in dashboard
 - [ ] Add route `.route("/strategy/{name}", get(handlers::strategy_view))` to `server.rs`

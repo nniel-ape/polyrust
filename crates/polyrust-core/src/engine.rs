@@ -1,6 +1,6 @@
 use crate::actions::Action;
 use crate::config::Config;
-use crate::context::StrategyContext;
+use crate::context::{StrategyContext, StrategyHandle};
 use crate::error::{PolyError, Result};
 use crate::event_bus::EventBus;
 use crate::events::{Event, MarketDataEvent, OrderEvent, SignalEvent, SystemEvent};
@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 pub struct Engine {
     config: Config,
     event_bus: EventBus,
-    strategies: Vec<Arc<RwLock<Box<dyn Strategy>>>>,
+    strategies: Vec<StrategyHandle>,
     execution: Arc<dyn ExecutionBackend>,
     context: StrategyContext,
     start_time: Option<Instant>,
@@ -69,7 +69,7 @@ impl EngineBuilder {
         }
 
         let strategy_count = self.strategies.len();
-        let strategies = self
+        let strategies: Vec<StrategyHandle> = self
             .strategies
             .into_iter()
             .map(|s| Arc::new(RwLock::new(s)))
@@ -78,6 +78,18 @@ impl EngineBuilder {
         context
             .strategy_count
             .store(strategy_count, std::sync::atomic::Ordering::Relaxed);
+
+        // Collect strategies that provide dashboard views
+        {
+            let mut views = context.strategy_views.write().await;
+            for strategy in &strategies {
+                let s = strategy.read().await;
+                if let Some(provider) = s.dashboard_view() {
+                    let view_name = provider.view_name().to_string();
+                    views.insert(view_name, Arc::clone(strategy));
+                }
+            }
+        }
 
         Ok(Engine {
             config,
