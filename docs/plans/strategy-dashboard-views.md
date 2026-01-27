@@ -84,16 +84,16 @@ Add custom per-strategy dashboard views so each strategy can render its own HTMX
 - [x] Run `cargo test -p polyrust-dashboard` — must pass before next task
 
 ### Task 5: Implement crypto arb `DashboardViewProvider`
-- [ ] Implement `DashboardViewProvider` for `CryptoArbitrageStrategy`:
+- [x] Implement `DashboardViewProvider` for `CryptoArbitrageStrategy`:
   - `view_name()` → `"crypto-arb"`
   - `render_view()` → HTML fragment with:
     - **Reference Prices & Predictions** section: coin, ref price, current price, % change, predicted winner
     - **Active Markets** section: market name, UP/DOWN prices, time remaining
     - **Open Positions** section: market, side, entry price, current price, PnL
   - Use Tailwind classes matching existing dashboard style (gray-900 cards, monospace)
-- [ ] Return `Some(self)` from `dashboard_view()` in `CryptoArbitrageStrategy`
-- [ ] Write tests for render_view HTML output (contains expected sections, handles empty state)
-- [ ] Run `cargo test -p polyrust-strategies` — must pass before next task
+- [x] Return `Some(self)` from `dashboard_view()` in `CryptoArbitrageStrategy`
+- [x] Write tests for render_view HTML output (contains expected sections, handles empty state)
+- [x] Run `cargo test -p polyrust-strategies` — must pass before next task
 
 ### Task 6: Add SSE updates for strategy views
 - [ ] Extend `sse_events` handler to detect Signal events from strategies

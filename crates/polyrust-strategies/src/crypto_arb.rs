@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write as FmtWrite;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -736,6 +737,167 @@ impl CryptoArbitrageStrategy {
     }
 }
 
+impl DashboardViewProvider for CryptoArbitrageStrategy {
+    fn view_name(&self) -> &str {
+        "crypto-arb"
+    }
+
+    fn render_view(&self) -> polyrust_core::error::Result<String> {
+        let mut html = String::with_capacity(4096);
+
+        // --- Reference Prices & Predictions ---
+        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+        html.push_str(r#"<h2 class="text-lg font-bold mb-3">Reference Prices &amp; Predictions</h2>"#);
+
+        if self.active_markets.is_empty() {
+            html.push_str(r#"<p class="text-gray-500">No active markets</p>"#);
+        } else {
+            html.push_str(r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#);
+            html.push_str("<th class=\"text-left py-1\">Coin</th>");
+            html.push_str("<th class=\"text-right py-1\">Ref Price</th>");
+            html.push_str("<th class=\"text-right py-1\">Current</th>");
+            html.push_str("<th class=\"text-right py-1\">Change</th>");
+            html.push_str("<th class=\"text-right py-1\">Prediction</th>");
+            html.push_str("</tr></thead><tbody>");
+
+            // Collect unique coins from active markets
+            let mut seen_coins = HashSet::new();
+            let mut markets_sorted: Vec<_> = self.active_markets.values().collect();
+            markets_sorted.sort_by(|a, b| a.coin.cmp(&b.coin));
+
+            for mwr in &markets_sorted {
+                if !seen_coins.insert(&mwr.coin) {
+                    continue;
+                }
+                let current_price = self
+                    .price_history
+                    .get(&mwr.coin)
+                    .and_then(|h| h.back().map(|(_, p)| *p));
+
+                let ref_label = if mwr.reference_approximate {
+                    "~"
+                } else {
+                    "="
+                };
+
+                let (change_str, change_class, prediction) = match current_price {
+                    Some(cp) => {
+                        let change = if mwr.reference_price.is_zero() {
+                            Decimal::ZERO
+                        } else {
+                            ((cp - mwr.reference_price) / mwr.reference_price)
+                                * Decimal::new(100, 0)
+                        };
+                        let cls = if change >= Decimal::ZERO {
+                            "pnl-positive"
+                        } else {
+                            "pnl-negative"
+                        };
+                        let pred = match mwr.predict_winner(cp) {
+                            Some(OutcomeSide::Up) | Some(OutcomeSide::Yes) => "UP",
+                            Some(OutcomeSide::Down) | Some(OutcomeSide::No) => "DOWN",
+                            None => "-",
+                        };
+                        (format!("{:+.2}%", change), cls, pred)
+                    }
+                    None => ("-".to_string(), "", "-"),
+                };
+
+                let _ = write!(
+                    html,
+                    r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="text-right py-1">{ref_label}${ref_price}</td><td class="text-right py-1">{current}</td><td class="text-right py-1 {change_class}">{change}</td><td class="text-right py-1 font-bold">{prediction}</td></tr>"#,
+                    coin = mwr.coin,
+                    ref_label = ref_label,
+                    ref_price = mwr.reference_price,
+                    current = current_price
+                        .map(|p| format!("${}", p))
+                        .unwrap_or_else(|| "-".to_string()),
+                    change_class = change_class,
+                    change = change_str,
+                    prediction = prediction,
+                );
+            }
+            html.push_str("</tbody></table>");
+        }
+        html.push_str("</div>");
+
+        // --- Active Markets ---
+        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+        let _ = write!(
+            html,
+            r#"<h2 class="text-lg font-bold mb-3">Active Markets ({})</h2>"#,
+            self.active_markets.len()
+        );
+
+        if self.active_markets.is_empty() {
+            html.push_str(r#"<p class="text-gray-500">No active markets</p>"#);
+        } else {
+            html.push_str(r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#);
+            html.push_str("<th class=\"text-left py-1\">Market</th>");
+            html.push_str("<th class=\"text-right py-1\">Time Left</th>");
+            html.push_str("</tr></thead><tbody>");
+
+            let mut markets_by_time: Vec<_> = self.active_markets.values().collect();
+            markets_by_time.sort_by_key(|m| m.market.end_date);
+
+            for mwr in &markets_by_time {
+                let remaining = mwr.market.seconds_remaining();
+                let time_str = if remaining > 60 {
+                    format!("{}m {}s", remaining / 60, remaining % 60)
+                } else {
+                    format!("{}s", remaining)
+                };
+
+                let _ = write!(
+                    html,
+                    r#"<tr class="border-b border-gray-800"><td class="py-1">{coin} Up/Down</td><td class="text-right py-1">{time}</td></tr>"#,
+                    coin = mwr.coin,
+                    time = time_str,
+                );
+            }
+            html.push_str("</tbody></table>");
+        }
+        html.push_str("</div>");
+
+        // --- Open Positions ---
+        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+        let total_positions: usize = self.positions.values().map(|v| v.len()).sum();
+        let _ = write!(
+            html,
+            r#"<h2 class="text-lg font-bold mb-3">Open Positions ({})</h2>"#,
+            total_positions
+        );
+
+        if self.positions.is_empty() {
+            html.push_str(r#"<p class="text-gray-500">No open positions</p>"#);
+        } else {
+            html.push_str(r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#);
+            html.push_str("<th class=\"text-left py-1\">Market</th>");
+            html.push_str("<th class=\"text-left py-1\">Side</th>");
+            html.push_str("<th class=\"text-right py-1\">Entry</th>");
+            html.push_str("<th class=\"text-right py-1\">Size</th>");
+            html.push_str("</tr></thead><tbody>");
+
+            for positions in self.positions.values() {
+                for pos in positions {
+                    let _ = write!(
+                        html,
+                        r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="py-1">{side:?}</td><td class="text-right py-1">{entry}</td><td class="text-right py-1">{size}</td></tr>"#,
+                        coin = pos.coin,
+                        side = pos.side,
+                        entry = pos.entry_price,
+                        size = pos.size,
+                    );
+                }
+            }
+            html.push_str("</tbody></table>");
+        }
+        html.push_str("</div>");
+
+        Ok(html)
+    }
+}
+
 #[async_trait]
 impl Strategy for CryptoArbitrageStrategy {
     fn name(&self) -> &str {
@@ -826,6 +988,10 @@ impl Strategy for CryptoArbitrageStrategy {
         self.pending_orders.clear();
         self.pending_stop_loss.clear();
         Ok(actions)
+    }
+
+    fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> {
+        Some(self)
     }
 }
 
@@ -1228,5 +1394,104 @@ mod tests {
             Some("ETH".to_string())
         );
         assert_eq!(strategy.extract_coin("Random question about stocks"), None);
+    }
+
+    // --- DashboardViewProvider tests ---
+
+    #[test]
+    fn dashboard_view_returns_some() {
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let view = strategy.dashboard_view();
+        assert!(view.is_some());
+        assert_eq!(view.unwrap().view_name(), "crypto-arb");
+    }
+
+    #[test]
+    fn render_view_empty_state() {
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let html = strategy.render_view().unwrap();
+        // Should contain all three section headers
+        assert!(html.contains("Reference Prices"));
+        assert!(html.contains("Active Markets"));
+        assert!(html.contains("Open Positions"));
+        // Empty state messages
+        assert!(html.contains("No active markets"));
+        assert!(html.contains("No open positions"));
+    }
+
+    #[test]
+    fn render_view_with_active_markets_and_prices() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        // Add an active market
+        let mwr = make_mwr(dec!(50000), 300);
+        strategy
+            .active_markets
+            .insert("market1".to_string(), mwr);
+
+        // Add current price history for BTC
+        let mut history = VecDeque::new();
+        history.push_back((Utc::now(), dec!(50500)));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        let html = strategy.render_view().unwrap();
+
+        // Reference price section should show coin data
+        assert!(html.contains("BTC"));
+        assert!(html.contains("50000"));
+        assert!(html.contains("50500"));
+        assert!(html.contains("UP")); // 50500 > 50000 => UP prediction
+
+        // Active markets section should show the market
+        assert!(html.contains("BTC Up/Down"));
+
+        // No open positions
+        assert!(html.contains("No open positions"));
+    }
+
+    #[test]
+    fn render_view_with_positions() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        // Add a position
+        let pos = ArbitragePosition {
+            market_id: "market1".to_string(),
+            token_id: "token_up".to_string(),
+            side: OutcomeSide::Up,
+            entry_price: dec!(0.60),
+            size: dec!(10),
+            reference_price: dec!(50000),
+            coin: "BTC".to_string(),
+            order_id: None,
+            entry_time: Utc::now(),
+        };
+        strategy
+            .positions
+            .entry("market1".to_string())
+            .or_default()
+            .push(pos);
+
+        let html = strategy.render_view().unwrap();
+
+        // Should show position data
+        assert!(html.contains("Open Positions (1)"));
+        assert!(html.contains("BTC"));
+        assert!(html.contains("0.60")); // entry price
+        assert!(!html.contains("No open positions"));
+    }
+
+    #[test]
+    fn render_view_approximate_reference() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        let mut mwr = make_mwr(dec!(50000), 300);
+        mwr.reference_approximate = true;
+        strategy
+            .active_markets
+            .insert("market1".to_string(), mwr);
+
+        let html = strategy.render_view().unwrap();
+        // Approximate reference should show ~ prefix
+        assert!(html.contains("~$50000"));
     }
 }
