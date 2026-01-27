@@ -250,9 +250,17 @@ pub async fn strategy_view(
 ) -> std::result::Result<Response, AppError> {
     let views = state.context.strategy_views.read().await;
     let Some(strategy_handle) = views.get(&name) else {
+        let escaped_name = name
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
         return Ok((
             axum::http::StatusCode::NOT_FOUND,
-            Html(format!("<h1>Strategy '{}' not found</h1>", name)),
+            Html(format!(
+                "<h1>Strategy '{}' not found</h1>",
+                escaped_name
+            )),
         )
             .into_response());
     };

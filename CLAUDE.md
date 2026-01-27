@@ -44,6 +44,7 @@ src/main.rs → wires all crates into a single binary
 - **`Strategy`** — `on_event(&mut self, event: &Event, ctx: &StrategyContext) -> Result<Vec<Action>>` — receives events, returns actions (place/cancel orders, emit signals)
 - **`ExecutionBackend`** — abstracts order execution: `LiveBackend` (real CLOB API) vs `PaperBackend` (simulated fills)
 - **`MarketDataFeed`** — market data producers: `ClobFeed` (WebSocket orderbooks) and `PriceFeed` (RTDS crypto prices)
+- **`DashboardViewProvider`** — `view_name(&self) -> &str` + `render_view(&self) -> Result<String>` — optional trait for strategies to expose custom dashboard pages at `/strategy/<name>`
 
 ### Event Flow
 
@@ -172,3 +173,4 @@ Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-min
 - `docs/brainstorms/polyrust-trading-framework.md` — goals, architecture, traits
 - `docs/plans/polyrust-framework-implementation.md` — detailed implementation guide (2400 lines)
 - `docs/plans/polyrust-checklist.md` — 14-milestone task checklist with validation commands
+- `docs/plans/strategy-dashboard-views.md` — strategy dashboard views design and implementation plan

@@ -5,11 +5,13 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::routing::get;
+use http_body_util::BodyStream;
 use polyrust_core::prelude::*;
 use polyrust_dashboard::handlers;
 use polyrust_dashboard::server::AppState;
 use polyrust_store::Store;
 use tokio::sync::RwLock;
+use tokio_stream::StreamExt;
 use tower::ServiceExt;
 
 async fn test_app() -> (Router, AppState) {
@@ -342,6 +344,46 @@ async fn nav_links_absent_when_no_strategy_views() {
     );
 }
 
+/// Read SSE frames from a response body until we find one matching `predicate`,
+/// or fail after the given timeout.
+async fn read_sse_until(
+    body: Body,
+    timeout_ms: u64,
+    predicate: impl Fn(&str) -> bool,
+) -> String {
+    let mut stream = BodyStream::new(body);
+    let mut collected = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            panic!(
+                "SSE timeout: no matching frame received within {}ms. Collected so far: {}",
+                timeout_ms, collected
+            );
+        }
+
+        match tokio::time::timeout(remaining, stream.next()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Ok(data) = frame.into_data() {
+                    let chunk = String::from_utf8_lossy(&data);
+                    collected.push_str(&chunk);
+                    if predicate(&collected) {
+                        return collected;
+                    }
+                }
+            }
+            Ok(Some(Err(e))) => panic!("SSE stream error: {e}"),
+            Ok(None) => panic!("SSE stream ended without matching frame. Collected: {collected}"),
+            Err(_) => panic!(
+                "SSE timeout: no matching frame received within {}ms. Collected so far: {}",
+                timeout_ms, collected
+            ),
+        }
+    }
+}
+
 #[tokio::test]
 async fn sse_receives_published_events() {
     let store = Store::new(":memory:").await.unwrap();
@@ -377,25 +419,15 @@ async fn sse_receives_published_events() {
         bus.publish(Event::System(SystemEvent::EngineStarted));
     });
 
-    // Read initial SSE data with timeout
-    let body = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        axum::body::to_bytes(resp.into_body(), usize::MAX),
-    )
+    let text = read_sse_until(resp.into_body(), 2000, |t| {
+        t.contains("event:") || t.contains("data:")
+    })
     .await;
 
-    // We either get data or timeout — both are acceptable since SSE is a long-lived stream.
-    // The key test is that the endpoint connected successfully (200 status above).
-    // If we got data, verify it looks like SSE.
-    if let Ok(Ok(bytes)) = body {
-        let text = String::from_utf8(bytes.to_vec()).unwrap_or_default();
-        if !text.is_empty() {
-            assert!(
-                text.contains("event:") || text.contains("data:") || text.contains(":keep-alive"),
-                "SSE output should contain event data or keepalive"
-            );
-        }
-    }
+    assert!(
+        text.contains("event:") && text.contains("data:"),
+        "SSE output should contain event and data fields, got: {text}"
+    );
 }
 
 #[tokio::test]
@@ -446,27 +478,19 @@ async fn sse_dashboard_update_signal_renders_strategy_view() {
         }));
     });
 
-    // Read SSE output with timeout
-    let body = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        axum::body::to_bytes(resp.into_body(), usize::MAX),
-    )
+    let text = read_sse_until(resp.into_body(), 2000, |t| {
+        t.contains("strategy-mock-view-update")
+    })
     .await;
 
-    if let Ok(Ok(bytes)) = body {
-        let text = String::from_utf8(bytes.to_vec()).unwrap_or_default();
-        // Should contain the strategy-specific SSE event name and re-rendered HTML
-        if !text.is_empty() {
-            assert!(
-                text.contains("event:strategy-mock-view-update"),
-                "SSE should emit strategy-specific event name, got: {text}"
-            );
-            assert!(
-                text.contains("mock-content"),
-                "SSE should contain re-rendered strategy view HTML, got: {text}"
-            );
-        }
-    }
+    assert!(
+        text.contains("strategy-mock-view-update"),
+        "SSE should emit strategy-specific event name, got: {text}"
+    );
+    assert!(
+        text.contains("mock-content"),
+        "SSE should contain re-rendered strategy view HTML, got: {text}"
+    );
 }
 
 #[tokio::test]
@@ -509,24 +533,16 @@ async fn sse_non_dashboard_signal_passes_through_as_json() {
         }));
     });
 
-    let body = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        axum::body::to_bytes(resp.into_body(), usize::MAX),
-    )
-    .await;
+    let text = read_sse_until(resp.into_body(), 2000, |t| t.contains("heartbeat")).await;
 
-    if let Ok(Ok(bytes)) = body {
-        let text = String::from_utf8(bytes.to_vec()).unwrap_or_default();
-        if !text.is_empty() {
-            // Non-dashboard signals pass through as JSON with topic "signal"
-            assert!(
-                text.contains("event:signal"),
-                "Non-dashboard signal should use topic as event name, got: {text}"
-            );
-            assert!(
-                text.contains("heartbeat"),
-                "Should contain signal data, got: {text}"
-            );
-        }
-    }
+    // Non-dashboard signals pass through as JSON with topic "signal"
+    // SSE format uses "event: signal" (space after colon per SSE spec)
+    assert!(
+        text.contains("event: signal"),
+        "Non-dashboard signal should use topic as event name, got: {text}"
+    );
+    assert!(
+        text.contains("heartbeat"),
+        "Should contain signal data, got: {text}"
+    );
 }
