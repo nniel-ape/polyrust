@@ -74,21 +74,21 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 
 ### Task 4: Implement typed event bus with topic filtering
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 4](./polyrust-framework-implementation.md#task-4-implement-typed-event-bus) — full EventBus and EventSubscriber implementation with broadcast channel, topic filtering, lag handling
-- [ ] Create `crates/polyrust-core/src/event_bus.rs` — `EventBus` struct wrapping `broadcast::Sender<Event>` with const `DEFAULT_CAPACITY = 4096`
-- [ ] Implement `EventBus::new()`, `with_capacity(usize)`, `Default` trait
-- [ ] Implement `publish(Event)` — sends via broadcast, logs topic + receiver count, warns on no subscribers
-- [ ] Implement `subscribe()` → `EventSubscriber` (receives all events)
-- [ ] Implement `subscribe_topics(&[&str])` → `EventSubscriber` (filtered by topic strings)
-- [ ] Implement `subscriber_count()` → `usize`
-- [ ] Implement `EventSubscriber::recv()` — loops on `broadcast::Receiver::recv()`, filters by topic if set, handles `Lagged` (warn + continue) and `Closed` (return None)
-- [ ] Add `event_bus` module to `lib.rs` and `EventBus` to prelude
-- [ ] Write `crates/polyrust-core/tests/event_bus_test.rs`:
+- [x] Create `crates/polyrust-core/src/event_bus.rs` — `EventBus` struct wrapping `broadcast::Sender<Event>` with const `DEFAULT_CAPACITY = 4096`
+- [x] Implement `EventBus::new()`, `with_capacity(usize)`, `Default` trait
+- [x] Implement `publish(Event)` — sends via broadcast, logs topic + receiver count, warns on no subscribers
+- [x] Implement `subscribe()` → `EventSubscriber` (receives all events)
+- [x] Implement `subscribe_topics(&[&str])` → `EventSubscriber` (filtered by topic strings)
+- [x] Implement `subscriber_count()` → `usize`
+- [x] Implement `EventSubscriber::recv()` — loops on `broadcast::Receiver::recv()`, filters by topic if set, handles `Lagged` (warn + continue) and `Closed` (return None)
+- [x] Add `event_bus` module to `lib.rs` and `EventBus` to prelude
+- [x] Write `crates/polyrust-core/tests/event_bus_test.rs`:
   - Test: publish MarketData event to 2 subscribers, both receive it
   - Test: topic-filtered subscriber for "market_data" does NOT receive System events
   - Test: publish with zero subscribers does not panic
   - Test: subscriber handles lag gracefully (publish > capacity events, subscriber recovers)
-- [ ] Verify `cargo test --workspace -- event_bus` passes
-- [ ] Mark completed
+- [x] Verify `cargo test --workspace -- event_bus` passes
+- [x] Mark completed
 
 ### Task 5: Implement engine core with builder pattern and lifecycle
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 5](./polyrust-framework-implementation.md#task-5-implement-engine-core) — full Config struct with TOML/env parsing, EngineBuilder, Engine::run() with strategy dispatch loop, execute_action() helper
