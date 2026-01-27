@@ -8,6 +8,15 @@ use tracing::{debug, info, warn};
 
 use polyrust_core::prelude::*;
 
+/// Escape a string for safe inclusion in HTML content.
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -830,7 +839,7 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
                 let _ = write!(
                     html,
                     r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="text-right py-1">{ref_label}${ref_price}</td><td class="text-right py-1">{current}</td><td class="text-right py-1 {change_class}">{change}</td><td class="text-right py-1 font-bold">{prediction}</td></tr>"#,
-                    coin = mwr.coin,
+                    coin = escape_html(&mwr.coin),
                     ref_label = ref_label,
                     ref_price = mwr.reference_price,
                     current = current_price
@@ -865,7 +874,7 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
             markets_by_time.sort_by_key(|m| m.market.end_date);
 
             for mwr in &markets_by_time {
-                let remaining = mwr.market.seconds_remaining();
+                let remaining = mwr.market.seconds_remaining().max(0);
                 let time_str = if remaining > 60 {
                     format!("{}m {}s", remaining / 60, remaining % 60)
                 } else {
@@ -875,7 +884,7 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
                 let _ = write!(
                     html,
                     r#"<tr class="border-b border-gray-800"><td class="py-1">{coin} Up/Down</td><td class="text-right py-1">{time}</td></tr>"#,
-                    coin = mwr.coin,
+                    coin = escape_html(&mwr.coin),
                     time = time_str,
                 );
             }
@@ -907,7 +916,7 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
                     let _ = write!(
                         html,
                         r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="py-1">{side:?}</td><td class="text-right py-1">{entry}</td><td class="text-right py-1">{size}</td></tr>"#,
-                        coin = pos.coin,
+                        coin = escape_html(&pos.coin),
                         side = pos.side,
                         entry = pos.entry_price,
                         size = pos.size,

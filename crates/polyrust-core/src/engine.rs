@@ -86,6 +86,13 @@ impl EngineBuilder {
                 let s = strategy.read().await;
                 if let Some(provider) = s.dashboard_view() {
                     let view_name = provider.view_name().to_string();
+                    if views.contains_key(&view_name) {
+                        tracing::warn!(
+                            view_name = %view_name,
+                            strategy = %s.name(),
+                            "Duplicate dashboard view name — overwriting previous registration"
+                        );
+                    }
                     views.insert(view_name, Arc::clone(strategy));
                 }
             }
