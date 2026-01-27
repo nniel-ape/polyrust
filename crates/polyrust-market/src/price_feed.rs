@@ -184,7 +184,7 @@ impl MarketDataFeed for PriceFeed {
                                 "binance price update"
                             );
 
-                            {
+                            let should_publish = {
                                 let mut c = cache.write().await;
                                 let should_update = c.get(&symbol).is_none_or(|existing| {
                                     // Prefer Chainlink but allow Binance to overwrite
@@ -203,14 +203,19 @@ impl MarketDataFeed for PriceFeed {
                                         },
                                     );
                                 }
-                            }
+                                should_update
+                            };
 
-                            bus.publish(Event::MarketData(MarketDataEvent::ExternalPrice {
-                                symbol,
-                                price: price_msg.value,
-                                source: "binance".into(),
-                                timestamp,
-                            }));
+                            if should_publish {
+                                bus.publish(Event::MarketData(
+                                    MarketDataEvent::ExternalPrice {
+                                        symbol,
+                                        price: price_msg.value,
+                                        source: "binance".into(),
+                                        timestamp,
+                                    },
+                                ));
+                            }
                         }
                         Err(e) => {
                             warn!(error = %e, "binance price stream error");

@@ -254,12 +254,36 @@ fn try_fill_sell(
 #[async_trait]
 impl polyrust_core::execution::ExecutionBackend for PaperBackend {
     async fn place_order(&self, order: &OrderRequest) -> Result<OrderResult> {
+        use crate::rounding::{round_price, round_size};
+
         let mut state = self.state.write().await;
         let order_id = Uuid::new_v4().to_string();
 
+        // Apply same rounding as live backend for simulation fidelity
+        let price = round_price(order.price);
+        let size = round_size(order.size);
+
+        // Validate price range
+        if price <= Decimal::ZERO || price > Decimal::ONE {
+            return Ok(OrderResult {
+                success: false,
+                order_id: None,
+                status: None,
+                message: format!("Invalid price {price}: must be in (0, 1]"),
+            });
+        }
+        if size <= Decimal::ZERO {
+            return Ok(OrderResult {
+                success: false,
+                order_id: None,
+                status: None,
+                message: format!("Invalid size {size}: must be > 0"),
+            });
+        }
+
         match order.side {
             OrderSide::Buy => {
-                let cost = order.price * order.size;
+                let cost = price * size;
                 if state.usdc_balance < cost {
                     return Ok(OrderResult {
                         success: false,
@@ -285,13 +309,13 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
                                 id: Uuid::new_v4(),
                                 token_id: order.token_id.clone(),
                                 size: Decimal::ZERO,
-                                entry_price: order.price,
+                                entry_price: price,
                                 entry_time: Utc::now(),
                             });
                         // Weighted average entry price
                         let total_cost =
-                            pos.entry_price * pos.size + order.price * order.size;
-                        pos.size += order.size;
+                            pos.entry_price * pos.size + price * size;
+                        pos.size += size;
                         if pos.size > Decimal::ZERO {
                             pos.entry_price = total_cost / pos.size;
                         }
@@ -299,8 +323,8 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
                         info!(
                             order_id = %order_id,
                             token_id = %order.token_id,
-                            price = %order.price,
-                            size = %order.size,
+                            price = %price,
+                            size = %size,
                             "Paper BUY filled immediately"
                         );
                     }
@@ -312,8 +336,8 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
                                 id: order_id.clone(),
                                 token_id: order.token_id.clone(),
                                 side: order.side,
-                                price: order.price,
-                                size: order.size,
+                                price,
+                                size,
                                 filled_size: Decimal::ZERO,
                                 status: OrderStatus::Open,
                                 created_at: Utc::now(),
@@ -334,21 +358,21 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
                     .map(|p| p.size)
                     .unwrap_or(Decimal::ZERO);
 
-                if current_size < order.size {
+                if current_size < size {
                     return Ok(OrderResult {
                         success: false,
                         order_id: None,
                         status: None,
                         message: format!(
                             "Insufficient position: need {} shares, have {}",
-                            order.size, current_size
+                            size, current_size
                         ),
                     });
                 }
 
                 // Deduct position immediately (locked for order)
                 if let Some(pos) = state.positions.get_mut(&order.token_id) {
-                    pos.size -= order.size;
+                    pos.size -= size;
                     // Clean up zero positions
                     if pos.size == Decimal::ZERO {
                         state.positions.remove(&order.token_id);
@@ -358,13 +382,13 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
                 match self.fill_mode {
                     FillMode::Immediate => {
                         // Fill instantly: add USDC revenue
-                        state.usdc_balance += order.price * order.size;
+                        state.usdc_balance += price * size;
 
                         info!(
                             order_id = %order_id,
                             token_id = %order.token_id,
-                            price = %order.price,
-                            size = %order.size,
+                            price = %price,
+                            size = %size,
                             "Paper SELL filled immediately"
                         );
                     }
@@ -375,8 +399,8 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
                                 id: order_id.clone(),
                                 token_id: order.token_id.clone(),
                                 side: order.side,
-                                price: order.price,
-                                size: order.size,
+                                price,
+                                size,
                                 filled_size: Decimal::ZERO,
                                 status: OrderStatus::Open,
                                 created_at: Utc::now(),

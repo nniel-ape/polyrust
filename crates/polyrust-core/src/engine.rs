@@ -188,7 +188,7 @@ impl Engine {
                         Ok(actions) => {
                             for action in actions {
                                 if let Err(e) =
-                                    execute_action(&action, &execution, &event_bus, &name).await
+                                    execute_action(&action, &execution, &event_bus, &context, &name).await
                                 {
                                     error!(
                                         strategy = %name,
@@ -243,11 +243,17 @@ async fn execute_action(
     action: &Action,
     execution: &Arc<dyn ExecutionBackend>,
     event_bus: &EventBus,
+    context: &StrategyContext,
     strategy_name: &str,
 ) -> Result<()> {
     match action {
         Action::PlaceOrder(req) => {
             let result = execution.place_order(req).await?;
+            // Sync balance from execution backend to shared context
+            if let Ok(balance) = execution.get_balance().await {
+                let mut bal = context.balance.write().await;
+                bal.available_usdc = balance;
+            }
             event_bus.publish(Event::OrderUpdate(OrderEvent::Placed(result)));
         }
         Action::CancelOrder(id) => {

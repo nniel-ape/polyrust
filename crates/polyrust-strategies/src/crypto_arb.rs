@@ -216,6 +216,10 @@ impl CryptoArbitrageStrategy {
             let total_positions: usize = self.positions.values().map(|v| v.len()).sum();
             if !opps.is_empty() && total_positions < self.config.max_positions {
                 for opp in &opps {
+                    if opp.buy_price.is_zero() {
+                        warn!(market = %market_id, "skipping opportunity with zero buy_price");
+                        continue;
+                    }
                     let order = OrderRequest {
                         token_id: opp.token_id.clone(),
                         price: opp.buy_price,
@@ -237,6 +241,7 @@ impl CryptoArbitrageStrategy {
                 // Record all positions (two-sided mode produces two)
                 let positions: Vec<ArbitragePosition> = opps
                     .iter()
+                    .filter(|opp| !opp.buy_price.is_zero())
                     .map(|opp| ArbitragePosition {
                         market_id: market_id.clone(),
                         token_id: opp.token_id.clone(),
@@ -249,7 +254,9 @@ impl CryptoArbitrageStrategy {
                         entry_time: Utc::now(),
                     })
                     .collect();
-                self.positions.insert(market_id.clone(), positions);
+                if !positions.is_empty() {
+                    self.positions.insert(market_id.clone(), positions);
+                }
             }
         }
 
@@ -560,6 +567,8 @@ impl CryptoArbitrageStrategy {
             );
         }
 
+        let mut actions = vec![Action::UnsubscribeMarket(market_id.to_string())];
+
         if let Some(positions) = self.positions.remove(market_id) {
             for pos in &positions {
                 warn!(
@@ -569,17 +578,17 @@ impl CryptoArbitrageStrategy {
                     "Position in expired market — awaiting resolution"
                 );
             }
-            return Ok(vec![Action::Log {
+            actions.push(Action::Log {
                 level: LogLevel::Info,
                 message: format!(
                     "Market {} expired with {} open position(s)",
                     market_id,
                     positions.len()
                 ),
-            }]);
+            });
         }
 
-        Ok(vec![Action::UnsubscribeMarket(market_id.to_string())])
+        Ok(actions)
     }
 
     // -- Helpers ------------------------------------------------------------

@@ -231,6 +231,19 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
             "Cancel all orders complete"
         );
 
+        if !response.not_canceled.is_empty() {
+            let reasons: Vec<String> = response
+                .not_canceled
+                .iter()
+                .map(|(id, reason)| format!("{id}: {reason}"))
+                .collect();
+            return Err(PolyError::Execution(format!(
+                "Failed to cancel {} order(s): {}",
+                response.not_canceled.len(),
+                reasons.join(", ")
+            )));
+        }
+
         Ok(())
     }
 
