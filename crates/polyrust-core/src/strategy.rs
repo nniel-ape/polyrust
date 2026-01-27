@@ -30,8 +30,9 @@ pub trait Strategy: Send + Sync {
 
     /// Called when the engine stops this strategy.
     /// Use for cleanup: cancel open orders, log final state.
-    async fn on_stop(&mut self, ctx: &StrategyContext) -> Result<()> {
+    /// Return actions to execute during shutdown (e.g. CancelAllOrders).
+    async fn on_stop(&mut self, ctx: &StrategyContext) -> Result<Vec<Action>> {
         let _ = ctx;
-        Ok(())
+        Ok(vec![])
     }
 }

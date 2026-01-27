@@ -16,7 +16,7 @@ use polyrust_core::config::Config;
 use polyrust_core::error::{PolyError, Result};
 use polyrust_core::types::*;
 
-use crate::rounding::round_price;
+use crate::rounding::{round_price, round_size};
 
 /// Live execution backend using rs-clob-client for real Polymarket orders.
 ///
@@ -135,6 +135,7 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
         self.client.set_neg_risk(token_id, order.neg_risk);
 
         let price = round_price(order.price);
+        let size = round_size(order.size);
         let sdk_side = map_order_side(order.side);
         let sdk_order_type = map_order_type(order.order_type);
 
@@ -144,7 +145,7 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
             .token_id(token_id)
             .side(sdk_side)
             .price(price)
-            .size(order.size)
+            .size(size)
             .order_type(sdk_order_type)
             .build()
             .await
@@ -154,7 +155,7 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
             token_id = %order.token_id,
             side = ?order.side,
             price = %price,
-            size = %order.size,
+            size = %size,
             order_type = ?order.order_type,
             "Signing order"
         );
@@ -178,6 +179,10 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
             } else {
                 Some(response.order_id.clone())
             },
+            token_id: order.token_id.clone(),
+            price,
+            size,
+            side: order.side,
             status: Some(format!("{:?}", response.status)),
             message: response.error_msg.unwrap_or_else(|| "ok".to_string()),
         };
@@ -316,7 +321,10 @@ fn map_sdk_side(side: &SdkSide) -> OrderSide {
     match side {
         SdkSide::Buy => OrderSide::Buy,
         SdkSide::Sell => OrderSide::Sell,
-        _ => OrderSide::Sell,
+        other => {
+            tracing::warn!(?other, "Unknown SDK side variant, defaulting to Sell");
+            OrderSide::Sell
+        }
     }
 }
 
@@ -448,6 +456,10 @@ mod tests {
         let result = OrderResult {
             success: true,
             order_id: Some("0xdef456".to_string()),
+            token_id: "token1".to_string(),
+            price: dec!(0.50),
+            size: dec!(10),
+            side: OrderSide::Buy,
             status: Some("Live".to_string()),
             message: "ok".to_string(),
         };
@@ -460,6 +472,10 @@ mod tests {
         let result = OrderResult {
             success: false,
             order_id: None,
+            token_id: "token1".to_string(),
+            price: dec!(0.50),
+            size: dec!(10),
+            side: OrderSide::Buy,
             status: None,
             message: "insufficient balance".to_string(),
         };

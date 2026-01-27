@@ -60,6 +60,10 @@ pub struct OrderRequest {
 pub struct OrderResult {
     pub success: bool,
     pub order_id: Option<OrderId>,
+    pub token_id: TokenId,
+    pub price: Decimal,
+    pub size: Decimal,
+    pub side: OrderSide,
     pub status: Option<String>,
     pub message: String,
 }

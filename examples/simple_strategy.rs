@@ -52,9 +52,9 @@ impl Strategy for LoggingStrategy {
         Ok(actions)
     }
 
-    async fn on_stop(&mut self, _ctx: &StrategyContext) -> Result<()> {
+    async fn on_stop(&mut self, _ctx: &StrategyContext) -> Result<Vec<Action>> {
         tracing::info!("LoggingStrategy stopped after {} events", self.event_count);
-        Ok(())
+        Ok(vec![])
     }
 }
 

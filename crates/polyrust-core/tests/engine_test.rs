@@ -26,10 +26,14 @@ impl MockBackend {
 
 #[async_trait]
 impl ExecutionBackend for MockBackend {
-    async fn place_order(&self, _order: &OrderRequest) -> Result<OrderResult> {
+    async fn place_order(&self, order: &OrderRequest) -> Result<OrderResult> {
         Ok(OrderResult {
             success: true,
             order_id: Some("mock-order-1".to_string()),
+            token_id: order.token_id.clone(),
+            price: order.price,
+            size: order.size,
+            side: order.side,
             status: Some("placed".to_string()),
             message: "ok".to_string(),
         })

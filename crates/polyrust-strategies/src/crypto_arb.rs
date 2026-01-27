@@ -160,6 +160,18 @@ pub struct ArbitragePosition {
 // Strategy
 // ---------------------------------------------------------------------------
 
+/// A pending order awaiting confirmation from the execution backend.
+#[derive(Debug, Clone)]
+struct PendingOrder {
+    market_id: MarketId,
+    token_id: TokenId,
+    side: OutcomeSide,
+    price: Decimal,
+    size: Decimal,
+    reference_price: Decimal,
+    coin: String,
+}
+
 /// Crypto arbitrage strategy that exploits mispricing in 15-minute Up/Down
 /// crypto prediction markets on Polymarket.
 pub struct CryptoArbitrageStrategy {
@@ -167,6 +179,9 @@ pub struct CryptoArbitrageStrategy {
     active_markets: HashMap<MarketId, MarketWithReference>,
     price_history: HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>,
     positions: HashMap<MarketId, Vec<ArbitragePosition>>,
+    /// Orders submitted but not yet confirmed — keyed by token_id.
+    /// Prevents re-entry while orders are in flight.
+    pending_orders: HashMap<TokenId, PendingOrder>,
     last_scan: Option<tokio::time::Instant>,
 }
 
@@ -177,6 +192,7 @@ impl CryptoArbitrageStrategy {
             active_markets: HashMap::new(),
             price_history: HashMap::new(),
             positions: HashMap::new(),
+            pending_orders: HashMap::new(),
             last_scan: None,
         }
     }
@@ -214,16 +230,34 @@ impl CryptoArbitrageStrategy {
 
             let opps = self.evaluate_opportunity(&market, price, ctx).await?;
             let total_positions: usize = self.positions.values().map(|v| v.len()).sum();
-            if !opps.is_empty() && total_positions < self.config.max_positions {
+            let total_pending = self.pending_orders.len();
+            if !opps.is_empty() && (total_positions + total_pending) < self.config.max_positions {
+                // For TwoSided mode, compute equal share count across both outcomes
+                // so total cost = position_size and each side gets N shares.
+                let two_sided_size = if opps.len() == 2
+                    && opps[0].mode == ArbitrageMode::TwoSided
+                {
+                    let combined_price = opps[0].buy_price + opps[1].buy_price;
+                    if combined_price > Decimal::ZERO {
+                        Some(self.config.position_size / combined_price)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 for opp in &opps {
                     if opp.buy_price.is_zero() {
                         warn!(market = %market_id, "skipping opportunity with zero buy_price");
                         continue;
                     }
+                    let size = two_sided_size
+                        .unwrap_or_else(|| self.config.position_size / opp.buy_price);
                     let order = OrderRequest {
                         token_id: opp.token_id.clone(),
                         price: opp.buy_price,
-                        size: self.config.position_size / opp.buy_price,
+                        size,
                         side: OrderSide::Buy,
                         order_type: OrderType::Fok,
                         neg_risk: false,
@@ -234,28 +268,22 @@ impl CryptoArbitrageStrategy {
                         confidence = %opp.confidence,
                         price = %opp.buy_price,
                         side = ?opp.outcome_to_buy,
-                        "Opening arbitrage position"
+                        "Submitting arbitrage order"
+                    );
+                    // Track pending order — position recorded only on confirmed fill
+                    self.pending_orders.insert(
+                        opp.token_id.clone(),
+                        PendingOrder {
+                            market_id: market_id.clone(),
+                            token_id: opp.token_id.clone(),
+                            side: opp.outcome_to_buy,
+                            price: opp.buy_price,
+                            size,
+                            reference_price: market.reference_price,
+                            coin: market.coin.clone(),
+                        },
                     );
                     actions.push(Action::PlaceOrder(order));
-                }
-                // Record all positions (two-sided mode produces two)
-                let positions: Vec<ArbitragePosition> = opps
-                    .iter()
-                    .filter(|opp| !opp.buy_price.is_zero())
-                    .map(|opp| ArbitragePosition {
-                        market_id: market_id.clone(),
-                        token_id: opp.token_id.clone(),
-                        side: opp.outcome_to_buy,
-                        entry_price: opp.buy_price,
-                        size: self.config.position_size / opp.buy_price,
-                        reference_price: market.reference_price,
-                        coin: market.coin.clone(),
-                        order_id: None,
-                        entry_time: Utc::now(),
-                    })
-                    .collect();
-                if !positions.is_empty() {
-                    self.positions.insert(market_id.clone(), positions);
                 }
             }
         }
@@ -278,8 +306,12 @@ impl CryptoArbitrageStrategy {
             return Ok(vec![]);
         }
 
-        // Already have a position in this market
+        // Already have a position or pending order in this market
         if self.positions.contains_key(&market.market.id) {
+            return Ok(vec![]);
+        }
+        // Check if any pending orders target this market's tokens
+        if self.pending_orders.values().any(|p| p.market_id == market.market.id) {
             return Ok(vec![]);
         }
 
@@ -490,7 +522,10 @@ impl CryptoArbitrageStrategy {
         };
 
         // Check market price drop from entry
-        let current_bid = snapshot.best_bid().unwrap_or(Decimal::ZERO);
+        let current_bid = match snapshot.best_bid() {
+            Some(bid) => bid,
+            None => return Ok(None), // No bids — cannot sell, skip stop-loss
+        };
         let price_drop = pos.entry_price - current_bid;
         let market_dropped = price_drop >= self.config.stop_loss_min_drop;
 
@@ -591,6 +626,51 @@ impl CryptoArbitrageStrategy {
         Ok(actions)
     }
 
+    /// Handle order placement result — only record position on confirmed success.
+    fn on_order_placed(&mut self, result: &OrderResult) -> Vec<Action> {
+        let pending = match self.pending_orders.remove(&result.token_id) {
+            Some(p) => p,
+            None => return vec![], // Not our order
+        };
+
+        if !result.success {
+            warn!(
+                token_id = %result.token_id,
+                market = %pending.market_id,
+                message = %result.message,
+                "Order rejected, removing pending entry"
+            );
+            return vec![];
+        }
+
+        let position = ArbitragePosition {
+            market_id: pending.market_id.clone(),
+            token_id: pending.token_id,
+            side: pending.side,
+            entry_price: pending.price,
+            size: pending.size,
+            reference_price: pending.reference_price,
+            coin: pending.coin,
+            order_id: result.order_id.clone(),
+            entry_time: Utc::now(),
+        };
+
+        info!(
+            market = %pending.market_id,
+            side = ?position.side,
+            price = %position.entry_price,
+            size = %position.size,
+            "Position confirmed after order fill"
+        );
+
+        self.positions
+            .entry(pending.market_id)
+            .or_default()
+            .push(position);
+
+        vec![]
+    }
+
     // -- Helpers ------------------------------------------------------------
 
     /// Extract coin symbol from market question string.
@@ -663,25 +743,37 @@ impl Strategy for CryptoArbitrageStrategy {
                 self.on_market_expired(id, ctx).await
             }
 
+            Event::OrderUpdate(OrderEvent::Placed(result)) => {
+                Ok(self.on_order_placed(result))
+            }
+
             _ => Ok(vec![]),
         }
     }
 
-    async fn on_stop(&mut self, _ctx: &StrategyContext) -> Result<()> {
+    async fn on_stop(&mut self, _ctx: &StrategyContext) -> Result<Vec<Action>> {
         let total_positions: usize = self.positions.values().map(|v| v.len()).sum();
         info!(
             active_markets = self.active_markets.len(),
             open_positions = total_positions,
+            pending_orders = self.pending_orders.len(),
             "Crypto arbitrage strategy stopping"
         );
-        if !self.positions.is_empty() {
+
+        let mut actions = Vec::new();
+
+        // Cancel all open orders on shutdown to avoid orphaned orders
+        if !self.positions.is_empty() || !self.pending_orders.is_empty() {
             warn!(
                 markets_with_positions = self.positions.len(),
                 total_positions = total_positions,
-                "Strategy stopping with open positions — consider cancelling orders"
+                "Cancelling all open orders on shutdown"
             );
+            actions.push(Action::CancelAllOrders);
         }
-        Ok(())
+
+        self.pending_orders.clear();
+        Ok(actions)
     }
 }
 

@@ -268,6 +268,10 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
             return Ok(OrderResult {
                 success: false,
                 order_id: None,
+                token_id: order.token_id.clone(),
+                price,
+                size,
+                side: order.side,
                 status: None,
                 message: format!("Invalid price {price}: must be in (0, 1]"),
             });
@@ -276,6 +280,10 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
             return Ok(OrderResult {
                 success: false,
                 order_id: None,
+                token_id: order.token_id.clone(),
+                price,
+                size,
+                side: order.side,
                 status: None,
                 message: format!("Invalid size {size}: must be > 0"),
             });
@@ -288,6 +296,10 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
                     return Ok(OrderResult {
                         success: false,
                         order_id: None,
+                        token_id: order.token_id.clone(),
+                        price,
+                        size,
+                        side: order.side,
                         status: None,
                         message: format!(
                             "Insufficient balance: need {} USDC, have {}",
@@ -362,6 +374,10 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
                     return Ok(OrderResult {
                         success: false,
                         order_id: None,
+                        token_id: order.token_id.clone(),
+                        price,
+                        size,
+                        side: order.side,
                         status: None,
                         message: format!(
                             "Insufficient position: need {} shares, have {}",
@@ -423,6 +439,10 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
         Ok(OrderResult {
             success: true,
             order_id: Some(order_id),
+            token_id: order.token_id.clone(),
+            price,
+            size,
+            side: order.side,
             status: Some(status.to_string()),
             message: "ok".to_string(),
         })

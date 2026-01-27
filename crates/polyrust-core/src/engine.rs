@@ -216,13 +216,30 @@ impl Engine {
         self.event_bus
             .publish(Event::System(SystemEvent::EngineStopping));
 
-        // Stop all strategies
+        // Stop all strategies and execute shutdown actions
         for strategy in &self.strategies {
             let mut s = strategy.write().await;
             let name = s.name().to_string();
             info!(strategy = %name, "stopping strategy");
-            if let Err(e) = s.on_stop(&self.context).await {
-                warn!(strategy = %name, error = %e, "strategy error on stop");
+            match s.on_stop(&self.context).await {
+                Ok(actions) => {
+                    for action in &actions {
+                        if let Err(e) = execute_action(
+                            action,
+                            &self.execution,
+                            &self.event_bus,
+                            &self.context,
+                            &name,
+                        )
+                        .await
+                        {
+                            warn!(strategy = %name, error = %e, "failed to execute shutdown action");
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(strategy = %name, error = %e, "strategy error on stop");
+                }
             }
             self.event_bus
                 .publish(Event::System(SystemEvent::StrategyStopped(name)));
