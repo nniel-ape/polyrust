@@ -45,6 +45,7 @@ impl Dashboard {
             .route("/positions", get(handlers::positions))
             .route("/trades", get(handlers::trades))
             .route("/health", get(handlers::health))
+            .route("/strategy/{name}", get(handlers::strategy_view))
             .route("/events/stream", get(handlers::sse_events))
             .with_state(state);
 

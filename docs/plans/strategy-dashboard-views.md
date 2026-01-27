@@ -55,21 +55,21 @@ Add custom per-strategy dashboard views so each strategy can render its own HTMX
 - [x] Run `cargo test -p polyrust-core` — must pass before next task
 
 ### Task 3: Add `/strategy/:name` route and handler in dashboard
-- [ ] Add route `.route("/strategy/{name}", get(handlers::strategy_view))` to `server.rs`
-- [ ] Implement `strategy_view` handler in `handlers.rs`:
+- [x] Add route `.route("/strategy/{name}", get(handlers::strategy_view))` to `server.rs`
+- [x] Implement `strategy_view` handler in `handlers.rs`:
   - Extract strategy name from path
   - Look up `strategy_views` in AppState context
   - Call `render_view()` → get HTML fragment
   - Wrap in `strategy_view.html` template (extends base.html)
   - Return 404 if strategy not found
-- [ ] Create `crates/polyrust-dashboard/templates/strategy_view.html`:
+- [x] Create `crates/polyrust-dashboard/templates/strategy_view.html`:
   - Extends base.html
   - Contains SSE connection div for real-time updates
   - Renders HTML fragment from strategy inside a content div
-- [ ] Create `crates/polyrust-dashboard/templates/partials/strategy_content.html`:
+- [x] Create `crates/polyrust-dashboard/templates/partials/strategy_content.html`:
   - Simple wrapper partial for SSE swap target (id="strategy-content")
-- [ ] Write handler tests (strategy found, strategy not found)
-- [ ] Run `cargo test -p polyrust-dashboard` — must pass before next task
+- [x] Write handler tests (strategy found, strategy not found)
+- [x] Run `cargo test -p polyrust-dashboard` — must pass before next task
 
 ### Task 4: Add dynamic strategy nav links to base template
 - [ ] Add `strategy_names: Vec<String>` field to all template structs (IndexTemplate, PositionsTemplate, etc.)

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">Strategy: {{ strategy_name }}</h1>
+
+<div hx-ext="sse" sse-connect="/events/stream">
+  <div id="strategy-content" sse-swap="strategy-{{ strategy_name }}-update" hx-swap="innerHTML">
+    {{ content_html|safe }}
+  </div>
+</div>
+{% endblock %}

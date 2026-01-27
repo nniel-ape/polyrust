@@ -22,3 +22,4 @@ uuid = { workspace = true }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 rust_decimal_macros = { workspace = true }
+async-trait = { workspace = true }

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -8,6 +9,7 @@ use polyrust_core::prelude::*;
 use polyrust_dashboard::handlers;
 use polyrust_dashboard::server::AppState;
 use polyrust_store::Store;
+use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 async fn test_app() -> (Router, AppState) {
@@ -26,10 +28,40 @@ async fn test_app() -> (Router, AppState) {
         .route("/positions", get(handlers::positions))
         .route("/trades", get(handlers::trades))
         .route("/health", get(handlers::health))
+        .route("/strategy/{name}", get(handlers::strategy_view))
         .route("/events/stream", get(handlers::sse_events))
         .with_state(state.clone());
 
     (app, state)
+}
+
+/// Mock strategy with a dashboard view for testing.
+struct MockViewStrategy;
+
+impl DashboardViewProvider for MockViewStrategy {
+    fn view_name(&self) -> &str {
+        "mock-view"
+    }
+
+    fn render_view(&self) -> polyrust_core::error::Result<String> {
+        Ok("<div class=\"mock-content\">Mock strategy dashboard</div>".to_string())
+    }
+}
+
+#[async_trait]
+impl Strategy for MockViewStrategy {
+    fn name(&self) -> &str {
+        "mock-view"
+    }
+    fn description(&self) -> &str {
+        "Mock strategy for testing"
+    }
+    async fn on_event(&mut self, _event: &Event, _ctx: &StrategyContext) -> polyrust_core::error::Result<Vec<Action>> {
+        Ok(vec![])
+    }
+    fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> {
+        Some(self)
+    }
 }
 
 #[tokio::test]
@@ -194,6 +226,68 @@ async fn trades_handler_queries_store() {
         "should display trade strategy"
     );
     assert!(html.contains("Buy"), "should display trade side");
+}
+
+#[tokio::test]
+async fn strategy_view_returns_200_for_registered_strategy() {
+    let (app, state) = test_app().await;
+
+    // Register the mock strategy
+    {
+        let strategy_handle: Arc<RwLock<Box<dyn Strategy>>> =
+            Arc::new(RwLock::new(Box::new(MockViewStrategy)));
+        let mut views = state.context.strategy_views.write().await;
+        views.insert("mock-view".to_string(), strategy_handle);
+    }
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/strategy/mock-view")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        html.contains("mock-content"),
+        "should contain rendered strategy view content"
+    );
+    assert!(
+        html.contains("Strategy: mock-view"),
+        "should contain strategy name in heading"
+    );
+}
+
+#[tokio::test]
+async fn strategy_view_returns_404_for_unknown_strategy() {
+    let (app, _) = test_app().await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/strategy/nonexistent")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        html.contains("not found"),
+        "should indicate strategy was not found"
+    );
 }
 
 #[tokio::test]

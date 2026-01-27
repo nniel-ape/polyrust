@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use askama::Template;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use polyrust_core::prelude::*;
@@ -116,6 +116,13 @@ struct PnlSummaryPartial {
     available_usdc: String,
 }
 
+#[derive(Template)]
+#[template(path = "strategy_view.html")]
+struct StrategyViewTemplate {
+    strategy_name: String,
+    content_html: String,
+}
+
 fn short_id(s: &str, len: usize) -> String {
     let char_count = s.chars().count();
     if char_count > len {
@@ -217,6 +224,33 @@ pub async fn health(State(state): State<AppState>) -> std::result::Result<Html<S
         available_usdc: bal_state.available_usdc.to_string(),
     };
     Ok(Html(tmpl.render()?))
+}
+
+/// GET /strategy/:name — per-strategy dashboard view
+pub async fn strategy_view(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> std::result::Result<Response, AppError> {
+    let views = state.context.strategy_views.read().await;
+    let Some(strategy_handle) = views.get(&name) else {
+        return Ok((
+            axum::http::StatusCode::NOT_FOUND,
+            Html(format!("<h1>Strategy '{}' not found</h1>", name)),
+        )
+            .into_response());
+    };
+
+    let strategy = strategy_handle.read().await;
+    let provider = strategy.dashboard_view().ok_or_else(|| {
+        AppError(format!("Strategy '{}' has no dashboard view", name))
+    })?;
+
+    let content_html = provider.render_view().map_err(|e| AppError(e.to_string()))?;
+    let tmpl = StrategyViewTemplate {
+        strategy_name: name,
+        content_html,
+    };
+    Ok(Html(tmpl.render()?).into_response())
 }
 
 /// GET /events/stream — SSE endpoint for real-time HTMX updates
