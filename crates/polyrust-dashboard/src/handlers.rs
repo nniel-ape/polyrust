@@ -307,6 +307,28 @@ pub async fn sse_events(
             }
         }
 
+        // For dashboard-update signals, re-render the strategy's view HTML.
+        // The signal payload must include a "view_name" field matching the
+        // DashboardViewProvider::view_name() key in strategy_views.
+        if let Event::Signal(signal) = &event
+            && signal.signal_type == "dashboard-update"
+        {
+            let view_name = signal
+                .payload
+                .get("view_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&signal.strategy_name);
+            if let Ok(views) = ctx.strategy_views.try_read()
+                && let Some(strategy_handle) = views.get(view_name)
+                && let Ok(strategy) = strategy_handle.try_read()
+                && let Some(provider) = strategy.dashboard_view()
+                && let Ok(html) = provider.render_view()
+            {
+                let event_name = format!("strategy-{view_name}-update");
+                return Some(Ok(SseEvent::default().event(event_name).data(html)));
+            }
+        }
+
         // Default: send JSON event data
         let data = serde_json::to_string(&event).unwrap_or_default();
         Some(Ok(SseEvent::default().event(topic).data(data)))

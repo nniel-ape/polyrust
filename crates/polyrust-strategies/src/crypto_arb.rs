@@ -184,6 +184,8 @@ pub struct CryptoArbitrageStrategy {
     /// Positions are only removed once the sell is confirmed or rejected.
     pending_stop_loss: HashSet<TokenId>,
     last_scan: Option<tokio::time::Instant>,
+    /// Throttle for dashboard-update signal emission (~5 seconds).
+    last_dashboard_emit: Option<tokio::time::Instant>,
 }
 
 impl CryptoArbitrageStrategy {
@@ -196,6 +198,7 @@ impl CryptoArbitrageStrategy {
             pending_orders: HashMap::new(),
             pending_stop_loss: HashSet::new(),
             last_scan: None,
+            last_dashboard_emit: None,
         }
     }
 
@@ -700,6 +703,27 @@ impl CryptoArbitrageStrategy {
         }
     }
 
+    // -- Dashboard ----------------------------------------------------------
+
+    /// Emit a dashboard-update signal if enough time has elapsed since the last one.
+    /// Returns `Some(Action)` when the throttle interval (5 seconds) has passed.
+    fn maybe_emit_dashboard_update(&mut self) -> Option<Action> {
+        let now = tokio::time::Instant::now();
+        let should_emit = match self.last_dashboard_emit {
+            Some(last) => now.duration_since(last) >= std::time::Duration::from_secs(5),
+            None => true,
+        };
+        if should_emit {
+            self.last_dashboard_emit = Some(now);
+            Some(Action::EmitSignal {
+                signal_type: "dashboard-update".to_string(),
+                payload: serde_json::json!({ "view_name": self.view_name() }),
+            })
+        } else {
+            None
+        }
+    }
+
     // -- Helpers ------------------------------------------------------------
 
     /// Extract coin symbol from market question string.
@@ -920,24 +944,24 @@ impl Strategy for CryptoArbitrageStrategy {
     }
 
     async fn on_event(&mut self, event: &Event, ctx: &StrategyContext) -> Result<Vec<Action>> {
-        match event {
+        let mut actions = match event {
             Event::MarketData(MarketDataEvent::ExternalPrice { symbol, price, .. }) => {
-                self.on_crypto_price(symbol, *price, ctx).await
+                self.on_crypto_price(symbol, *price, ctx).await?
             }
 
             Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot)) => {
-                self.on_orderbook_update(snapshot, ctx).await
+                self.on_orderbook_update(snapshot, ctx).await?
             }
 
             Event::MarketData(MarketDataEvent::MarketDiscovered(market)) => {
-                self.on_market_discovered(market, ctx).await
+                self.on_market_discovered(market, ctx).await?
             }
 
             Event::MarketData(MarketDataEvent::MarketExpired(id)) => {
-                self.on_market_expired(id, ctx).await
+                self.on_market_expired(id, ctx).await?
             }
 
-            Event::OrderUpdate(OrderEvent::Placed(result)) => Ok(self.on_order_placed(result)),
+            Event::OrderUpdate(OrderEvent::Placed(result)) => self.on_order_placed(result),
 
             Event::OrderUpdate(OrderEvent::Rejected { token_id, .. }) => {
                 if let Some(token_id) = token_id {
@@ -957,11 +981,18 @@ impl Strategy for CryptoArbitrageStrategy {
                         );
                     }
                 }
-                Ok(vec![])
+                vec![]
             }
 
-            _ => Ok(vec![]),
+            _ => vec![],
+        };
+
+        // Throttled dashboard update signal for real-time SSE view refresh
+        if let Some(dashboard_action) = self.maybe_emit_dashboard_update() {
+            actions.push(dashboard_action);
         }
+
+        Ok(actions)
     }
 
     async fn on_stop(&mut self, _ctx: &StrategyContext) -> Result<Vec<Action>> {
@@ -1478,6 +1509,36 @@ mod tests {
         assert!(html.contains("BTC"));
         assert!(html.contains("0.60")); // entry price
         assert!(!html.contains("No open positions"));
+    }
+
+    // --- dashboard update emission tests ---
+
+    #[test]
+    fn maybe_emit_dashboard_update_first_call_emits() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let action = strategy.maybe_emit_dashboard_update();
+        assert!(action.is_some(), "first call should emit");
+        if let Some(Action::EmitSignal {
+            signal_type,
+            payload,
+        }) = action
+        {
+            assert_eq!(signal_type, "dashboard-update");
+            assert_eq!(payload["view_name"], "crypto-arb");
+        }
+    }
+
+    #[test]
+    fn maybe_emit_dashboard_update_throttles() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        // First call emits
+        let action = strategy.maybe_emit_dashboard_update();
+        assert!(action.is_some());
+
+        // Immediate second call should be throttled
+        let action = strategy.maybe_emit_dashboard_update();
+        assert!(action.is_none(), "immediate second call should be throttled");
     }
 
     #[test]

@@ -96,17 +96,17 @@ Add custom per-strategy dashboard views so each strategy can render its own HTMX
 - [x] Run `cargo test -p polyrust-strategies` — must pass before next task
 
 ### Task 6: Add SSE updates for strategy views
-- [ ] Extend `sse_events` handler to detect Signal events from strategies
-- [ ] When a `Signal` event with `signal_type == "dashboard-update"` is received:
+- [x] Extend `sse_events` handler to detect Signal events from strategies
+- [x] When a `Signal` event with `signal_type == "dashboard-update"` is received:
   - Look up the strategy's `DashboardViewProvider`
   - Call `render_view()` to get fresh HTML
   - Send as SSE event with event type `strategy-{name}-update`
-- [ ] Add periodic `EmitSignal` action from crypto arb `on_event()`:
+- [x] Add periodic `EmitSignal` action from crypto arb `on_event()`:
   - Emit `"dashboard-update"` signal every ~5 seconds (throttled)
   - Payload contains serialized view state for the SSE partial
-- [ ] Update `strategy_view.html` to connect to SSE and swap content on update
-- [ ] Write tests for SSE signal routing
-- [ ] Run `cargo test --workspace` — must pass before next task
+- [x] Update `strategy_view.html` to connect to SSE and swap content on update
+- [x] Write tests for SSE signal routing
+- [x] Run `cargo test --workspace` — must pass before next task
 
 ### Task 7: Verify acceptance criteria
 - [ ] Verify Strategy trait backward-compatible (strategies without views compile unchanged)

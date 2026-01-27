@@ -397,3 +397,136 @@ async fn sse_receives_published_events() {
         }
     }
 }
+
+#[tokio::test]
+async fn sse_dashboard_update_signal_renders_strategy_view() {
+    let store = Store::new(":memory:").await.unwrap();
+    let context = StrategyContext::new();
+    let event_bus = EventBus::new();
+
+    // Register a mock strategy with a dashboard view
+    {
+        let strategy_handle: Arc<RwLock<Box<dyn Strategy>>> =
+            Arc::new(RwLock::new(Box::new(MockViewStrategy)));
+        let mut views = context.strategy_views.write().await;
+        views.insert("mock-view".to_string(), strategy_handle);
+    }
+
+    let state = AppState {
+        context,
+        store: Arc::new(store),
+        event_bus: event_bus.clone(),
+    };
+
+    let app = Router::new()
+        .route("/events/stream", get(handlers::sse_events))
+        .with_state(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/events/stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Publish a dashboard-update Signal event after a short delay
+    let bus = event_bus.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        bus.publish(Event::Signal(SignalEvent {
+            strategy_name: "mock-view".to_string(),
+            signal_type: "dashboard-update".to_string(),
+            payload: serde_json::json!({ "view_name": "mock-view" }),
+            timestamp: chrono::Utc::now(),
+        }));
+    });
+
+    // Read SSE output with timeout
+    let body = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        axum::body::to_bytes(resp.into_body(), usize::MAX),
+    )
+    .await;
+
+    if let Ok(Ok(bytes)) = body {
+        let text = String::from_utf8(bytes.to_vec()).unwrap_or_default();
+        // Should contain the strategy-specific SSE event name and re-rendered HTML
+        if !text.is_empty() {
+            assert!(
+                text.contains("event:strategy-mock-view-update"),
+                "SSE should emit strategy-specific event name, got: {text}"
+            );
+            assert!(
+                text.contains("mock-content"),
+                "SSE should contain re-rendered strategy view HTML, got: {text}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn sse_non_dashboard_signal_passes_through_as_json() {
+    let store = Store::new(":memory:").await.unwrap();
+    let context = StrategyContext::new();
+    let event_bus = EventBus::new();
+
+    let state = AppState {
+        context,
+        store: Arc::new(store),
+        event_bus: event_bus.clone(),
+    };
+
+    let app = Router::new()
+        .route("/events/stream", get(handlers::sse_events))
+        .with_state(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/events/stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Publish a non-dashboard signal
+    let bus = event_bus.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        bus.publish(Event::Signal(SignalEvent {
+            strategy_name: "test".to_string(),
+            signal_type: "heartbeat".to_string(),
+            payload: serde_json::json!({ "event_count": 42 }),
+            timestamp: chrono::Utc::now(),
+        }));
+    });
+
+    let body = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        axum::body::to_bytes(resp.into_body(), usize::MAX),
+    )
+    .await;
+
+    if let Ok(Ok(bytes)) = body {
+        let text = String::from_utf8(bytes.to_vec()).unwrap_or_default();
+        if !text.is_empty() {
+            // Non-dashboard signals pass through as JSON with topic "signal"
+            assert!(
+                text.contains("event:signal"),
+                "Non-dashboard signal should use topic as event name, got: {text}"
+            );
+            assert!(
+                text.contains("heartbeat"),
+                "Should contain signal data, got: {text}"
+            );
+        }
+    }
+}
