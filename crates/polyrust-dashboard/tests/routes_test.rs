@@ -291,6 +291,58 @@ async fn strategy_view_returns_404_for_unknown_strategy() {
 }
 
 #[tokio::test]
+async fn nav_links_include_registered_strategy_views() {
+    let (app, state) = test_app().await;
+
+    // Register the mock strategy so it appears in nav
+    {
+        let strategy_handle: Arc<RwLock<Box<dyn Strategy>>> =
+            Arc::new(RwLock::new(Box::new(MockViewStrategy)));
+        let mut views = state.context.strategy_views.write().await;
+        views.insert("mock-view".to_string(), strategy_handle);
+    }
+
+    let resp = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        html.contains(r#"href="/strategy/mock-view""#),
+        "nav should contain link to strategy view"
+    );
+    assert!(
+        html.contains(">mock-view</a>"),
+        "nav should display strategy name"
+    );
+}
+
+#[tokio::test]
+async fn nav_links_absent_when_no_strategy_views() {
+    let (app, _) = test_app().await;
+
+    let resp = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        !html.contains(r#"href="/strategy/"#),
+        "nav should not contain strategy links when none registered"
+    );
+}
+
+#[tokio::test]
 async fn sse_receives_published_events() {
     let store = Store::new(":memory:").await.unwrap();
     let context = StrategyContext::new();

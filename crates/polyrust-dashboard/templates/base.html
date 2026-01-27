@@ -20,6 +20,9 @@
     <a href="/positions" class="hover:text-white">Positions</a>
     <a href="/trades" class="hover:text-white">Trades</a>
     <a href="/health" class="hover:text-white">Health</a>
+    {% for name in strategy_names %}
+    <a href="/strategy/{{ name }}" class="hover:text-white text-blue-400">{{ name }}</a>
+    {% endfor %}
   </nav>
   <main class="max-w-6xl mx-auto px-6 py-8">
     {% block content %}{% endblock %}

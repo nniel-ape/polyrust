@@ -62,12 +62,14 @@ struct IndexTemplate {
     pnl_class: String,
     available_usdc: String,
     locked_usdc: String,
+    strategy_names: Vec<String>,
 }
 
 #[derive(Template)]
 #[template(path = "positions.html")]
 struct PositionsTemplate {
     positions: Vec<PositionRow>,
+    strategy_names: Vec<String>,
 }
 
 struct PositionRow {
@@ -86,6 +88,7 @@ struct PositionRow {
 #[template(path = "trades.html")]
 struct TradesTemplate {
     trades: Vec<TradeRow>,
+    strategy_names: Vec<String>,
 }
 
 struct TradeRow {
@@ -106,6 +109,7 @@ struct HealthTemplate {
     position_count: usize,
     order_count: usize,
     available_usdc: String,
+    strategy_names: Vec<String>,
 }
 
 #[derive(Template)]
@@ -121,6 +125,7 @@ struct PnlSummaryPartial {
 struct StrategyViewTemplate {
     strategy_name: String,
     content_html: String,
+    strategy_names: Vec<String>,
 }
 
 fn short_id(s: &str, len: usize) -> String {
@@ -142,6 +147,7 @@ pub async fn index(State(state): State<AppState>) -> std::result::Result<Html<St
     let pos_state = state.context.positions.read().await;
     let bal_state = state.context.balance.read().await;
     let pnl = pos_state.total_unrealized_pnl();
+    let strategy_names = state.context.strategy_names().await;
 
     let tmpl = IndexTemplate {
         strategy_count: state
@@ -154,6 +160,7 @@ pub async fn index(State(state): State<AppState>) -> std::result::Result<Html<St
         pnl_class: pnl_class(pnl).to_string(),
         available_usdc: bal_state.available_usdc.to_string(),
         locked_usdc: bal_state.locked_usdc.to_string(),
+        strategy_names,
     };
     Ok(Html(tmpl.render()?))
 }
@@ -163,6 +170,7 @@ pub async fn positions(
     State(state): State<AppState>,
 ) -> std::result::Result<Html<String>, AppError> {
     let pos_state = state.context.positions.read().await;
+    let strategy_names = state.context.strategy_names().await;
 
     let rows: Vec<PositionRow> = pos_state
         .open_positions
@@ -183,13 +191,17 @@ pub async fn positions(
         })
         .collect();
 
-    let tmpl = PositionsTemplate { positions: rows };
+    let tmpl = PositionsTemplate {
+        positions: rows,
+        strategy_names,
+    };
     Ok(Html(tmpl.render()?))
 }
 
 /// GET /trades — recent trade history
 pub async fn trades(State(state): State<AppState>) -> std::result::Result<Html<String>, AppError> {
     let trade_list = state.store.list_trades(None, 50).await.unwrap_or_default();
+    let strategy_names = state.context.strategy_names().await;
 
     let rows: Vec<TradeRow> = trade_list
         .iter()
@@ -208,7 +220,10 @@ pub async fn trades(State(state): State<AppState>) -> std::result::Result<Html<S
         })
         .collect();
 
-    let tmpl = TradesTemplate { trades: rows };
+    let tmpl = TradesTemplate {
+        trades: rows,
+        strategy_names,
+    };
     Ok(Html(tmpl.render()?))
 }
 
@@ -216,12 +231,14 @@ pub async fn trades(State(state): State<AppState>) -> std::result::Result<Html<S
 pub async fn health(State(state): State<AppState>) -> std::result::Result<Html<String>, AppError> {
     let pos_state = state.context.positions.read().await;
     let bal_state = state.context.balance.read().await;
+    let strategy_names = state.context.strategy_names().await;
 
     let tmpl = HealthTemplate {
         subscriber_count: state.event_bus.subscriber_count(),
         position_count: pos_state.position_count(),
         order_count: pos_state.open_orders.len(),
         available_usdc: bal_state.available_usdc.to_string(),
+        strategy_names,
     };
     Ok(Html(tmpl.render()?))
 }
@@ -246,9 +263,14 @@ pub async fn strategy_view(
     })?;
 
     let content_html = provider.render_view().map_err(|e| AppError(e.to_string()))?;
+    // Drop the read lock before acquiring another for strategy_names
+    drop(strategy);
+    drop(views);
+    let strategy_names = state.context.strategy_names().await;
     let tmpl = StrategyViewTemplate {
         strategy_name: name,
         content_html,
+        strategy_names,
     };
     Ok(Html(tmpl.render()?).into_response())
 }

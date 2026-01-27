@@ -72,16 +72,16 @@ Add custom per-strategy dashboard views so each strategy can render its own HTMX
 - [x] Run `cargo test -p polyrust-dashboard` — must pass before next task
 
 ### Task 4: Add dynamic strategy nav links to base template
-- [ ] Add `strategy_names: Vec<String>` field to all template structs (IndexTemplate, PositionsTemplate, etc.)
-- [ ] Populate `strategy_names` in each handler by reading `context.strategy_views`
-- [ ] Update `base.html` to render strategy nav links dynamically:
+- [x] Add `strategy_names: Vec<String>` field to all template structs (IndexTemplate, PositionsTemplate, etc.)
+- [x] Populate `strategy_names` in each handler by reading `context.strategy_views`
+- [x] Update `base.html` to render strategy nav links dynamically:
   ```html
   {% for name in strategy_names %}
   <a href="/strategy/{{ name }}" class="hover:text-white">{{ name }}</a>
   {% endfor %}
   ```
-- [ ] Write test verifying nav links appear when strategies have views
-- [ ] Run `cargo test -p polyrust-dashboard` — must pass before next task
+- [x] Write test verifying nav links appear when strategies have views
+- [x] Run `cargo test -p polyrust-dashboard` — must pass before next task
 
 ### Task 5: Implement crypto arb `DashboardViewProvider`
 - [ ] Implement `DashboardViewProvider` for `CryptoArbitrageStrategy`:
