@@ -38,13 +38,13 @@ Add custom per-strategy dashboard views so each strategy can render its own HTMX
 ## Implementation Steps
 
 ### Task 1: Add `DashboardViewProvider` trait to polyrust-core
-- [ ] Create `crates/polyrust-core/src/dashboard_view.rs` with:
+- [x] Create `crates/polyrust-core/src/dashboard_view.rs` with:
   - `DashboardViewProvider` trait: `fn view_name(&self) -> &str`, `fn render_view(&self) -> Result<String>` (returns HTML fragment)
   - Default impl in `Strategy` trait: `fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> { None }`
-- [ ] Add `pub mod dashboard_view;` to `crates/polyrust-core/src/lib.rs`
-- [ ] Export `DashboardViewProvider` in prelude
-- [ ] Write tests for default `None` return on Strategy trait
-- [ ] Run `cargo test -p polyrust-core` — must pass before next task
+- [x] Add `pub mod dashboard_view;` to `crates/polyrust-core/src/lib.rs`
+- [x] Export `DashboardViewProvider` in prelude
+- [x] Write tests for default `None` return on Strategy trait
+- [x] Run `cargo test -p polyrust-core` — must pass before next task
 
 ### Task 2: Expose strategy dashboard views through StrategyContext
 - [ ] Add `strategy_views: Arc<RwLock<HashMap<String, Arc<dyn DashboardViewProvider + Send + Sync>>>>` to `StrategyContext`

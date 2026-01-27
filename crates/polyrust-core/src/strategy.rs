@@ -1,5 +1,6 @@
 use crate::actions::Action;
 use crate::context::StrategyContext;
+use crate::dashboard_view::DashboardViewProvider;
 use crate::error::Result;
 use crate::events::Event;
 use async_trait::async_trait;
@@ -34,5 +35,11 @@ pub trait Strategy: Send + Sync {
     async fn on_stop(&mut self, ctx: &StrategyContext) -> Result<Vec<Action>> {
         let _ = ctx;
         Ok(vec![])
+    }
+
+    /// Optional custom dashboard view for this strategy.
+    /// Return `None` (default) if the strategy has no custom view.
+    fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> {
+        None
     }
 }
