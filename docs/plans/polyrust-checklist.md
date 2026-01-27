@@ -122,27 +122,27 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 
 ### Task 6: Implement Turso persistence layer
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 6](./polyrust-framework-implementation.md#task-6-implement-turso-store) — full Store struct, migration SQL, StoreError, libsql fallback note, CRUD method patterns
-- [ ] Add dependencies to `crates/polyrust-store/Cargo.toml`: polyrust-core, turso (or libsql as fallback), serde, serde_json, chrono, rust_decimal, uuid, tracing, thiserror
-- [ ] Create `crates/polyrust-store/src/error.rs` — `StoreError` enum (Connection, Migration, Query) + `StoreResult<T>` type alias
-- [ ] Create `crates/polyrust-store/src/db.rs` — `Store` struct wrapping turso::Database
-- [ ] Implement `Store::new(path)` — `Builder::new_local(path).build().await`, then `run_migrations()`
-- [ ] Implement `Store::connect()` → turso::Connection
-- [ ] Implement `run_migrations()` — CREATE TABLE IF NOT EXISTS for: `trades` (id TEXT PK, order_id, market_id, token_id, side, price TEXT, size TEXT, realized_pnl TEXT nullable, strategy_name, timestamp, created_at), `orders` (id TEXT PK, token_id, side, price TEXT, size TEXT, filled_size TEXT default '0', status, strategy_name, created_at, updated_at), `events` (id INTEGER PK AUTOINCREMENT, event_type, topic, payload TEXT, timestamp), `pnl_snapshots` (id INTEGER PK AUTOINCREMENT, total_pnl TEXT, unrealized_pnl TEXT, realized_pnl TEXT, open_positions INT, open_orders INT, available_balance TEXT, timestamp) with indexes on trades(strategy_name), trades(timestamp), orders(status), events(topic), pnl_snapshots(timestamp)
-- [ ] Create `crates/polyrust-store/src/trades.rs` — `insert_trade(conn, &Trade)`, `get_trade(conn, id) -> Option<Trade>`, `list_trades(conn, strategy: Option<&str>, limit: usize) -> Vec<Trade>`
-- [ ] Create `crates/polyrust-store/src/orders.rs` — `insert_order(conn, &Order)`, `get_order(conn, id) -> Option<Order>`, `update_order_status(conn, id, status)`, `list_orders(conn, status: Option<OrderStatus>, limit: usize) -> Vec<Order>`
-- [ ] Create `crates/polyrust-store/src/events.rs` — `insert_event(conn, &Event)` (serialize Event to JSON payload), `list_events(conn, topic: Option<&str>, limit: usize) -> Vec<StoredEvent>`
-- [ ] Create `crates/polyrust-store/src/snapshots.rs` — `insert_snapshot(conn, &PnlSnapshot)`, `list_snapshots(conn, limit: usize) -> Vec<PnlSnapshot>`, `latest_snapshot(conn) -> Option<PnlSnapshot>`
-- [ ] Update `crates/polyrust-store/src/lib.rs` with module declarations and public re-exports
-- [ ] Store `Decimal` values as TEXT in SQLite for precision (store via `.to_string()`, parse via `Decimal::from_str()`)
-- [ ] Write tests using in-memory database (`":memory:"`):
+- [x] Add dependencies to `crates/polyrust-store/Cargo.toml`: polyrust-core, turso (or libsql as fallback), serde, serde_json, chrono, rust_decimal, uuid, tracing, thiserror
+- [x] Create `crates/polyrust-store/src/error.rs` — `StoreError` enum (Connection, Migration, Query) + `StoreResult<T>` type alias
+- [x] Create `crates/polyrust-store/src/db.rs` — `Store` struct wrapping turso::Database
+- [x] Implement `Store::new(path)` — `Builder::new_local(path).build().await`, then `run_migrations()`
+- [x] Implement `Store::connect()` → turso::Connection
+- [x] Implement `run_migrations()` — CREATE TABLE IF NOT EXISTS for: `trades` (id TEXT PK, order_id, market_id, token_id, side, price TEXT, size TEXT, realized_pnl TEXT nullable, strategy_name, timestamp, created_at), `orders` (id TEXT PK, token_id, side, price TEXT, size TEXT, filled_size TEXT default '0', status, strategy_name, created_at, updated_at), `events` (id INTEGER PK AUTOINCREMENT, event_type, topic, payload TEXT, timestamp), `pnl_snapshots` (id INTEGER PK AUTOINCREMENT, total_pnl TEXT, unrealized_pnl TEXT, realized_pnl TEXT, open_positions INT, open_orders INT, available_balance TEXT, timestamp) with indexes on trades(strategy_name), trades(timestamp), orders(status), events(topic), pnl_snapshots(timestamp)
+- [x] Create `crates/polyrust-store/src/trades.rs` — `insert_trade(conn, &Trade)`, `get_trade(conn, id) -> Option<Trade>`, `list_trades(conn, strategy: Option<&str>, limit: usize) -> Vec<Trade>`
+- [x] Create `crates/polyrust-store/src/orders.rs` — `insert_order(conn, &Order)`, `get_order(conn, id) -> Option<Order>`, `update_order_status(conn, id, status)`, `list_orders(conn, status: Option<OrderStatus>, limit: usize) -> Vec<Order>`
+- [x] Create `crates/polyrust-store/src/events.rs` — `insert_event(conn, &Event)` (serialize Event to JSON payload), `list_events(conn, topic: Option<&str>, limit: usize) -> Vec<StoredEvent>`
+- [x] Create `crates/polyrust-store/src/snapshots.rs` — `insert_snapshot(conn, &PnlSnapshot)`, `list_snapshots(conn, limit: usize) -> Vec<PnlSnapshot>`, `latest_snapshot(conn) -> Option<PnlSnapshot>`
+- [x] Update `crates/polyrust-store/src/lib.rs` with module declarations and public re-exports
+- [x] Store `Decimal` values as TEXT in SQLite for precision (store via `.to_string()`, parse via `Decimal::from_str()`)
+- [x] Write tests using in-memory database (`":memory:"`):
   - Test: migrations are idempotent (run Store::new twice, no error)
   - Test: insert_trade + get_trade roundtrip preserves all fields including Decimal precision
   - Test: insert_order + update_order_status + get_order shows updated status
   - Test: insert_event + list_events with topic filter returns only matching events
   - Test: insert_snapshot + latest_snapshot returns most recent
   - Test: list_trades with strategy filter returns only matching strategy's trades
-- [ ] Verify `cargo test --workspace` passes
-- [ ] Mark completed
+- [x] Verify `cargo test --workspace` passes
+- [x] Mark completed
 
 ---
 
