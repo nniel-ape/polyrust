@@ -8,28 +8,28 @@ Autonomous Polymarket trading bot framework in Rust with event-driven architectu
 ┌─────────────────────────────────────────────────────────────────┐
 │                        polyrust binary                          │
 │                                                                 │
-│  ┌──────────────┐   ┌──────────────┐   ┌────────────────────┐  │
-│  │  Axum+HTMX   │   │   Engine      │   │  Turso (embedded)  │  │
-│  │  Dashboard    │◄──│   Core        │──►│  - trades          │  │
-│  │  (monitor)    │   │              │   │  - orders          │  │
-│  └──────────────┘   │  ┌────────┐  │   │  - events          │  │
-│                      │  │EventBus│  │   │  - pnl_snapshots   │  │
-│                      │  └───┬────┘  │   └────────────────────┘  │
-│                      │      │       │                            │
-│         ┌────────────┼──────┼───────┼────────────┐              │
-│         ▼            ▼      ▼       ▼            ▼              │
-│  ┌───────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐       │
-│  │ Strategy A │ │Strategy B│ │ Position │ │  Balance   │       │
-│  │ (crypto    │ │(user's)  │ │ State    │ │  State     │       │
-│  │  arb)      │ │          │ │ (shared) │ │            │       │
-│  └─────┬─────┘ └────┬─────┘ └──────────┘ └────────────┘       │
+│  ┌──────────────┐   ┌──────────────┐   ┌────────────────────┐   │
+│  │  Axum+HTMX   │   │   Engine     │   │  Turso (embedded)  │   │
+│  │  Dashboard   │◄──│   Core       │──►│  - trades          │   │
+│  │  (monitor)   │   │              │   │  - orders          │   │
+│  └──────────────┘   │  ┌────────┐  │   │  - events          │   │
+│                     │  │EventBus│  │   │  - pnl_snapshots   │   │
+│                     │  └───┬────┘  │   └────────────────────┘   │
+│                     │      │       │                            │
+│        ┌────────────┼──────┼───────┼────────────┐               │
+│        ▼            ▼      ▼       ▼            ▼               │
+│  ┌───────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐         │
+│  │ Strategy A│ │Strategy B│ │ Position │ │  Balance   │         │
+│  │ (crypto   │ │(user's)  │ │ State    │ │  State     │         │
+│  │  arb)     │ │          │ │ (shared) │ │            │         │
+│  └─────┬─────┘ └────┬─────┘ └──────────┘ └────────────┘         │
 │        │             │                                          │
 │        ▼             ▼                                          │
 │  ┌─────────────────────────────────┐                            │
-│  │      ExecutionBackend trait      │                            │
+│  │      ExecutionBackend trait     │                            │
 │  │  ┌───────────┐ ┌──────────────┐ │                            │
-│  │  │   Live     │ │   Paper      │ │                            │
-│  │  │ (rs-clob)  │ │ (simulated)  │ │                            │
+│  │  │   Live    │ │   Paper      │ │                            │
+│  │  │ (rs-clob) │ │ (simulated)  │ │                            │
 │  │  └───────────┘ └──────────────┘ │                            │
 │  └─────────────────────────────────┘                            │
 │                      │                                          │
