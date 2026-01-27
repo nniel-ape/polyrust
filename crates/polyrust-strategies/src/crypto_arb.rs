@@ -60,6 +60,19 @@ impl Default for ArbitrageConfig {
     }
 }
 
+/// Parse a unix timestamp from a slug suffix (e.g. `btc-updown-15m-1706000000` → timestamp).
+/// Returns `None` if the slug doesn't end with a valid unix timestamp.
+fn parse_slug_timestamp(slug: &str) -> Option<i64> {
+    let last_segment = slug.rsplit('-').next()?;
+    let ts: i64 = last_segment.parse().ok()?;
+    // Sanity: must be a reasonable unix timestamp (after 2020)
+    if ts > 1_577_836_800 {
+        Some(ts)
+    } else {
+        None
+    }
+}
+
 /// Format a USD price with 2 decimal places and thousands separators (e.g. `$88,959.37`).
 fn fmt_usd(price: Decimal) -> String {
     let rounded = price.round_dp(2);
@@ -96,14 +109,47 @@ fn fmt_market_price(price: Decimal) -> String {
 // Domain types
 // ---------------------------------------------------------------------------
 
+/// How accurately the reference price matches the market's actual start-of-window price.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceQuality {
+    /// Boundary snapshot captured within 2s of window start (best).
+    Exact,
+    /// Closest historical price entry; staleness in seconds from window start.
+    Historical(u64),
+    /// Price at discovery time — existing fallback behavior (least accurate).
+    Current,
+}
+
+impl ReferenceQuality {
+    /// Confidence discount factor based on reference accuracy.
+    /// Exact = 1.0, Historical(<5s) = 0.95, Historical(>=5s) = 0.85, Current = 0.70.
+    pub fn quality_factor(&self) -> Decimal {
+        match self {
+            ReferenceQuality::Exact => Decimal::ONE,
+            ReferenceQuality::Historical(s) if *s < 5 => Decimal::new(95, 2),
+            ReferenceQuality::Historical(_) => Decimal::new(85, 2),
+            ReferenceQuality::Current => Decimal::new(70, 2),
+        }
+    }
+}
+
+/// A price snapshot captured at a 15-minute window boundary.
+#[derive(Debug, Clone)]
+pub struct BoundarySnapshot {
+    pub timestamp: DateTime<Utc>,
+    pub price: Decimal,
+    /// Price source (e.g. "chainlink", "binance")
+    pub source: String,
+}
+
 /// Market enriched with the reference crypto price at discovery time.
 #[derive(Debug, Clone)]
 pub struct MarketWithReference {
     pub market: MarketInfo,
     /// Crypto price at the moment the market was discovered
     pub reference_price: Decimal,
-    /// True if reference was approximate (mid-window discovery)
-    pub reference_approximate: bool,
+    /// How accurately the reference price matches the window start price.
+    pub reference_quality: ReferenceQuality,
     pub discovery_time: DateTime<Utc>,
     /// Coin symbol (e.g. "BTC")
     pub coin: String,
@@ -128,6 +174,9 @@ impl MarketWithReference {
     /// - Tail-end (< 120s, market >= 0.90): confidence 1.0
     /// - Late window (120-300s): distance-weighted with market boost
     /// - Early window (> 300s): distance-weighted, lower base
+    ///
+    /// The raw confidence is then discounted by `reference_quality.quality_factor()`
+    /// to reflect how accurately the reference price matches the window start price.
     pub fn get_confidence(
         &self,
         current_price: Decimal,
@@ -140,21 +189,21 @@ impl MarketWithReference {
             ((current_price - self.reference_price) / self.reference_price).abs()
         };
 
-        if time_remaining_secs < 120 && market_price >= Decimal::new(90, 2) {
-            // Tail-end: highest confidence
+        let raw = if time_remaining_secs < 120 && market_price >= Decimal::new(90, 2) {
+            // Tail-end: highest confidence — quality factor still applies
             Decimal::ONE
         } else if time_remaining_secs < 300 {
             // Late window
             let base = distance_pct * Decimal::new(66, 0);
             let market_boost =
                 Decimal::ONE + (market_price - Decimal::new(50, 2)) * Decimal::new(5, 1);
-            let raw = base * market_boost;
-            raw.min(Decimal::ONE)
+            (base * market_boost).min(Decimal::ONE)
         } else {
             // Early window
-            let raw = distance_pct * Decimal::new(50, 0);
-            raw.min(Decimal::ONE)
-        }
+            (distance_pct * Decimal::new(50, 0)).min(Decimal::ONE)
+        };
+
+        (raw * self.reference_quality.quality_factor()).min(Decimal::ONE)
     }
 }
 
@@ -213,10 +262,25 @@ struct PendingOrder {
 
 /// Crypto arbitrage strategy that exploits mispricing in 15-minute Up/Down
 /// crypto prediction markets on Polymarket.
+/// Number of price history entries to keep per coin.
+/// At ~5s RTDS intervals, 200 entries covers ~16 minutes — enough for a full
+/// 15-minute window plus discovery delay.
+const PRICE_HISTORY_SIZE: usize = 200;
+
+/// Maximum time (seconds) from a window boundary to consider a snapshot "exact".
+const BOUNDARY_TOLERANCE_SECS: i64 = 2;
+
+/// 15 minutes in seconds (window duration).
+const WINDOW_SECS: i64 = 900;
+
 pub struct CryptoArbitrageStrategy {
     config: ArbitrageConfig,
     active_markets: HashMap<MarketId, MarketWithReference>,
-    price_history: HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>,
+    /// Price history per coin: (timestamp, price, source).
+    /// Kept at PRICE_HISTORY_SIZE entries for retroactive reference lookup.
+    price_history: HashMap<String, VecDeque<(DateTime<Utc>, Decimal, String)>>,
+    /// Proactive price snapshots at 15-min window boundaries, keyed by "{COIN}-{unix_ts}".
+    boundary_prices: HashMap<String, BoundarySnapshot>,
     positions: HashMap<MarketId, Vec<ArbitragePosition>>,
     /// Orders submitted but not yet confirmed — keyed by token_id.
     /// Prevents re-entry while orders are in flight.
@@ -241,6 +305,7 @@ impl CryptoArbitrageStrategy {
             config,
             active_markets: HashMap::new(),
             price_history: HashMap::new(),
+            boundary_prices: HashMap::new(),
             positions: HashMap::new(),
             pending_orders: HashMap::new(),
             pending_stop_loss: HashSet::new(),
@@ -257,30 +322,78 @@ impl CryptoArbitrageStrategy {
         &mut self,
         symbol: &str,
         price: Decimal,
+        source: &str,
         ctx: &StrategyContext,
     ) -> Result<Vec<Action>> {
-        // Record price history (keep last 12 entries ≈ 60s at 5s intervals)
+        let now = Utc::now();
+
+        // Record price history with source (keep last PRICE_HISTORY_SIZE entries)
         let history = self.price_history.entry(symbol.to_string()).or_default();
-        history.push_back((Utc::now(), price));
-        if history.len() > 12 {
+        history.push_back((now, price, source.to_string()));
+        if history.len() > PRICE_HISTORY_SIZE {
             history.pop_front();
+        }
+
+        // Capture boundary snapshot if we just crossed a 15-min boundary.
+        // A boundary is at :00, :15, :30, :45 of each hour.
+        let ts = now.timestamp();
+        let boundary_ts = ts - (ts % WINDOW_SECS);
+        let secs_from_boundary = ts - boundary_ts;
+        if secs_from_boundary.unsigned_abs() <= BOUNDARY_TOLERANCE_SECS as u64 {
+            let key = format!("{symbol}-{boundary_ts}");
+            // Only record if we haven't already (prefer Chainlink source)
+            let should_insert = match self.boundary_prices.get(&key) {
+                None => true,
+                Some(existing) => {
+                    // Prefer chainlink over other sources
+                    source.eq_ignore_ascii_case("chainlink")
+                        && !existing.source.eq_ignore_ascii_case("chainlink")
+                }
+            };
+            if should_insert {
+                self.boundary_prices.insert(
+                    key.clone(),
+                    BoundarySnapshot {
+                        timestamp: now,
+                        price,
+                        source: source.to_string(),
+                    },
+                );
+                info!(
+                    coin = %symbol,
+                    boundary_ts = boundary_ts,
+                    price = %price,
+                    source = %source,
+                    "Captured boundary price snapshot"
+                );
+            }
+            // Prune old boundary snapshots (keep last 4 per coin = 1 hour)
+            self.prune_boundary_snapshots(symbol);
         }
 
         let mut actions = Vec::new();
 
         // Promote any pending market for this coin now that we have a price
         if let Some(market) = self.pending_discovery.remove(symbol) {
+            let window_ts = market
+                .start_date
+                .map(|d| d.timestamp())
+                .or_else(|| parse_slug_timestamp(&market.slug))
+                .unwrap_or(boundary_ts);
+            let (reference_price, reference_quality) =
+                self.find_best_reference(symbol, window_ts, price);
             let mwr = MarketWithReference {
                 market: market.clone(),
-                reference_price: price,
-                reference_approximate: false,
+                reference_price,
+                reference_quality,
                 discovery_time: Utc::now(),
                 coin: symbol.to_string(),
             };
             info!(
                 coin = %symbol,
                 market = %market.id,
-                reference = %price,
+                reference = %reference_price,
+                quality = ?reference_quality,
                 "Activated buffered market (price now available)"
             );
             self.active_markets.insert(market.id.clone(), mwr);
@@ -576,7 +689,7 @@ impl CryptoArbitrageStrategy {
         let current_crypto = self
             .price_history
             .get(&pos.coin)
-            .and_then(|h| h.back().map(|(_, p)| *p));
+            .and_then(|h| h.back().map(|(_, p, _)| *p));
 
         let crypto_reversed = if let Some(current) = current_crypto {
             let reversal = match pos.side {
@@ -632,21 +745,37 @@ impl CryptoArbitrageStrategy {
             return Ok(vec![]);
         }
 
-        // Get the current crypto price as the reference
+        // Get the current crypto price — needed as final fallback
         let md = ctx.market_data.read().await;
-        let reference_price = match md.external_prices.get(&coin) {
+        let current_price = match md.external_prices.get(&coin) {
             Some(&p) => p,
             None => {
                 info!(coin = %coin, market = %market.id, "No price yet for coin, buffering market for later activation");
+                drop(md);
                 self.pending_discovery.insert(coin, market.clone());
                 return Ok(vec![]);
             }
         };
+        drop(md);
+
+        // Determine window start timestamp
+        let window_ts = market
+            .start_date
+            .map(|d| d.timestamp())
+            .or_else(|| parse_slug_timestamp(&market.slug))
+            .unwrap_or_else(|| {
+                // Fallback: align to nearest 15-min boundary
+                let now = Utc::now().timestamp();
+                now - (now % WINDOW_SECS)
+            });
+
+        let (reference_price, reference_quality) =
+            self.find_best_reference(&coin, window_ts, current_price);
 
         let mwr = MarketWithReference {
             market: market.clone(),
             reference_price,
-            reference_approximate: false,
+            reference_quality,
             discovery_time: Utc::now(),
             coin: coin.clone(),
         };
@@ -655,6 +784,7 @@ impl CryptoArbitrageStrategy {
             coin = %coin,
             market = %market.id,
             reference = %reference_price,
+            quality = ?reference_quality,
             "Discovered crypto market"
         );
 
@@ -805,6 +935,79 @@ impl CryptoArbitrageStrategy {
         }
     }
 
+    // -- Reference price helpers -----------------------------------------------
+
+    /// Find the most accurate reference price for a coin at a given window start.
+    ///
+    /// Priority:
+    /// 1. Exact boundary snapshot (captured within 2s of window start)
+    /// 2. Closest historical price entry (within 30s of window start)
+    /// 3. Current price (fallback)
+    fn find_best_reference(
+        &self,
+        coin: &str,
+        window_ts: i64,
+        current_price: Decimal,
+    ) -> (Decimal, ReferenceQuality) {
+        // 1. Exact boundary snapshot
+        let key = format!("{coin}-{window_ts}");
+        if let Some(snap) = self.boundary_prices.get(&key) {
+            return (snap.price, ReferenceQuality::Exact);
+        }
+
+        // 2. Historical lookup — closest entry to window start, preferring Chainlink
+        let target = DateTime::from_timestamp(window_ts, 0);
+        if let (Some(target_dt), Some(history)) = (target, self.price_history.get(coin)) {
+            // Find all entries within 30s of window start
+            let mut best: Option<(u64, Decimal, bool)> = None; // (staleness, price, is_chainlink)
+            for (ts, price, source) in history {
+                let staleness = (*ts - target_dt).num_seconds().unsigned_abs();
+                if staleness >= 30 {
+                    continue;
+                }
+                let is_chainlink = source.eq_ignore_ascii_case("chainlink");
+                let is_better = match best {
+                    None => true,
+                    Some((prev_stale, _, prev_cl)) => {
+                        // Prefer Chainlink if staleness is similar (within 5s)
+                        if is_chainlink && !prev_cl && staleness < prev_stale + 5 {
+                            true
+                        } else if !is_chainlink && prev_cl && prev_stale < staleness + 5 {
+                            false
+                        } else {
+                            staleness < prev_stale
+                        }
+                    }
+                };
+                if is_better {
+                    best = Some((staleness, *price, is_chainlink));
+                }
+            }
+            if let Some((staleness, price, _)) = best {
+                return (price, ReferenceQuality::Historical(staleness));
+            }
+        }
+
+        // 3. Current price (existing behavior)
+        (current_price, ReferenceQuality::Current)
+    }
+
+    /// Remove boundary snapshots older than 4 windows (1 hour) for a given coin.
+    fn prune_boundary_snapshots(&mut self, coin: &str) {
+        let now_ts = Utc::now().timestamp();
+        let cutoff = now_ts - (WINDOW_SECS * 4);
+        let prefix = format!("{coin}-");
+        self.boundary_prices.retain(|key, _| {
+            if !key.starts_with(&prefix) {
+                return true;
+            }
+            // Extract timestamp from key
+            key.strip_prefix(&prefix)
+                .and_then(|ts_str| ts_str.parse::<i64>().ok())
+                .is_none_or(|ts| ts >= cutoff)
+        });
+    }
+
     // -- Helpers ------------------------------------------------------------
 
     /// Extract coin symbol from market question string.
@@ -892,12 +1095,12 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
                 let current_price = self
                     .price_history
                     .get(&mwr.coin)
-                    .and_then(|h| h.back().map(|(_, p)| *p));
+                    .and_then(|h| h.back().map(|(_, p, _)| *p));
 
-                let ref_label = if mwr.reference_approximate {
-                    "~"
-                } else {
-                    "="
+                let ref_label = match mwr.reference_quality {
+                    ReferenceQuality::Exact => "=",
+                    ReferenceQuality::Historical(_) => "≈",
+                    ReferenceQuality::Current => "~",
                 };
 
                 let (change_str, change_class, prediction) = match current_price {
@@ -1074,9 +1277,12 @@ impl Strategy for CryptoArbitrageStrategy {
 
     async fn on_event(&mut self, event: &Event, ctx: &StrategyContext) -> Result<Vec<Action>> {
         let mut actions = match event {
-            Event::MarketData(MarketDataEvent::ExternalPrice { symbol, price, .. }) => {
-                self.on_crypto_price(symbol, *price, ctx).await?
-            }
+            Event::MarketData(MarketDataEvent::ExternalPrice {
+                symbol,
+                price,
+                source,
+                ..
+            }) => self.on_crypto_price(symbol, *price, source, ctx).await?,
 
             Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot)) => {
                 self.on_orderbook_update(snapshot, ctx).await?
@@ -1167,6 +1373,7 @@ mod tests {
             id: id.to_string(),
             slug: "btc-up-down".to_string(),
             question: "Will BTC go up?".to_string(),
+            start_date: None,
             end_date,
             token_ids: TokenIds {
                 outcome_a: "token_up".to_string(),
@@ -1184,7 +1391,7 @@ mod tests {
                 Utc::now() + Duration::seconds(time_remaining_secs),
             ),
             reference_price,
-            reference_approximate: false,
+            reference_quality: ReferenceQuality::Exact,
             discovery_time: Utc::now(),
             coin: "BTC".to_string(),
         }
@@ -1433,7 +1640,7 @@ mod tests {
 
         // Price reversed: BTC dropped from 50000 to 49500 = -1% > 0.5%
         let mut history = VecDeque::new();
-        history.push_back((Utc::now(), dec!(49500)));
+        history.push_back((Utc::now(), dec!(49500), "binance".to_string()));
         strategy.price_history.insert("BTC".to_string(), history);
 
         // Market bid dropped from 0.60 to 0.50 = 10¢ > 5¢
@@ -1464,7 +1671,7 @@ mod tests {
         };
 
         let mut history = VecDeque::new();
-        history.push_back((Utc::now(), dec!(49500)));
+        history.push_back((Utc::now(), dec!(49500), "binance".to_string()));
         strategy.price_history.insert("BTC".to_string(), history);
 
         let snapshot = make_orderbook("token_up", dec!(0.50), dec!(0.55));
@@ -1493,7 +1700,7 @@ mod tests {
 
         // Crypto reversed, but market price only dropped 3¢ < 5¢
         let mut history = VecDeque::new();
-        history.push_back((Utc::now(), dec!(49500)));
+        history.push_back((Utc::now(), dec!(49500), "binance".to_string()));
         strategy.price_history.insert("BTC".to_string(), history);
 
         let snapshot = make_orderbook("token_up", dec!(0.57), dec!(0.60));
@@ -1520,10 +1727,10 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::SubscribeMarket(_)));
         assert!(strategy.active_markets.contains_key("btc-market-1"));
-        assert_eq!(
-            strategy.active_markets["btc-market-1"].reference_price,
-            dec!(50000)
-        );
+        // Reference price should be the current external price (Current quality)
+        let mwr = &strategy.active_markets["btc-market-1"];
+        assert_eq!(mwr.reference_price, dec!(50000));
+        assert_eq!(mwr.reference_quality, ReferenceQuality::Current);
     }
 
     #[tokio::test]
@@ -1608,7 +1815,7 @@ mod tests {
 
         // Add current price history for BTC
         let mut history = VecDeque::new();
-        history.push_back((Utc::now(), dec!(50500)));
+        history.push_back((Utc::now(), dec!(50500), "binance".to_string()));
         strategy.price_history.insert("BTC".to_string(), history);
 
         let html = strategy.render_view().unwrap();
@@ -1688,17 +1895,254 @@ mod tests {
     }
 
     #[test]
-    fn render_view_approximate_reference() {
+    fn render_view_current_quality_reference() {
         let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
 
         let mut mwr = make_mwr(dec!(50000), 300);
-        mwr.reference_approximate = true;
+        mwr.reference_quality = ReferenceQuality::Current;
         strategy
             .active_markets
             .insert("market1".to_string(), mwr);
 
         let html = strategy.render_view().unwrap();
-        // Approximate reference should show ~ prefix with formatted price
+        // Current quality reference should show ~ prefix with formatted price
         assert!(html.contains("~$50,000.00"));
+    }
+
+    #[test]
+    fn render_view_historical_quality_reference() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        let mut mwr = make_mwr(dec!(50000), 300);
+        mwr.reference_quality = ReferenceQuality::Historical(10);
+        strategy
+            .active_markets
+            .insert("market1".to_string(), mwr);
+
+        let html = strategy.render_view().unwrap();
+        // Historical quality reference should show ≈ prefix
+        assert!(html.contains("≈$50,000.00"));
+    }
+
+    // --- reference quality tests ---
+
+    #[test]
+    fn quality_factor_values() {
+        assert_eq!(ReferenceQuality::Exact.quality_factor(), Decimal::ONE);
+        assert_eq!(
+            ReferenceQuality::Historical(3).quality_factor(),
+            dec!(0.95)
+        );
+        assert_eq!(
+            ReferenceQuality::Historical(10).quality_factor(),
+            dec!(0.85)
+        );
+        assert_eq!(ReferenceQuality::Current.quality_factor(), dec!(0.70));
+    }
+
+    #[test]
+    fn confidence_discounted_by_quality() {
+        // Exact quality: raw confidence unchanged
+        let mwr_exact = make_mwr(dec!(50000), 600);
+        // distance_pct = 500/50000 = 0.01, raw = 0.01 * 50 = 0.50
+        let c_exact = mwr_exact.get_confidence(dec!(50500), dec!(0.50), 600);
+        assert_eq!(c_exact, dec!(0.50)); // 0.50 * 1.0 = 0.50
+
+        // Current quality: discounted by 0.70
+        let mut mwr_current = make_mwr(dec!(50000), 600);
+        mwr_current.reference_quality = ReferenceQuality::Current;
+        let c_current = mwr_current.get_confidence(dec!(50500), dec!(0.50), 600);
+        assert_eq!(c_current, dec!(0.350)); // 0.50 * 0.70 = 0.35
+    }
+
+    #[test]
+    fn find_best_reference_exact_boundary() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        let ts = 1706000000i64;
+        strategy.boundary_prices.insert(
+            "BTC-1706000000".to_string(),
+            BoundarySnapshot {
+                timestamp: DateTime::from_timestamp(ts, 0).unwrap(),
+                price: dec!(42500),
+                source: "chainlink".to_string(),
+            },
+        );
+
+        let (price, quality) = strategy.find_best_reference("BTC", ts, dec!(43000));
+        assert_eq!(price, dec!(42500));
+        assert_eq!(quality, ReferenceQuality::Exact);
+    }
+
+    #[test]
+    fn find_best_reference_historical() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        let window_ts = 1706000000i64;
+        let target_dt = DateTime::from_timestamp(window_ts, 0).unwrap();
+
+        // Add history entries around the window start
+        let mut history = VecDeque::new();
+        // 5 seconds after window start
+        history.push_back((
+            target_dt + Duration::seconds(5),
+            dec!(42600),
+            "binance".to_string(),
+        ));
+        // 20 seconds after window start
+        history.push_back((
+            target_dt + Duration::seconds(20),
+            dec!(42700),
+            "binance".to_string(),
+        ));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        let (price, quality) = strategy.find_best_reference("BTC", window_ts, dec!(43000));
+        assert_eq!(price, dec!(42600)); // Closest to window start (5s)
+        assert_eq!(quality, ReferenceQuality::Historical(5));
+    }
+
+    #[test]
+    fn find_best_reference_historical_prefers_chainlink() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        let window_ts = 1706000000i64;
+        let target_dt = DateTime::from_timestamp(window_ts, 0).unwrap();
+
+        let mut history = VecDeque::new();
+        // Binance at 3s, Chainlink at 6s — within 5s of each other
+        history.push_back((
+            target_dt + Duration::seconds(3),
+            dec!(42600),
+            "binance".to_string(),
+        ));
+        history.push_back((
+            target_dt + Duration::seconds(6),
+            dec!(42650),
+            "chainlink".to_string(),
+        ));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        let (price, quality) = strategy.find_best_reference("BTC", window_ts, dec!(43000));
+        // Should prefer Chainlink even though it's slightly further
+        assert_eq!(price, dec!(42650));
+        assert_eq!(quality, ReferenceQuality::Historical(6));
+    }
+
+    #[test]
+    fn find_best_reference_fallback_to_current() {
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        // No boundary snapshots, no history
+        let (price, quality) = strategy.find_best_reference("BTC", 1706000000, dec!(43000));
+        assert_eq!(price, dec!(43000));
+        assert_eq!(quality, ReferenceQuality::Current);
+    }
+
+    #[test]
+    fn find_best_reference_stale_history_falls_to_current() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        let window_ts = 1706000000i64;
+        let target_dt = DateTime::from_timestamp(window_ts, 0).unwrap();
+
+        // History entry 60s after window start — too stale (> 30s threshold)
+        let mut history = VecDeque::new();
+        history.push_back((
+            target_dt + Duration::seconds(60),
+            dec!(42800),
+            "binance".to_string(),
+        ));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        let (price, quality) = strategy.find_best_reference("BTC", window_ts, dec!(43000));
+        assert_eq!(price, dec!(43000));
+        assert_eq!(quality, ReferenceQuality::Current);
+    }
+
+    #[test]
+    fn parse_slug_timestamp_valid() {
+        assert_eq!(
+            parse_slug_timestamp("btc-updown-15m-1706000000"),
+            Some(1706000000)
+        );
+    }
+
+    #[test]
+    fn parse_slug_timestamp_no_number() {
+        assert_eq!(parse_slug_timestamp("btc-updown-15m"), None);
+    }
+
+    #[test]
+    fn parse_slug_timestamp_small_number() {
+        assert_eq!(parse_slug_timestamp("btc-updown-15m-12345"), None);
+    }
+
+    #[test]
+    fn prune_boundary_snapshots_removes_old() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        let now_ts = Utc::now().timestamp();
+        let old_ts = now_ts - (WINDOW_SECS * 5); // 5 windows ago
+        let recent_ts = now_ts - WINDOW_SECS; // 1 window ago
+
+        strategy.boundary_prices.insert(
+            format!("BTC-{old_ts}"),
+            BoundarySnapshot {
+                timestamp: DateTime::from_timestamp(old_ts, 0).unwrap(),
+                price: dec!(40000),
+                source: "chainlink".to_string(),
+            },
+        );
+        strategy.boundary_prices.insert(
+            format!("BTC-{recent_ts}"),
+            BoundarySnapshot {
+                timestamp: DateTime::from_timestamp(recent_ts, 0).unwrap(),
+                price: dec!(42000),
+                source: "chainlink".to_string(),
+            },
+        );
+
+        strategy.prune_boundary_snapshots("BTC");
+
+        // Old one should be pruned, recent one kept
+        assert!(!strategy.boundary_prices.contains_key(&format!("BTC-{old_ts}")));
+        assert!(strategy.boundary_prices.contains_key(&format!("BTC-{recent_ts}")));
+    }
+
+    #[tokio::test]
+    async fn on_market_discovered_with_boundary_snapshot() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let ctx = StrategyContext::new();
+
+        // Set BTC price in context
+        {
+            let mut md = ctx.market_data.write().await;
+            md.external_prices.insert("BTC".to_string(), dec!(50500));
+        }
+
+        // Set up a boundary snapshot for the current window
+        let now_ts = Utc::now().timestamp();
+        let window_ts = now_ts - (now_ts % WINDOW_SECS);
+        strategy.boundary_prices.insert(
+            format!("BTC-{window_ts}"),
+            BoundarySnapshot {
+                timestamp: DateTime::from_timestamp(window_ts, 0).unwrap(),
+                price: dec!(50000),
+                source: "chainlink".to_string(),
+            },
+        );
+
+        let mut market = make_market_info("btc-market-1", Utc::now() + Duration::seconds(900));
+        market.start_date = DateTime::from_timestamp(window_ts, 0);
+
+        let actions = strategy.on_market_discovered(&market, &ctx).await.unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::SubscribeMarket(_)));
+
+        let mwr = &strategy.active_markets["btc-market-1"];
+        // Should use the boundary snapshot, not the current price
+        assert_eq!(mwr.reference_price, dec!(50000));
+        assert_eq!(mwr.reference_quality, ReferenceQuality::Exact);
     }
 }

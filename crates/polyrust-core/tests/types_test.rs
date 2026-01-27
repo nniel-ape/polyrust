@@ -143,6 +143,7 @@ fn market_info_seconds_remaining() {
         id: "m1".into(),
         slug: "test-market".into(),
         question: "Will BTC be above 100k?".into(),
+        start_date: None,
         end_date: future,
         token_ids: TokenIds {
             outcome_a: "tok_up".into(),
@@ -163,6 +164,7 @@ fn market_info_has_ended() {
         id: "m1".into(),
         slug: "test-market".into(),
         question: "Will BTC be above 100k?".into(),
+        start_date: None,
         end_date: past,
         token_ids: TokenIds {
             outcome_a: "tok_up".into(),

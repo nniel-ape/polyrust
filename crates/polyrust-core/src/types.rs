@@ -175,6 +175,9 @@ pub struct MarketInfo {
     pub id: MarketId,
     pub slug: String,
     pub question: String,
+    /// When the market's window starts (e.g. 15-min boundary).
+    /// Used for accurate reference price lookup.
+    pub start_date: Option<DateTime<Utc>>,
     pub end_date: DateTime<Utc>,
     pub token_ids: TokenIds,
     pub accepting_orders: bool,

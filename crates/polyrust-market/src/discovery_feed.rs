@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use chrono::{Timelike, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use polymarket_client_sdk::gamma;
 use polyrust_core::prelude::*;
 use tracing::{debug, info, warn};
@@ -129,6 +129,19 @@ async fn find_market_for_coin(
     None
 }
 
+/// Parse a unix timestamp from the slug suffix (e.g. `btc-updown-15m-1706000000`).
+/// Returns `None` if the slug doesn't end with a valid unix timestamp.
+pub fn parse_slug_timestamp(slug: &str) -> Option<DateTime<Utc>> {
+    let last_segment = slug.rsplit('-').next()?;
+    let ts: i64 = last_segment.parse().ok()?;
+    // Sanity: must be a reasonable unix timestamp (after 2020)
+    if ts > 1_577_836_800 {
+        DateTime::from_timestamp(ts, 0)
+    } else {
+        None
+    }
+}
+
 /// Convert a Gamma API market to our domain MarketInfo.
 /// Returns None if required fields are missing.
 fn convert_market(market: &gamma::types::response::Market) -> Option<MarketInfo> {
@@ -142,10 +155,13 @@ fn convert_market(market: &gamma::types::response::Market) -> Option<MarketInfo>
         return None;
     }
 
+    let start_date = market.start_date.or_else(|| parse_slug_timestamp(slug));
+
     Some(MarketInfo {
         id: condition_id.to_string(),
         slug: slug.clone(),
         question: question.clone(),
+        start_date,
         end_date,
         token_ids: TokenIds {
             outcome_a: clob_token_ids[0].to_string(),
@@ -337,5 +353,28 @@ mod tests {
         assert!(slug.starts_with("btc-updown-15m-"));
         // Timestamp should be a reasonable unix time (after 2024)
         assert!(ts > 1_700_000_000);
+    }
+
+    #[test]
+    fn test_parse_slug_timestamp_valid() {
+        let dt = parse_slug_timestamp("btc-updown-15m-1706000000");
+        assert!(dt.is_some());
+        assert_eq!(dt.unwrap().timestamp(), 1706000000);
+    }
+
+    #[test]
+    fn test_parse_slug_timestamp_no_number() {
+        assert!(parse_slug_timestamp("btc-updown-15m").is_none());
+    }
+
+    #[test]
+    fn test_parse_slug_timestamp_small_number() {
+        // Below 2020 threshold
+        assert!(parse_slug_timestamp("btc-updown-15m-12345").is_none());
+    }
+
+    #[test]
+    fn test_parse_slug_timestamp_empty() {
+        assert!(parse_slug_timestamp("").is_none());
     }
 }
