@@ -150,27 +150,27 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 
 ### Task 7: Implement market data feeds (CLOB orderbook + RTDS prices)
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 7](./polyrust-framework-implementation.md#task-7-implement-market-data-feeds) — MarketDataFeed trait, ClobFeed/PriceFeed implementation notes, OrderbookManager, Python reference files
-- [ ] Add dependencies to `crates/polyrust-market/Cargo.toml`: polyrust-core, polymarket-client-sdk (workspace), tokio, tracing, thiserror, async-trait
-- [ ] Create `crates/polyrust-market/src/feed.rs` — `MarketDataFeed` trait: `async fn start(&mut self, event_bus: EventBus)`, `async fn subscribe_market(&mut self, market: &MarketInfo)`, `async fn unsubscribe_market(&mut self, market_id: &str)`, `async fn stop(&mut self)`
-- [ ] Create `crates/polyrust-market/src/clob_feed.rs` — `ClobFeed` struct implementing MarketDataFeed
+- [x] Add dependencies to `crates/polyrust-market/Cargo.toml`: polyrust-core, polymarket-client-sdk (workspace), tokio, tracing, thiserror, async-trait
+- [x] Create `crates/polyrust-market/src/feed.rs` — `MarketDataFeed` trait: `async fn start(&mut self, event_bus: EventBus)`, `async fn subscribe_market(&mut self, market: &MarketInfo)`, `async fn unsubscribe_market(&mut self, market_id: &str)`, `async fn stop(&mut self)`
+- [x] Create `crates/polyrust-market/src/clob_feed.rs` — `ClobFeed` struct implementing MarketDataFeed
   - Connect to Polymarket WebSocket via rs-clob-client `ws` feature
   - Subscribe to token IDs for orderbook updates
   - Parse WS messages into `OrderbookSnapshot` structs
   - Publish `Event::MarketData(MarketDataEvent::OrderbookUpdate(...))` to EventBus
   - Handle reconnection with exponential backoff (reference: `../polymarket-trading-bot/src/websocket_client.py`)
-- [ ] Create `crates/polyrust-market/src/price_feed.rs` — `PriceFeed` struct implementing MarketDataFeed
+- [x] Create `crates/polyrust-market/src/price_feed.rs` — `PriceFeed` struct implementing MarketDataFeed
   - Connect to RTDS WebSocket via rs-clob-client `rtds` feature
   - Subscribe to `crypto_prices_chainlink` topic (Polymarket resolution source) and `crypto_prices` (Binance, faster)
   - Parse into `Event::MarketData(MarketDataEvent::ExternalPrice { symbol, price, source, timestamp })`
   - Maintain thread-safe price cache `Arc<RwLock<HashMap<String, (Decimal, DateTime<Utc>)>>>`
-- [ ] Create `crates/polyrust-market/src/orderbook.rs` — `OrderbookManager` maintaining latest `OrderbookSnapshot` per token_id with `Arc<RwLock<HashMap<TokenId, OrderbookSnapshot>>>`, update-on-event, `get_snapshot()`, `get_mid_price()`
-- [ ] Update `crates/polyrust-market/src/lib.rs` with module declarations and public exports
-- [ ] Write tests:
+- [x] Create `crates/polyrust-market/src/orderbook.rs` — `OrderbookManager` maintaining latest `OrderbookSnapshot` per token_id with `Arc<RwLock<HashMap<TokenId, OrderbookSnapshot>>>`, update-on-event, `get_snapshot()`, `get_mid_price()`
+- [x] Update `crates/polyrust-market/src/lib.rs` with module declarations and public exports
+- [x] Write tests:
   - Test: OrderbookManager updates snapshot and returns correct mid_price
   - Test: OrderbookManager handles missing token_id gracefully
   - Integration tests for live WS connections marked `#[ignore]`
-- [ ] Verify `cargo test --workspace` passes
-- [ ] Mark completed
+- [x] Verify `cargo test --workspace` passes
+- [x] Mark completed
 
 ### Task 8: Implement live execution backend (rs-clob-client)
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 8](./polyrust-framework-implementation.md#task-8-implement-live-execution-backend) — LiveBackend struct, SDK auth wiring, order mapping, tick size rounding, Python reference (bot.py, client.py)
