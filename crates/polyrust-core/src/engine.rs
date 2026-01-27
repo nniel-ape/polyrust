@@ -6,10 +6,26 @@ use crate::event_bus::EventBus;
 use crate::events::{Event, MarketDataEvent, OrderEvent, SignalEvent, SystemEvent};
 use crate::execution::ExecutionBackend;
 use crate::strategy::Strategy;
+use crate::types::MarketInfo;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
+
+/// Commands sent from the engine to market data feeds (e.g., ClobFeed).
+#[derive(Debug)]
+pub enum FeedCommand {
+    Subscribe(MarketInfo),
+    Unsubscribe(String),
+}
+
+pub type FeedCommandSender = mpsc::UnboundedSender<FeedCommand>;
+pub type FeedCommandReceiver = mpsc::UnboundedReceiver<FeedCommand>;
+
+/// Create a channel for sending feed commands from the engine to market feeds.
+pub fn feed_command_channel() -> (FeedCommandSender, FeedCommandReceiver) {
+    mpsc::unbounded_channel()
+}
 
 /// Main engine that orchestrates strategies, execution, and event routing.
 pub struct Engine {
@@ -19,6 +35,7 @@ pub struct Engine {
     execution: Arc<dyn ExecutionBackend>,
     context: StrategyContext,
     start_time: Option<Instant>,
+    feed_command_tx: Option<FeedCommandSender>,
 }
 
 /// Builder for constructing an Engine instance.
@@ -26,6 +43,7 @@ pub struct EngineBuilder {
     config: Option<Config>,
     strategies: Vec<Box<dyn Strategy>>,
     execution: Option<Arc<dyn ExecutionBackend>>,
+    feed_command_tx: Option<FeedCommandSender>,
 }
 
 impl EngineBuilder {
@@ -34,6 +52,7 @@ impl EngineBuilder {
             config: None,
             strategies: Vec::new(),
             execution: None,
+            feed_command_tx: None,
         }
     }
 
@@ -49,6 +68,11 @@ impl EngineBuilder {
 
     pub fn execution(mut self, backend: impl ExecutionBackend + 'static) -> Self {
         self.execution = Some(Arc::new(backend));
+        self
+    }
+
+    pub fn feed_commands(mut self, tx: FeedCommandSender) -> Self {
+        self.feed_command_tx = Some(tx);
         self
     }
 
@@ -105,6 +129,7 @@ impl EngineBuilder {
             execution,
             context,
             start_time: None,
+            feed_command_tx: self.feed_command_tx,
         })
     }
 }
@@ -169,13 +194,25 @@ impl Engine {
                     if matches!(&event, Event::System(SystemEvent::EngineStopping)) {
                         break;
                     }
-                    if let Event::MarketData(MarketDataEvent::ExternalPrice {
-                        symbol, price, ..
-                    }) = &event
-                    {
-                        let mut md = context.market_data.write().await;
-                        md.external_prices.insert(symbol.clone(), *price);
-                        debug!(symbol = %symbol, price = %price, "Updated external price in context");
+                    match &event {
+                        Event::MarketData(MarketDataEvent::ExternalPrice {
+                            symbol, price, ..
+                        }) => {
+                            let mut md = context.market_data.write().await;
+                            md.external_prices.insert(symbol.clone(), *price);
+                            debug!(symbol = %symbol, price = %price, "Updated external price in context");
+                        }
+                        Event::MarketData(MarketDataEvent::MarketDiscovered(info)) => {
+                            let mut md = context.market_data.write().await;
+                            debug!(market_id = %info.id, question = %info.question, "Stored discovered market in context");
+                            md.markets.insert(info.id.clone(), info.clone());
+                        }
+                        Event::MarketData(MarketDataEvent::MarketExpired(id)) => {
+                            let mut md = context.market_data.write().await;
+                            md.markets.remove(id);
+                            debug!(market_id = %id, "Removed expired market from context");
+                        }
+                        _ => {}
                     }
                 }
             })
@@ -189,6 +226,7 @@ impl Engine {
             let context = self.context.clone();
             let execution = Arc::clone(&self.execution);
             let event_bus = self.event_bus.clone();
+            let feed_tx = self.feed_command_tx.clone();
 
             let handle = tokio::spawn(async move {
                 loop {
@@ -208,9 +246,15 @@ impl Engine {
                     match s.on_event(&event, &context).await {
                         Ok(actions) => {
                             for action in actions {
-                                if let Err(e) =
-                                    execute_action(&action, &execution, &event_bus, &context, &name)
-                                        .await
+                                if let Err(e) = execute_action(
+                                    &action,
+                                    &execution,
+                                    &event_bus,
+                                    &context,
+                                    &name,
+                                    feed_tx.as_ref(),
+                                )
+                                .await
                                 {
                                     error!(
                                         strategy = %name,
@@ -252,6 +296,7 @@ impl Engine {
                             &self.event_bus,
                             &self.context,
                             &name,
+                            self.feed_command_tx.as_ref(),
                         )
                         .await
                         {
@@ -295,6 +340,7 @@ async fn execute_action(
     event_bus: &EventBus,
     context: &StrategyContext,
     strategy_name: &str,
+    feed_command_tx: Option<&FeedCommandSender>,
 ) -> Result<()> {
     match action {
         Action::PlaceOrder(req) => {
@@ -379,10 +425,33 @@ async fn execute_action(
             }));
         }
         Action::SubscribeMarket(id) => {
-            warn!(market_id = %id, "SubscribeMarket action not yet wired to market feeds");
+            if let Some(tx) = feed_command_tx {
+                let md = context.market_data.read().await;
+                if let Some(info) = md.markets.get(id) {
+                    let info = info.clone();
+                    drop(md);
+                    if let Err(e) = tx.send(FeedCommand::Subscribe(info)) {
+                        warn!(market_id = %id, error = %e, "failed to send subscribe command to feed");
+                    } else {
+                        info!(market_id = %id, strategy = %strategy_name, "sent subscribe command to feed");
+                    }
+                } else {
+                    warn!(market_id = %id, "SubscribeMarket: market not found in context");
+                }
+            } else {
+                warn!(market_id = %id, "SubscribeMarket: no feed command channel configured");
+            }
         }
         Action::UnsubscribeMarket(id) => {
-            warn!(market_id = %id, "UnsubscribeMarket action not yet wired to market feeds");
+            if let Some(tx) = feed_command_tx {
+                if let Err(e) = tx.send(FeedCommand::Unsubscribe(id.clone())) {
+                    warn!(market_id = %id, error = %e, "failed to send unsubscribe command to feed");
+                } else {
+                    info!(market_id = %id, strategy = %strategy_name, "sent unsubscribe command to feed");
+                }
+            } else {
+                warn!(market_id = %id, "UnsubscribeMarket: no feed command channel configured");
+            }
         }
     }
     Ok(())

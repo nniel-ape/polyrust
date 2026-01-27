@@ -15,7 +15,9 @@ pub mod prelude {
     pub use crate::actions::*;
     pub use crate::config::Config;
     pub use crate::context::*;
-    pub use crate::engine::Engine;
+    pub use crate::engine::{
+        Engine, FeedCommand, FeedCommandReceiver, FeedCommandSender, feed_command_channel,
+    };
     pub use crate::error::{PolyError, Result};
     pub use crate::event_bus::EventBus;
     pub use crate::events::*;
