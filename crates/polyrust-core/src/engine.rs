@@ -305,7 +305,23 @@ async fn execute_action(
                         let mut bal = context.balance.write().await;
                         bal.available_usdc = balance;
                     }
-                    event_bus.publish(Event::OrderUpdate(OrderEvent::Placed(result)));
+                    if result.success {
+                        event_bus.publish(Event::OrderUpdate(OrderEvent::Placed(result)));
+                    } else {
+                        // Backend returned Ok but the order was rejected (e.g. validation
+                        // failure, insufficient balance). Publish as Rejected so consumers
+                        // don't misinterpret it as a live order.
+                        warn!(
+                            token_id = %result.token_id,
+                            message = %result.message,
+                            "Order rejected by backend"
+                        );
+                        event_bus.publish(Event::OrderUpdate(OrderEvent::Rejected {
+                            order_id: result.order_id,
+                            reason: result.message,
+                            token_id: Some(result.token_id),
+                        }));
+                    }
                 }
                 Err(e) => {
                     warn!(
