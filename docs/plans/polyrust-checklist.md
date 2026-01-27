@@ -32,25 +32,25 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 
 ### Task 2: Define core domain types in polyrust-core
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 2](./polyrust-framework-implementation.md#task-2-define-core-domain-types) — full type definitions, serde attributes, method implementations, test code
-- [ ] Create `crates/polyrust-core/src/types.rs` with type aliases: `MarketId = String`, `TokenId = String`, `OrderId = String`
-- [ ] Add enum `OutcomeSide { Up, Down, Yes, No }` with serde rename_all lowercase, derive Hash
-- [ ] Add enum `OrderSide { Buy, Sell }` with serde rename_all UPPERCASE
-- [ ] Add enum `OrderType { Gtc, Gtd, Fok }` with serde rename_all UPPERCASE
-- [ ] Add struct `OrderRequest { token_id, price: Decimal, size: Decimal, side, order_type, neg_risk: bool }`
-- [ ] Add struct `OrderResult { success: bool, order_id: Option, status: Option, message: String }`
-- [ ] Add struct `Order { id, token_id, side, price, size, filled_size, status: OrderStatus, created_at }`
-- [ ] Add enum `OrderStatus { Open, Filled, PartiallyFilled, Cancelled, Expired }` with SCREAMING_SNAKE_CASE
-- [ ] Add struct `Position { id: Uuid, market_id, token_id, side: OutcomeSide, entry_price, size, current_price, entry_time, strategy_name }` with `unrealized_pnl()` method
-- [ ] Add struct `Trade { id: Uuid, order_id, market_id, token_id, side, price, size, realized_pnl: Option, strategy_name, timestamp }`
-- [ ] Add struct `OrderbookLevel { price, size }` and `OrderbookSnapshot { token_id, bids, asks, timestamp }` with methods: `best_bid()`, `best_ask()`, `mid_price()`, `spread()`
-- [ ] Add struct `MarketInfo { id, slug, question, end_date, token_ids: TokenIds, accepting_orders, neg_risk }` with methods: `has_ended()`, `seconds_remaining()`
-- [ ] Add struct `TokenIds { outcome_a, outcome_b }`
-- [ ] Create `crates/polyrust-core/src/error.rs` with `PolyError` enum (Config, Execution, MarketData, Storage, Strategy, EventBus, Sdk, Other) and `type Result<T>`
-- [ ] Update `lib.rs` with module declarations and `prelude` module re-exporting all public types
-- [ ] Add `rust_decimal_macros = "1"` to workspace dev-dependencies
-- [ ] Write `crates/polyrust-core/tests/types_test.rs` — test `mid_price()` returns `(bid+ask)/2`, `unrealized_pnl()` returns `(current-entry)*size`, `spread()` returns `ask-bid`, serde roundtrip for `OrderRequest`
-- [ ] Verify `cargo test --workspace` passes
-- [ ] Mark completed
+- [x] Create `crates/polyrust-core/src/types.rs` with type aliases: `MarketId = String`, `TokenId = String`, `OrderId = String`
+- [x] Add enum `OutcomeSide { Up, Down, Yes, No }` with serde rename_all lowercase, derive Hash
+- [x] Add enum `OrderSide { Buy, Sell }` with serde rename_all UPPERCASE
+- [x] Add enum `OrderType { Gtc, Gtd, Fok }` with serde rename_all UPPERCASE
+- [x] Add struct `OrderRequest { token_id, price: Decimal, size: Decimal, side, order_type, neg_risk: bool }`
+- [x] Add struct `OrderResult { success: bool, order_id: Option, status: Option, message: String }`
+- [x] Add struct `Order { id, token_id, side, price, size, filled_size, status: OrderStatus, created_at }`
+- [x] Add enum `OrderStatus { Open, Filled, PartiallyFilled, Cancelled, Expired }` with SCREAMING_SNAKE_CASE
+- [x] Add struct `Position { id: Uuid, market_id, token_id, side: OutcomeSide, entry_price, size, current_price, entry_time, strategy_name }` with `unrealized_pnl()` method
+- [x] Add struct `Trade { id: Uuid, order_id, market_id, token_id, side, price, size, realized_pnl: Option, strategy_name, timestamp }`
+- [x] Add struct `OrderbookLevel { price, size }` and `OrderbookSnapshot { token_id, bids, asks, timestamp }` with methods: `best_bid()`, `best_ask()`, `mid_price()`, `spread()`
+- [x] Add struct `MarketInfo { id, slug, question, end_date, token_ids: TokenIds, accepting_orders, neg_risk }` with methods: `has_ended()`, `seconds_remaining()`
+- [x] Add struct `TokenIds { outcome_a, outcome_b }`
+- [x] Create `crates/polyrust-core/src/error.rs` with `PolyError` enum (Config, Execution, MarketData, Storage, Strategy, EventBus, Sdk, Other) and `type Result<T>`
+- [x] Update `lib.rs` with module declarations and `prelude` module re-exporting all public types
+- [x] Add `rust_decimal_macros = "1"` to workspace dev-dependencies
+- [x] Write `crates/polyrust-core/tests/types_test.rs` — test `mid_price()` returns `(bid+ask)/2`, `unrealized_pnl()` returns `(current-entry)*size`, `spread()` returns `ask-bid`, serde roundtrip for `OrderRequest`
+- [x] Verify `cargo test --workspace` passes
+- [x] Mark completed
 
 ### Task 3: Define core traits — Strategy, ExecutionBackend, events, actions, context
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 3](./polyrust-framework-implementation.md#task-3-define-core-traits-strategy-executionbackend-marketdatafeed) — full Event enum, Action enum, StrategyContext, Strategy trait, ExecutionBackend trait with code

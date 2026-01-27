@@ -14,3 +14,7 @@ chrono = { workspace = true }
 rust_decimal = { workspace = true }
 uuid = { workspace = true }
 tokio-stream = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+rust_decimal_macros = { workspace = true }
