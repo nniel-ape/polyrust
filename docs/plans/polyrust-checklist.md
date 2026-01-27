@@ -54,19 +54,19 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 
 ### Task 3: Define core traits — Strategy, ExecutionBackend, events, actions, context
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 3](./polyrust-framework-implementation.md#task-3-define-core-traits-strategy-executionbackend-marketdatafeed) — full Event enum, Action enum, StrategyContext, Strategy trait, ExecutionBackend trait with code
-- [ ] Create `crates/polyrust-core/src/events.rs` — `Event` enum with variants: `MarketData(MarketDataEvent)`, `OrderUpdate(OrderEvent)`, `PositionChange(PositionEvent)`, `Signal(SignalEvent)`, `System(SystemEvent)` plus `topic()` method returning `&'static str`
-- [ ] Define `MarketDataEvent` — variants: `OrderbookUpdate(OrderbookSnapshot)`, `PriceChange { token_id, price, side, best_bid, best_ask }`, `Trade { token_id, price, size, timestamp }`, `ExternalPrice { symbol, price, source, timestamp }`, `MarketDiscovered(MarketInfo)`, `MarketExpired(MarketId)`
-- [ ] Define `OrderEvent` — variants: `Placed(OrderResult)`, `Filled { order_id, token_id, price, size }`, `PartiallyFilled { order_id, filled_size, remaining_size }`, `Cancelled(OrderId)`, `Rejected { order_id: Option, reason }`
-- [ ] Define `PositionEvent` — variants: `Opened(Position)`, `Closed { position_id, realized_pnl }`, `Updated(Position)`
-- [ ] Define `SignalEvent { strategy_name, signal_type, payload: serde_json::Value, timestamp }`
-- [ ] Define `SystemEvent` — variants: `EngineStarted`, `EngineStopping`, `StrategyStarted(String)`, `StrategyStopped(String)`, `Error { source, message }`, `HealthCheck { strategies_active, positions_open, uptime_seconds }`
-- [ ] Create `crates/polyrust-core/src/actions.rs` — `Action` enum: `PlaceOrder(OrderRequest)`, `CancelOrder(OrderId)`, `CancelAllOrders`, `Log { level: LogLevel, message }`, `EmitSignal { signal_type, payload }`, `SubscribeMarket(MarketId)`, `UnsubscribeMarket(MarketId)` plus `LogLevel` enum
-- [ ] Create `crates/polyrust-core/src/context.rs` — `StrategyContext` with `Arc<RwLock<PositionState>>` (open_positions HashMap, open_orders HashMap, position_count(), positions_for_strategy(), total_unrealized_pnl()), `Arc<RwLock<MarketDataState>>` (orderbooks, markets, external_prices), `Arc<RwLock<BalanceState>>` (available_usdc, locked_usdc)
-- [ ] Create `crates/polyrust-core/src/strategy.rs` — `Strategy` trait with: `fn name() -> &str`, `fn description() -> &str`, `async fn on_start()`, `async fn on_event() -> Result<Vec<Action>>`, `async fn on_stop()` (default impls for start/stop)
-- [ ] Create `crates/polyrust-core/src/execution.rs` — `ExecutionBackend` trait with: `place_order()`, `cancel_order()`, `cancel_all_orders()`, `get_open_orders()`, `get_positions()`, `get_balance()`
-- [ ] Update `lib.rs` and `prelude` with all new modules: actions, context, events, execution, strategy
-- [ ] Verify `cargo build --workspace` compiles
-- [ ] Mark completed
+- [x] Create `crates/polyrust-core/src/events.rs` — `Event` enum with variants: `MarketData(MarketDataEvent)`, `OrderUpdate(OrderEvent)`, `PositionChange(PositionEvent)`, `Signal(SignalEvent)`, `System(SystemEvent)` plus `topic()` method returning `&'static str`
+- [x] Define `MarketDataEvent` — variants: `OrderbookUpdate(OrderbookSnapshot)`, `PriceChange { token_id, price, side, best_bid, best_ask }`, `Trade { token_id, price, size, timestamp }`, `ExternalPrice { symbol, price, source, timestamp }`, `MarketDiscovered(MarketInfo)`, `MarketExpired(MarketId)`
+- [x] Define `OrderEvent` — variants: `Placed(OrderResult)`, `Filled { order_id, token_id, price, size }`, `PartiallyFilled { order_id, filled_size, remaining_size }`, `Cancelled(OrderId)`, `Rejected { order_id: Option, reason }`
+- [x] Define `PositionEvent` — variants: `Opened(Position)`, `Closed { position_id, realized_pnl }`, `Updated(Position)`
+- [x] Define `SignalEvent { strategy_name, signal_type, payload: serde_json::Value, timestamp }`
+- [x] Define `SystemEvent` — variants: `EngineStarted`, `EngineStopping`, `StrategyStarted(String)`, `StrategyStopped(String)`, `Error { source, message }`, `HealthCheck { strategies_active, positions_open, uptime_seconds }`
+- [x] Create `crates/polyrust-core/src/actions.rs` — `Action` enum: `PlaceOrder(OrderRequest)`, `CancelOrder(OrderId)`, `CancelAllOrders`, `Log { level: LogLevel, message }`, `EmitSignal { signal_type, payload }`, `SubscribeMarket(MarketId)`, `UnsubscribeMarket(MarketId)` plus `LogLevel` enum
+- [x] Create `crates/polyrust-core/src/context.rs` — `StrategyContext` with `Arc<RwLock<PositionState>>` (open_positions HashMap, open_orders HashMap, position_count(), positions_for_strategy(), total_unrealized_pnl()), `Arc<RwLock<MarketDataState>>` (orderbooks, markets, external_prices), `Arc<RwLock<BalanceState>>` (available_usdc, locked_usdc)
+- [x] Create `crates/polyrust-core/src/strategy.rs` — `Strategy` trait with: `fn name() -> &str`, `fn description() -> &str`, `async fn on_start()`, `async fn on_event() -> Result<Vec<Action>>`, `async fn on_stop()` (default impls for start/stop)
+- [x] Create `crates/polyrust-core/src/execution.rs` — `ExecutionBackend` trait with: `place_order()`, `cancel_order()`, `cancel_all_orders()`, `get_open_orders()`, `get_positions()`, `get_balance()`
+- [x] Update `lib.rs` and `prelude` with all new modules: actions, context, events, execution, strategy
+- [x] Verify `cargo build --workspace` compiles
+- [x] Mark completed
 
 ---
 
