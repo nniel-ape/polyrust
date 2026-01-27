@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use polymarket_client_sdk::rtds;
-use polymarket_client_sdk::ws::config::Config as WsConfig;
 use polyrust_core::prelude::*;
 use rust_decimal::Decimal;
 use tokio::sync::RwLock;
@@ -86,13 +85,7 @@ impl MarketDataFeed for PriceFeed {
         info!("starting RTDS crypto price feed");
         self.event_bus = Some(event_bus.clone());
 
-        let rtds_client = Arc::new(
-            rtds::Client::new(
-                "wss://ws-subscriptions-clob.polymarket.com/ws/rtds",
-                WsConfig::default(),
-            )
-            .map_err(|e| PolyError::Sdk(format!("failed to create RTDS client: {e}")))?,
-        );
+        let rtds_client = Arc::new(rtds::Client::default());
 
         // Spawn Chainlink price stream
         {
@@ -207,14 +200,12 @@ impl MarketDataFeed for PriceFeed {
                             };
 
                             if should_publish {
-                                bus.publish(Event::MarketData(
-                                    MarketDataEvent::ExternalPrice {
-                                        symbol,
-                                        price: price_msg.value,
-                                        source: "binance".into(),
-                                        timestamp,
-                                    },
-                                ));
+                                bus.publish(Event::MarketData(MarketDataEvent::ExternalPrice {
+                                    symbol,
+                                    price: price_msg.value,
+                                    source: "binance".into(),
+                                    timestamp,
+                                }));
                             }
                         }
                         Err(e) => {

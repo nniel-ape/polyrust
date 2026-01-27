@@ -75,7 +75,9 @@ impl EngineBuilder {
             .map(|s| Arc::new(RwLock::new(s)))
             .collect();
 
-        context.strategy_count.store(strategy_count, std::sync::atomic::Ordering::Relaxed);
+        context
+            .strategy_count
+            .store(strategy_count, std::sync::atomic::Ordering::Relaxed);
 
         Ok(Engine {
             config,
@@ -188,7 +190,8 @@ impl Engine {
                         Ok(actions) => {
                             for action in actions {
                                 if let Err(e) =
-                                    execute_action(&action, &execution, &event_bus, &context, &name).await
+                                    execute_action(&action, &execution, &event_bus, &context, &name)
+                                        .await
                                 {
                                     error!(
                                         strategy = %name,
@@ -302,10 +305,18 @@ async fn execute_action(
         }
         Action::CancelOrder(id) => {
             execution.cancel_order(id).await?;
+            if let Ok(balance) = execution.get_balance().await {
+                let mut bal = context.balance.write().await;
+                bal.available_usdc = balance;
+            }
             event_bus.publish(Event::OrderUpdate(OrderEvent::Cancelled(id.clone())));
         }
         Action::CancelAllOrders => {
             execution.cancel_all_orders().await?;
+            if let Ok(balance) = execution.get_balance().await {
+                let mut bal = context.balance.write().await;
+                bal.available_usdc = balance;
+            }
         }
         Action::Log { level, message } => match level {
             crate::actions::LogLevel::Debug => {
