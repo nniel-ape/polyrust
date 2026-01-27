@@ -265,13 +265,29 @@ async fn execute_action(
 ) -> Result<()> {
     match action {
         Action::PlaceOrder(req) => {
-            let result = execution.place_order(req).await?;
-            // Sync balance from execution backend to shared context
-            if let Ok(balance) = execution.get_balance().await {
-                let mut bal = context.balance.write().await;
-                bal.available_usdc = balance;
+            match execution.place_order(req).await {
+                Ok(result) => {
+                    // Sync balance from execution backend to shared context
+                    if let Ok(balance) = execution.get_balance().await {
+                        let mut bal = context.balance.write().await;
+                        bal.available_usdc = balance;
+                    }
+                    event_bus.publish(Event::OrderUpdate(OrderEvent::Placed(result)));
+                }
+                Err(e) => {
+                    warn!(
+                        token_id = %req.token_id,
+                        error = %e,
+                        "Order placement failed, publishing rejection"
+                    );
+                    event_bus.publish(Event::OrderUpdate(OrderEvent::Rejected {
+                        order_id: None,
+                        reason: e.to_string(),
+                        token_id: Some(req.token_id.clone()),
+                    }));
+                    return Err(e);
+                }
             }
-            event_bus.publish(Event::OrderUpdate(OrderEvent::Placed(result)));
         }
         Action::CancelOrder(id) => {
             execution.cancel_order(id).await?;

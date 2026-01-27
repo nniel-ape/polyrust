@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -73,8 +73,6 @@ pub struct MarketWithReference {
 }
 
 impl MarketWithReference {
-    /// Predict winner based on current crypto price vs reference.
-    /// If the current price exceeds reference, "Up" wins; otherwise "Down".
     /// Predict the winning outcome based on current price vs reference.
     /// Returns `None` when price equals reference (no directional signal).
     pub fn predict_winner(&self, current_price: Decimal) -> Option<OutcomeSide> {
@@ -186,6 +184,9 @@ pub struct CryptoArbitrageStrategy {
     /// Orders submitted but not yet confirmed — keyed by token_id.
     /// Prevents re-entry while orders are in flight.
     pending_orders: HashMap<TokenId, PendingOrder>,
+    /// Token IDs with active stop-loss sell orders awaiting confirmation.
+    /// Positions are only removed once the sell is confirmed or rejected.
+    pending_stop_loss: HashSet<TokenId>,
     last_scan: Option<tokio::time::Instant>,
 }
 
@@ -197,6 +198,7 @@ impl CryptoArbitrageStrategy {
             price_history: HashMap::new(),
             positions: HashMap::new(),
             pending_orders: HashMap::new(),
+            pending_stop_loss: HashSet::new(),
             last_scan: None,
         }
     }
@@ -451,10 +453,14 @@ impl CryptoArbitrageStrategy {
                 None => continue,
             };
 
-            let mut triggered_indices = Vec::new();
-            for (i, pos) in positions.iter().enumerate() {
+            for pos in &positions {
                 // Only check if this snapshot is for the position's token
                 if pos.token_id != snapshot.token_id {
+                    continue;
+                }
+
+                // Skip if stop-loss sell already in flight for this token
+                if self.pending_stop_loss.contains(&pos.token_id) {
                     continue;
                 }
 
@@ -465,19 +471,9 @@ impl CryptoArbitrageStrategy {
                         side = ?pos.side,
                         "Stop-loss triggered, selling position"
                     );
-                    triggered_indices.push(i);
+                    // Track pending stop-loss — position removed only on sell confirmation
+                    self.pending_stop_loss.insert(pos.token_id.clone());
                     actions.push(action);
-                }
-            }
-
-            if !triggered_indices.is_empty()
-                && let Some(remaining) = self.positions.get_mut(&market_id)
-            {
-                for i in triggered_indices.into_iter().rev() {
-                    remaining.remove(i);
-                }
-                if remaining.is_empty() {
-                    self.positions.remove(&market_id);
                 }
             }
         }
@@ -636,6 +632,25 @@ impl CryptoArbitrageStrategy {
 
     /// Handle order placement result — only record position on confirmed success.
     fn on_order_placed(&mut self, result: &OrderResult) -> Vec<Action> {
+        // Check if this is a stop-loss sell confirmation
+        if self.pending_stop_loss.remove(&result.token_id) {
+            if result.success {
+                // Sell confirmed — remove the position
+                self.remove_position_by_token(&result.token_id);
+                info!(
+                    token_id = %result.token_id,
+                    "Stop-loss sell confirmed, position removed"
+                );
+            } else {
+                warn!(
+                    token_id = %result.token_id,
+                    message = %result.message,
+                    "Stop-loss sell failed, position retained for retry"
+                );
+            }
+            return vec![];
+        }
+
         let pending = match self.pending_orders.remove(&result.token_id) {
             Some(p) => p,
             None => return vec![], // Not our order
@@ -677,6 +692,20 @@ impl CryptoArbitrageStrategy {
             .push(position);
 
         vec![]
+    }
+
+    /// Remove a position by token_id across all markets.
+    fn remove_position_by_token(&mut self, token_id: &str) {
+        let mut empty_markets = Vec::new();
+        for (market_id, positions) in &mut self.positions {
+            positions.retain(|p| p.token_id != token_id);
+            if positions.is_empty() {
+                empty_markets.push(market_id.clone());
+            }
+        }
+        for market_id in empty_markets {
+            self.positions.remove(&market_id);
+        }
     }
 
     // -- Helpers ------------------------------------------------------------
@@ -763,6 +792,27 @@ impl Strategy for CryptoArbitrageStrategy {
                 Ok(self.on_order_placed(result))
             }
 
+            Event::OrderUpdate(OrderEvent::Rejected { token_id, .. }) => {
+                if let Some(token_id) = token_id {
+                    // Clear pending buy order
+                    if let Some(pending) = self.pending_orders.remove(token_id) {
+                        warn!(
+                            token_id = %token_id,
+                            market = %pending.market_id,
+                            "Cleared pending order after rejection"
+                        );
+                    }
+                    // Clear pending stop-loss — position retained for retry
+                    if self.pending_stop_loss.remove(token_id) {
+                        warn!(
+                            token_id = %token_id,
+                            "Stop-loss sell rejected, position retained for retry"
+                        );
+                    }
+                }
+                Ok(vec![])
+            }
+
             _ => Ok(vec![]),
         }
     }
@@ -789,6 +839,7 @@ impl Strategy for CryptoArbitrageStrategy {
         }
 
         self.pending_orders.clear();
+        self.pending_stop_loss.clear();
         Ok(actions)
     }
 }

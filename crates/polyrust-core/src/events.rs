@@ -70,6 +70,8 @@ pub enum OrderEvent {
     Rejected {
         order_id: Option<OrderId>,
         reason: String,
+        /// Token ID of the rejected order (for pending order cleanup)
+        token_id: Option<TokenId>,
     },
 }
 
