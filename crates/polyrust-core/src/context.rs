@@ -1,6 +1,7 @@
 use crate::types::*;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -10,6 +11,7 @@ pub struct StrategyContext {
     pub positions: Arc<RwLock<PositionState>>,
     pub market_data: Arc<RwLock<MarketDataState>>,
     pub balance: Arc<RwLock<BalanceState>>,
+    pub strategy_count: Arc<AtomicUsize>,
 }
 
 impl StrategyContext {
@@ -18,6 +20,7 @@ impl StrategyContext {
             positions: Arc::new(RwLock::new(PositionState::default())),
             market_data: Arc::new(RwLock::new(MarketDataState::default())),
             balance: Arc::new(RwLock::new(BalanceState::default())),
+            strategy_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 }

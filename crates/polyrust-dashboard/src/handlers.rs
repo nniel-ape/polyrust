@@ -20,9 +20,10 @@ pub struct AppError(String);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        let escaped = self.0.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Error</h1><pre>{}</pre>", self.0)),
+            Html(format!("<h1>Error</h1><pre>{}</pre>", escaped)),
         )
             .into_response()
     }
@@ -111,8 +112,10 @@ struct PnlSummaryPartial {
 }
 
 fn short_id(s: &str, len: usize) -> String {
-    if s.len() > len {
-        format!("{}...", &s[..len])
+    let char_count = s.chars().count();
+    if char_count > len {
+        let truncated: String = s.chars().take(len).collect();
+        format!("{truncated}...")
     } else {
         s.to_string()
     }
@@ -131,7 +134,7 @@ pub async fn index(
     let pnl = pos_state.total_unrealized_pnl();
 
     let tmpl = IndexTemplate {
-        strategy_count: 0,
+        strategy_count: state.context.strategy_count.load(std::sync::atomic::Ordering::Relaxed),
         position_count: pos_state.position_count(),
         order_count: pos_state.open_orders.len(),
         total_unrealized_pnl: pnl.to_string(),

@@ -114,7 +114,12 @@ impl PaperBackend {
                 // Update positions and balance
                 match order.side {
                     OrderSide::Buy => {
-                        // Balance was already deducted when order was placed
+                        // Balance was already deducted at order price when placed.
+                        // Refund difference if filled at a better (lower) price.
+                        let price_improvement = order.price - fill_price;
+                        if price_improvement > Decimal::ZERO {
+                            state.usdc_balance += price_improvement * fill_size;
+                        }
                         let entry = state.positions.entry(order.token_id.clone()).or_insert(Decimal::ZERO);
                         *entry += fill_size;
                     }
@@ -356,10 +361,14 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
             }
         }
 
+        let status = match self.fill_mode {
+            FillMode::Immediate => "Filled",
+            FillMode::Orderbook => "Open",
+        };
         Ok(OrderResult {
             success: true,
             order_id: Some(order_id),
-            status: Some("Filled".to_string()),
+            status: Some(status.to_string()),
             message: "ok".to_string(),
         })
     }

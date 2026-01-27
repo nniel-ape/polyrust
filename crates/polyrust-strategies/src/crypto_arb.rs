@@ -212,39 +212,43 @@ impl CryptoArbitrageStrategy {
                 None => continue,
             };
 
-            if let Some(opp) = self.evaluate_opportunity(&market, price, ctx).await?
-                && self.positions.len() < self.config.max_positions
-            {
-                let order = OrderRequest {
-                    token_id: opp.token_id.clone(),
-                    price: opp.buy_price,
-                    size: self.config.position_size / opp.buy_price,
-                    side: OrderSide::Buy,
-                    order_type: OrderType::Fok,
-                    neg_risk: false,
-                };
-                info!(
-                    mode = ?opp.mode,
-                    market = %market_id,
-                    confidence = %opp.confidence,
-                    price = %opp.buy_price,
-                    "Opening arbitrage position"
-                );
+            let opps = self.evaluate_opportunity(&market, price, ctx).await?;
+            if !opps.is_empty() && self.positions.len() < self.config.max_positions {
+                for opp in &opps {
+                    let order = OrderRequest {
+                        token_id: opp.token_id.clone(),
+                        price: opp.buy_price,
+                        size: self.config.position_size / opp.buy_price,
+                        side: OrderSide::Buy,
+                        order_type: OrderType::Fok,
+                        neg_risk: false,
+                    };
+                    info!(
+                        mode = ?opp.mode,
+                        market = %market_id,
+                        confidence = %opp.confidence,
+                        price = %opp.buy_price,
+                        side = ?opp.outcome_to_buy,
+                        "Opening arbitrage position"
+                    );
+                    actions.push(Action::PlaceOrder(order));
+                }
+                // Record position using the first opportunity's details
+                let first = &opps[0];
                 self.positions.insert(
                     market_id.clone(),
                     ArbitragePosition {
                         market_id: market_id.clone(),
-                        token_id: opp.token_id.clone(),
-                        side: opp.outcome_to_buy,
-                        entry_price: opp.buy_price,
-                        size: self.config.position_size / opp.buy_price,
+                        token_id: first.token_id.clone(),
+                        side: first.outcome_to_buy,
+                        entry_price: first.buy_price,
+                        size: self.config.position_size / first.buy_price,
                         reference_price: market.reference_price,
                         coin: market.coin.clone(),
                         order_id: None,
                         entry_time: Utc::now(),
                     },
                 );
-                actions.push(Action::PlaceOrder(order));
             }
         }
 
@@ -252,22 +256,23 @@ impl CryptoArbitrageStrategy {
     }
 
     /// Evaluate opportunity across three modes in priority order.
+    /// Returns zero or more opportunities. TwoSided mode returns two (one per outcome).
     async fn evaluate_opportunity(
         &self,
         market: &MarketWithReference,
         current_price: Decimal,
         ctx: &StrategyContext,
-    ) -> Result<Option<ArbitrageOpportunity>> {
+    ) -> Result<Vec<ArbitrageOpportunity>> {
         let time_remaining = market.market.seconds_remaining();
 
         // Skip ended or almost-ended markets
         if time_remaining <= 0 {
-            return Ok(None);
+            return Ok(vec![]);
         }
 
         // Already have a position in this market
         if self.positions.contains_key(&market.market.id) {
-            return Ok(None);
+            return Ok(vec![]);
         }
 
         let md = ctx.market_data.read().await;
@@ -296,7 +301,7 @@ impl CryptoArbitrageStrategy {
                 && ask_price >= Decimal::new(90, 2)
             {
                 let profit_margin = Decimal::ONE - ask_price;
-                return Ok(Some(ArbitrageOpportunity {
+                return Ok(vec![ArbitrageOpportunity {
                     mode: ArbitrageMode::TailEnd,
                     market_id: market.market.id.clone(),
                     outcome_to_buy: predicted,
@@ -304,38 +309,37 @@ impl CryptoArbitrageStrategy {
                     buy_price: ask_price,
                     confidence: Decimal::ONE,
                     profit_margin,
-                }));
+                }]);
             }
         }
 
-        // 2. Two-Sided mode: sum of both asks < 0.98
+        // 2. Two-Sided mode: sum of both asks < 0.98 — buy BOTH outcomes
+        //    for guaranteed profit (one resolves to $1, the other to $0,
+        //    total cost < $1 so net profit = 1 - combined).
         if let (Some(ua), Some(da)) = (up_ask, down_ask) {
             let combined = ua + da;
             if combined < Decimal::new(98, 2) {
                 let profit_margin = Decimal::ONE - combined;
-                // Buy the cheaper side
-                let (outcome, token_id, buy_price) = if ua <= da {
-                    (
-                        OutcomeSide::Up,
-                        &market.market.token_ids.outcome_a,
-                        ua,
-                    )
-                } else {
-                    (
-                        OutcomeSide::Down,
-                        &market.market.token_ids.outcome_b,
-                        da,
-                    )
-                };
-                return Ok(Some(ArbitrageOpportunity {
-                    mode: ArbitrageMode::TwoSided,
-                    market_id: market.market.id.clone(),
-                    outcome_to_buy: outcome,
-                    token_id: token_id.clone(),
-                    buy_price,
-                    confidence: Decimal::ONE,
-                    profit_margin,
-                }));
+                return Ok(vec![
+                    ArbitrageOpportunity {
+                        mode: ArbitrageMode::TwoSided,
+                        market_id: market.market.id.clone(),
+                        outcome_to_buy: OutcomeSide::Up,
+                        token_id: market.market.token_ids.outcome_a.clone(),
+                        buy_price: ua,
+                        confidence: Decimal::ONE,
+                        profit_margin,
+                    },
+                    ArbitrageOpportunity {
+                        mode: ArbitrageMode::TwoSided,
+                        market_id: market.market.id.clone(),
+                        outcome_to_buy: OutcomeSide::Down,
+                        token_id: market.market.token_ids.outcome_b.clone(),
+                        buy_price: da,
+                        confidence: Decimal::ONE,
+                        profit_margin,
+                    },
+                ]);
             }
         }
 
@@ -361,7 +365,7 @@ impl CryptoArbitrageStrategy {
             };
 
             if confidence >= Decimal::new(50, 2) && profit_margin >= min_margin {
-                return Ok(Some(ArbitrageOpportunity {
+                return Ok(vec![ArbitrageOpportunity {
                     mode: ArbitrageMode::Confirmed,
                     market_id: market.market.id.clone(),
                     outcome_to_buy: predicted,
@@ -369,11 +373,11 @@ impl CryptoArbitrageStrategy {
                     buy_price: ask_price,
                     confidence,
                     profit_margin,
-                }));
+                }]);
             }
         }
 
-        Ok(None)
+        Ok(vec![])
     }
 
     async fn on_orderbook_update(
@@ -571,47 +575,6 @@ impl CryptoArbitrageStrategy {
         }
         None
     }
-}
-
-/// Compute volatility (standard deviation) of a price series.
-pub fn compute_volatility(prices: &VecDeque<(DateTime<Utc>, Decimal)>) -> Decimal {
-    if prices.len() < 2 {
-        return Decimal::ZERO;
-    }
-
-    let values: Vec<Decimal> = prices.iter().map(|(_, p)| *p).collect();
-    let n = Decimal::new(values.len() as i64, 0);
-    let mean = values.iter().copied().sum::<Decimal>() / n;
-
-    let variance = values
-        .iter()
-        .map(|p| {
-            let diff = *p - mean;
-            diff * diff
-        })
-        .sum::<Decimal>()
-        / n;
-
-    // Approximate sqrt via Newton's method for Decimal
-    decimal_sqrt(variance)
-}
-
-/// Newton's method square root for Decimal.
-fn decimal_sqrt(val: Decimal) -> Decimal {
-    if val.is_zero() || val < Decimal::ZERO {
-        return Decimal::ZERO;
-    }
-
-    let two = Decimal::new(2, 0);
-    let mut guess = val / two;
-    // 20 iterations gives high precision for financial values
-    for _ in 0..20 {
-        if guess.is_zero() {
-            return Decimal::ZERO;
-        }
-        guess = (guess + val / guess) / two;
-    }
-    guess
 }
 
 #[async_trait]
@@ -828,12 +791,12 @@ mod tests {
 
         let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
         // Current price > reference => Up wins; ask = 0.95 >= 0.90
-        let opp = strategy
+        let opps = strategy
             .evaluate_opportunity(&mwr, dec!(51000), &ctx)
             .await
             .unwrap();
-        assert!(opp.is_some());
-        let opp = opp.unwrap();
+        assert!(!opps.is_empty());
+        let opp = &opps[0];
         assert_eq!(opp.mode, ArbitrageMode::TailEnd);
         assert_eq!(opp.outcome_to_buy, OutcomeSide::Up);
         assert_eq!(opp.buy_price, dec!(0.95));
@@ -859,14 +822,15 @@ mod tests {
         }
 
         let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
-        let opp = strategy
+        let opps = strategy
             .evaluate_opportunity(&mwr, dec!(50100), &ctx)
             .await
             .unwrap();
-        assert!(opp.is_some());
-        let opp = opp.unwrap();
-        assert_eq!(opp.mode, ArbitrageMode::TwoSided);
-        assert_eq!(opp.profit_margin, dec!(0.03)); // 1.0 - 0.97
+        assert_eq!(opps.len(), 2, "TwoSided should return both outcomes");
+        assert_eq!(opps[0].mode, ArbitrageMode::TwoSided);
+        assert_eq!(opps[0].outcome_to_buy, OutcomeSide::Up);
+        assert_eq!(opps[1].outcome_to_buy, OutcomeSide::Down);
+        assert_eq!(opps[0].profit_margin, dec!(0.03)); // 1.0 - 0.97
     }
 
     #[tokio::test]
@@ -890,12 +854,12 @@ mod tests {
         let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
         // Large price move: 52000 vs 50000 = 4% distance
         // confidence = min(1.0, 0.04 * 66 * boost) will be > 0.50
-        let opp = strategy
+        let opps = strategy
             .evaluate_opportunity(&mwr, dec!(52000), &ctx)
             .await
             .unwrap();
-        assert!(opp.is_some());
-        let opp = opp.unwrap();
+        assert!(!opps.is_empty());
+        let opp = &opps[0];
         assert_eq!(opp.mode, ArbitrageMode::Confirmed);
         assert_eq!(opp.outcome_to_buy, OutcomeSide::Up);
         assert!(opp.confidence >= dec!(0.50));
@@ -922,11 +886,11 @@ mod tests {
         let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
         // Tiny move: 50010 vs 50000 = 0.02% distance
         // confidence = 0.0002 * 50 = 0.01 < 0.50
-        let opp = strategy
+        let opps = strategy
             .evaluate_opportunity(&mwr, dec!(50010), &ctx)
             .await
             .unwrap();
-        assert!(opp.is_none());
+        assert!(opps.is_empty());
     }
 
     // --- stop-loss tests ---
@@ -1083,36 +1047,6 @@ mod tests {
         assert!(!strategy.active_markets.contains_key("market1"));
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::UnsubscribeMarket(_)));
-    }
-
-    // --- volatility tests ---
-
-    #[test]
-    fn volatility_known_series() {
-        // Known series: [2, 4, 4, 4, 5, 5, 7, 9]
-        // Mean = 5, Variance = 4, Std dev = 2
-        let prices: VecDeque<(DateTime<Utc>, Decimal)> = [2, 4, 4, 4, 5, 5, 7, 9]
-            .iter()
-            .map(|&p| (Utc::now(), Decimal::new(p, 0)))
-            .collect();
-
-        let vol = compute_volatility(&prices);
-        // Should be approximately 2.0
-        let diff = (vol - dec!(2.0)).abs();
-        assert!(diff < dec!(0.01), "Expected ~2.0, got {vol}");
-    }
-
-    #[test]
-    fn volatility_empty_series() {
-        let prices = VecDeque::new();
-        assert_eq!(compute_volatility(&prices), Decimal::ZERO);
-    }
-
-    #[test]
-    fn volatility_single_value() {
-        let mut prices = VecDeque::new();
-        prices.push_back((Utc::now(), dec!(100)));
-        assert_eq!(compute_volatility(&prices), Decimal::ZERO);
     }
 
     // --- extract_coin tests ---

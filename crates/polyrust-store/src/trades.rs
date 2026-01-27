@@ -139,10 +139,4 @@ fn parse_trade_row(row: &libsql::Row) -> StoreResult<Trade> {
     })
 }
 
-fn parse_order_side(s: &str) -> StoreResult<OrderSide> {
-    match s {
-        "Buy" => Ok(OrderSide::Buy),
-        "Sell" => Ok(OrderSide::Sell),
-        other => Err(StoreError::Query(format!("unknown OrderSide: {other}"))),
-    }
-}
+use crate::parsing::parse_order_side;

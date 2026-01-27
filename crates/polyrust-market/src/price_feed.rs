@@ -189,7 +189,6 @@ impl MarketDataFeed for PriceFeed {
                                 let mut c = cache.write().await;
                                 let should_update = c.get(&symbol).is_none_or(|existing| {
                                     existing.source != "chainlink"
-                                        || timestamp > existing.timestamp
                                 });
                                 if should_update {
                                     c.insert(

@@ -2,6 +2,7 @@ pub mod db;
 pub mod error;
 pub mod events;
 pub mod orders;
+pub(crate) mod parsing;
 pub mod snapshots;
 pub mod trades;
 

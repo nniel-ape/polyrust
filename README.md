@@ -41,6 +41,10 @@ Autonomous Polymarket trading bot framework in Rust with event-driven architectu
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+## Requirements
+
+- Rust 1.85+ (edition 2024)
+
 ## Quickstart
 
 ```bash
@@ -79,6 +83,9 @@ Configuration is loaded from `config/default.toml` with environment variable ove
 | Dashboard port | `POLY_DASHBOARD_PORT` | 3000 |
 | Database path | `POLY_DB_PATH` | polyrust.db |
 | Paper trading | `POLY_PAPER_TRADING` | true |
+| Log level | `RUST_LOG` | info,polyrust=debug |
+
+> **Note:** Paper mode defaults to `true` via `config/default.toml`. If the config file is missing, the Rust struct default is `false` (live mode). Always ensure the config file is present or set `POLY_PAPER_TRADING=true`.
 
 ## Strategy Plugin Example
 

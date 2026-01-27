@@ -40,13 +40,25 @@ fn default_health_interval() -> u64 {
     30
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct PolymarketConfig {
     pub private_key: Option<String>,
     pub safe_address: Option<String>,
     pub builder_api_key: Option<String>,
     pub builder_api_secret: Option<String>,
     pub builder_api_passphrase: Option<String>,
+}
+
+impl std::fmt::Debug for PolymarketConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PolymarketConfig")
+            .field("private_key", &self.private_key.as_ref().map(|_| "[REDACTED]"))
+            .field("safe_address", &self.safe_address)
+            .field("builder_api_key", &self.builder_api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("builder_api_secret", &self.builder_api_secret.as_ref().map(|_| "[REDACTED]"))
+            .field("builder_api_passphrase", &self.builder_api_passphrase.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

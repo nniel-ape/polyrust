@@ -68,11 +68,14 @@ impl EngineBuilder {
             state.available_usdc = balance;
         }
 
+        let strategy_count = self.strategies.len();
         let strategies = self
             .strategies
             .into_iter()
             .map(|s| Arc::new(RwLock::new(s)))
             .collect();
+
+        context.strategy_count.store(strategy_count, std::sync::atomic::Ordering::Relaxed);
 
         Ok(Engine {
             config,
