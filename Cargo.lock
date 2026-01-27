@@ -3511,13 +3511,16 @@ name = "polyrust"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "polyrust-core",
  "polyrust-dashboard",
  "polyrust-execution",
  "polyrust-market",
  "polyrust-store",
  "polyrust-strategies",
+ "rust_decimal",
  "rust_decimal_macros",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3626,7 +3629,10 @@ dependencies = [
  "chrono",
  "polyrust-core",
  "rust_decimal",
+ "rust_decimal_macros",
  "serde",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 

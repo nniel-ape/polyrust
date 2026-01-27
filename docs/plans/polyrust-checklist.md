@@ -325,8 +325,8 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
 
 ### Task 12: Wire binary entry point, config, example strategy
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 12](./polyrust-framework-implementation.md#task-12-wire-everything-together-in-mainrs) — full default.toml contents, complete main.rs code, simple_strategy.rs example code
-- [ ] Create `config/default.toml` with all config sections: [engine] (event_bus_capacity=4096, health_check_interval_secs=30), [polymarket] (comment: set via env vars), [dashboard] (enabled=true, port=3000, host="127.0.0.1"), [store] (db_path="polyrust.db"), [paper] (enabled=true, initial_balance=10000)
-- [ ] Update `src/main.rs`:
+- [x] Create `config/default.toml` with all config sections: [engine] (event_bus_capacity=4096, health_check_interval_secs=30), [polymarket] (comment: set via env vars), [dashboard] (enabled=true, port=3000, host="127.0.0.1"), [store] (db_path="polyrust.db"), [paper] (enabled=true, initial_balance=10000)
+- [x] Update `src/main.rs`:
   - Initialize tracing with EnvFilter (default: "info,polyrust=debug")
   - Load Config from "config/default.toml" with fallback to Default, apply env overrides
   - Initialize Store with config.store.db_path
@@ -335,12 +335,12 @@ Detailed plan: [`docs/plans/polyrust-framework-implementation.md`](./polyrust-fr
   - Start market data feeds (ClobFeed + PriceFeed) with engine's event_bus
   - If dashboard enabled: spawn Dashboard::serve in background tokio task
   - Call engine.run() (blocks until Ctrl+C)
-- [ ] Create `examples/simple_strategy.rs` — minimal LoggingStrategy that implements Strategy trait, logs every event topic, runs with PaperBackend(10000, Immediate)
-- [ ] Verify `cargo build --workspace` succeeds
-- [ ] Verify `cargo run` starts in paper mode with dashboard at localhost:3000
-- [ ] Verify `cargo run --example simple_strategy` starts and responds to Ctrl+C
-- [ ] Verify `cargo build --release` produces single binary in target/release/polyrust
-- [ ] Mark completed
+- [x] Create `examples/simple_strategy.rs` — minimal LoggingStrategy that implements Strategy trait, logs every event topic, runs with PaperBackend(10000, Immediate)
+- [x] Verify `cargo build --workspace` succeeds
+- [x] Verify `cargo run` starts in paper mode with dashboard at localhost:3000
+- [x] Verify `cargo run --example simple_strategy` starts and responds to Ctrl+C
+- [x] Verify `cargo build --release` produces single binary in target/release/polyrust
+- [x] Mark completed
 
 ### Task 13: Add CLAUDE.md developer guide and README
 > **Detailed reference:** [polyrust-framework-implementation.md → Task 13](./polyrust-framework-implementation.md#task-13-add-claudemd-developer-guide) — CLAUDE.md content outline, documentation update table

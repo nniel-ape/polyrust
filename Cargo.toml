@@ -54,6 +54,13 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+rust_decimal.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros = "1"
+
+[[example]]
+name = "simple_strategy"
+path = "examples/simple_strategy.rs"
