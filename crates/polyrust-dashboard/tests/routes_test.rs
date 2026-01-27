@@ -473,7 +473,7 @@ async fn sse_dashboard_update_signal_renders_strategy_view() {
         bus.publish(Event::Signal(SignalEvent {
             strategy_name: "mock-view".to_string(),
             signal_type: "dashboard-update".to_string(),
-            payload: serde_json::json!({ "view_name": "mock-view" }),
+            payload: serde_json::json!({ "view_name": "mock-view", "rendered_html": "<div>mock-content</div>" }),
             timestamp: chrono::Utc::now(),
         }));
     });

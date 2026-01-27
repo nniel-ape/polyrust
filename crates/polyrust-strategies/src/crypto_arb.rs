@@ -195,6 +195,9 @@ pub struct CryptoArbitrageStrategy {
     last_scan: Option<tokio::time::Instant>,
     /// Throttle for dashboard-update signal emission (~5 seconds).
     last_dashboard_emit: Option<tokio::time::Instant>,
+    /// Cached best-ask prices per token_id, updated on orderbook events.
+    /// Used by render_view() to display UP/DOWN market prices.
+    cached_asks: HashMap<TokenId, Decimal>,
 }
 
 impl CryptoArbitrageStrategy {
@@ -208,6 +211,7 @@ impl CryptoArbitrageStrategy {
             pending_stop_loss: HashSet::new(),
             last_scan: None,
             last_dashboard_emit: None,
+            cached_asks: HashMap::new(),
         }
     }
 
@@ -445,6 +449,12 @@ impl CryptoArbitrageStrategy {
             let mut md = ctx.market_data.write().await;
             md.orderbooks
                 .insert(snapshot.token_id.clone(), snapshot.clone());
+        }
+
+        // Cache best-ask price for dashboard display
+        if let Some(best_ask) = snapshot.asks.first() {
+            self.cached_asks
+                .insert(snapshot.token_id.clone(), best_ask.price);
         }
 
         // Check stop-losses on open positions
@@ -716,6 +726,8 @@ impl CryptoArbitrageStrategy {
 
     /// Emit a dashboard-update signal if enough time has elapsed since the last one.
     /// Returns `Some(Action)` when the throttle interval (5 seconds) has passed.
+    /// Pre-renders the view HTML and includes it in the payload so the SSE handler
+    /// doesn't need to re-acquire the strategy lock (which would deadlock).
     fn maybe_emit_dashboard_update(&mut self) -> Option<Action> {
         let now = tokio::time::Instant::now();
         let should_emit = match self.last_dashboard_emit {
@@ -724,9 +736,13 @@ impl CryptoArbitrageStrategy {
         };
         if should_emit {
             self.last_dashboard_emit = Some(now);
+            let html = self.render_view().unwrap_or_default();
             Some(Action::EmitSignal {
                 signal_type: "dashboard-update".to_string(),
-                payload: serde_json::json!({ "view_name": self.view_name() }),
+                payload: serde_json::json!({
+                    "view_name": self.view_name(),
+                    "rendered_html": html,
+                }),
             })
         } else {
             None
@@ -867,6 +883,8 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
         } else {
             html.push_str(r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#);
             html.push_str("<th class=\"text-left py-1\">Market</th>");
+            html.push_str("<th class=\"text-right py-1\">UP</th>");
+            html.push_str("<th class=\"text-right py-1\">DOWN</th>");
             html.push_str("<th class=\"text-right py-1\">Time Left</th>");
             html.push_str("</tr></thead><tbody>");
 
@@ -881,10 +899,23 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
                     format!("{}s", remaining)
                 };
 
+                let up_price = self
+                    .cached_asks
+                    .get(&mwr.market.token_ids.outcome_a)
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                let down_price = self
+                    .cached_asks
+                    .get(&mwr.market.token_ids.outcome_b)
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+
                 let _ = write!(
                     html,
-                    r#"<tr class="border-b border-gray-800"><td class="py-1">{coin} Up/Down</td><td class="text-right py-1">{time}</td></tr>"#,
+                    r#"<tr class="border-b border-gray-800"><td class="py-1">{coin} Up/Down</td><td class="text-right py-1">{up}</td><td class="text-right py-1">{down}</td><td class="text-right py-1">{time}</td></tr>"#,
                     coin = escape_html(&mwr.coin),
+                    up = up_price,
+                    down = down_price,
                     time = time_str,
                 );
             }
@@ -908,17 +939,35 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
             html.push_str("<th class=\"text-left py-1\">Market</th>");
             html.push_str("<th class=\"text-left py-1\">Side</th>");
             html.push_str("<th class=\"text-right py-1\">Entry</th>");
+            html.push_str("<th class=\"text-right py-1\">Current</th>");
+            html.push_str("<th class=\"text-right py-1\">PnL</th>");
             html.push_str("<th class=\"text-right py-1\">Size</th>");
             html.push_str("</tr></thead><tbody>");
 
             for positions in self.positions.values() {
                 for pos in positions {
+                    let current = self.cached_asks.get(&pos.token_id).copied();
+                    let (current_str, pnl_str, pnl_class) = match current {
+                        Some(cp) => {
+                            let pnl = (cp - pos.entry_price) * pos.size;
+                            let cls = if pnl >= Decimal::ZERO {
+                                "pnl-positive"
+                            } else {
+                                "pnl-negative"
+                            };
+                            (cp.to_string(), format!("${pnl:.2}"), cls)
+                        }
+                        None => ("-".to_string(), "-".to_string(), ""),
+                    };
                     let _ = write!(
                         html,
-                        r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="py-1">{side:?}</td><td class="text-right py-1">{entry}</td><td class="text-right py-1">{size}</td></tr>"#,
+                        r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="py-1">{side:?}</td><td class="text-right py-1">{entry}</td><td class="text-right py-1">{current}</td><td class="text-right py-1"><span class="{pnl_class}">{pnl}</span></td><td class="text-right py-1">{size}</td></tr>"#,
                         coin = escape_html(&pos.coin),
                         side = pos.side,
                         entry = pos.entry_price,
+                        current = current_str,
+                        pnl_class = pnl_class,
+                        pnl = pnl_str,
                         size = pos.size,
                     );
                 }

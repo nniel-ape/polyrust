@@ -334,9 +334,10 @@ pub async fn sse_events(
             }
         }
 
-        // For dashboard-update signals, re-render the strategy's view HTML.
-        // The signal payload must include a "view_name" field matching the
-        // DashboardViewProvider::view_name() key in strategy_views.
+        // For dashboard-update signals, use pre-rendered HTML from the payload.
+        // The strategy renders its view during on_event (while holding the write
+        // lock) and includes the HTML in the signal payload, avoiding the need to
+        // re-acquire the strategy lock here (which would deadlock/fail with try_read).
         if let Event::Signal(signal) = &event
             && signal.signal_type == "dashboard-update"
         {
@@ -344,15 +345,12 @@ pub async fn sse_events(
                 .payload
                 .get("view_name")
                 .and_then(|v| v.as_str())?;
-            if let Ok(views) = ctx.strategy_views.try_read()
-                && let Some(strategy_handle) = views.get(view_name)
-                && let Ok(strategy) = strategy_handle.try_read()
-                && let Some(provider) = strategy.dashboard_view()
-                && let Ok(html) = provider.render_view()
-            {
-                let event_name = format!("strategy-{view_name}-update");
-                return Some(Ok(SseEvent::default().event(event_name).data(html)));
-            }
+            let html = signal
+                .payload
+                .get("rendered_html")
+                .and_then(|v| v.as_str())?;
+            let event_name = format!("strategy-{view_name}-update");
+            return Some(Ok(SseEvent::default().event(event_name).data(html)));
         }
 
         // Default: send JSON event data
