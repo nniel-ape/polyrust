@@ -136,7 +136,7 @@ impl Engine {
             .publish(Event::System(SystemEvent::EngineStarted));
 
         // Spawn context-update task: updates shared state from external price events
-        {
+        let ctx_update_handle = {
             let mut ctx_subscriber = self.event_bus.subscribe();
             let context = self.context.clone();
             tokio::spawn(async move {
@@ -157,8 +157,8 @@ impl Engine {
                         debug!(symbol = %symbol, price = %price, "Updated external price in context");
                     }
                 }
-            });
-        }
+            })
+        };
 
         // Spawn strategy event loops
         let mut strategy_handles = Vec::new();
@@ -245,9 +245,20 @@ impl Engine {
                 .publish(Event::System(SystemEvent::StrategyStopped(name)));
         }
 
-        // Wait for strategy tasks to finish
+        // Wait for strategy tasks and context-update task to finish
         for handle in strategy_handles {
-            let _ = handle.await;
+            match handle.await {
+                Ok(()) => {}
+                Err(e) => {
+                    error!(error = %e, "strategy task panicked during shutdown");
+                }
+            }
+        }
+        match ctx_update_handle.await {
+            Ok(()) => {}
+            Err(e) => {
+                error!(error = %e, "context-update task panicked during shutdown");
+            }
         }
 
         info!("engine stopped");
@@ -321,8 +332,11 @@ async fn execute_action(
                 timestamp: chrono::Utc::now(),
             }));
         }
-        Action::SubscribeMarket(_) | Action::UnsubscribeMarket(_) => {
-            warn!("market subscribe/unsubscribe not yet implemented");
+        Action::SubscribeMarket(id) => {
+            warn!(market_id = %id, "SubscribeMarket action not yet wired to market feeds");
+        }
+        Action::UnsubscribeMarket(id) => {
+            warn!(market_id = %id, "UnsubscribeMarket action not yet wired to market feeds");
         }
     }
     Ok(())

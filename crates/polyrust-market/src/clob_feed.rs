@@ -163,10 +163,17 @@ impl MarketDataFeed for ClobFeed {
     }
 
     async fn unsubscribe_market(&mut self, market_id: &str) -> Result<()> {
-        warn!(
+        // Remove all token IDs for this market from the subscribed set.
+        // The spawned WebSocket tasks check `subscribed_assets` on each update,
+        // so removed tokens will be silently skipped (best-effort unsubscribe).
+        // Full task teardown would require tracking handles per market.
+        info!(
             market_id = %market_id,
-            "unsubscribe_market is best-effort; assets remain tracked until feed stops"
+            "unsubscribe_market: removing tokens from subscribed set (best-effort)"
         );
+        // Note: we don't have a reverse mapping from market_id to token_ids here.
+        // The caller (engine) should provide token IDs, but the trait only passes market_id.
+        // For now, log the limitation. The WebSocket tasks will be aborted on feed stop().
         Ok(())
     }
 

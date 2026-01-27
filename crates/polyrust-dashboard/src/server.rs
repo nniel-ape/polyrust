@@ -4,7 +4,7 @@ use axum::Router;
 use axum::routing::get;
 use polyrust_core::prelude::*;
 use polyrust_store::Store;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::handlers;
 
@@ -49,6 +49,13 @@ impl Dashboard {
             .with_state(state);
 
         let addr = format!("{host}:{port}");
+        if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+            warn!(
+                host = %host,
+                "dashboard binding to non-localhost address without authentication; \
+                 trading data will be accessible to anyone on the network"
+            );
+        }
         info!("dashboard listening on http://{addr}");
         let listener = tokio::net::TcpListener::bind(&addr)
             .await

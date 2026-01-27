@@ -40,13 +40,26 @@ fn default_health_interval() -> u64 {
     30
 }
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Deserialize, Default)]
 pub struct PolymarketConfig {
     pub private_key: Option<String>,
     pub safe_address: Option<String>,
     pub builder_api_key: Option<String>,
     pub builder_api_secret: Option<String>,
     pub builder_api_passphrase: Option<String>,
+}
+
+impl Serialize for PolymarketConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("PolymarketConfig", 5)?;
+        s.serialize_field("private_key", &self.private_key.as_ref().map(|_| "[REDACTED]"))?;
+        s.serialize_field("safe_address", &self.safe_address)?;
+        s.serialize_field("builder_api_key", &self.builder_api_key.as_ref().map(|_| "[REDACTED]"))?;
+        s.serialize_field("builder_api_secret", &self.builder_api_secret.as_ref().map(|_| "[REDACTED]"))?;
+        s.serialize_field("builder_api_passphrase", &self.builder_api_passphrase.as_ref().map(|_| "[REDACTED]"))?;
+        s.end()
+    }
 }
 
 impl std::fmt::Debug for PolymarketConfig {
