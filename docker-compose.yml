@@ -14,6 +14,7 @@ services:
       # Uncomment and customize as needed:
 
       # - POLY_PAPER_TRADING=true
+      - POLY_DASHBOARD_HOST=0.0.0.0  # Allow access from host machine
       # - POLY_DASHBOARD_PORT=3000
       - POLY_DB_PATH=/app/data/polyrust.db
 

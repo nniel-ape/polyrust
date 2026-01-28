@@ -436,7 +436,32 @@ async fn execute_action(
                     }
                     for result in results {
                         if result.success {
-                            event_bus.publish(Event::OrderUpdate(OrderEvent::Placed(result)));
+                            event_bus.publish(Event::OrderUpdate(OrderEvent::Placed(result.clone())));
+
+                            // If order was immediately filled, publish Filled event for trade persistence
+                            if result.status.as_deref() == Some("Filled")
+                                && let Some(ref order_id) = result.order_id
+                            {
+                                // Look up market_id from token_id
+                                if let Some(market_id) =
+                                    find_market_id_for_token(context, &result.token_id).await
+                                {
+                                    event_bus.publish(Event::OrderUpdate(OrderEvent::Filled {
+                                        order_id: order_id.clone(),
+                                        market_id,
+                                        token_id: result.token_id.clone(),
+                                        side: result.side,
+                                        price: result.price,
+                                        size: result.size,
+                                        strategy_name: strategy_name.to_string(),
+                                    }));
+                                } else {
+                                    warn!(
+                                        token_id = %result.token_id,
+                                        "Cannot publish Filled event: market_id not found for token"
+                                    );
+                                }
+                            }
                         } else {
                             warn!(
                                 token_id = %result.token_id,
