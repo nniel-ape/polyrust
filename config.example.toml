@@ -37,7 +37,7 @@ rpc_urls = ["https://polygon-rpc.com"]
 [dashboard]
 enabled = true
 port = 3000
-host = "127.0.0.1"  # Use "0.0.0.0" for remote access
+host = "127.0.0.1"  # Use "0.0.0.0" for Docker/remote access, "127.0.0.1" for local only
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PERSISTENCE

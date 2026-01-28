@@ -69,9 +69,60 @@ cargo clippy --workspace -- -D warnings
 
 The bot starts in paper trading mode by default with a $10,000 simulated balance. The monitoring dashboard is available at `http://127.0.0.1:3000`.
 
+## Docker Deployment
+
+### Quick Start
+
+```bash
+# Copy and customize config
+cp config.example.toml config.toml
+# Edit config.toml: set [dashboard] host = "0.0.0.0" for container access
+
+# Build and start the bot
+docker-compose up -d
+
+# View logs
+docker-compose logs -f polyrust
+
+# Stop the bot
+docker-compose down
+```
+
+### Configuration for Docker
+
+1. **Copy config template**: `cp config.example.toml config.toml`
+2. **Set dashboard host**: Update `[dashboard] host = "0.0.0.0"` (required for container access)
+3. **Add secrets** (optional, for live trading):
+   - Create `docker-compose.override.yml`:
+
+```yaml
+services:
+  polyrust:
+    environment:
+      - POLY_PRIVATE_KEY=${POLY_PRIVATE_KEY}
+      - POLY_SAFE_ADDRESS=${POLY_SAFE_ADDRESS}
+      - POLY_BUILDER_API_KEY=${POLY_BUILDER_API_KEY}
+      - POLY_BUILDER_API_SECRET=${POLY_BUILDER_API_SECRET}
+      - POLY_BUILDER_API_PASSPHRASE=${POLY_BUILDER_API_PASSPHRASE}
+```
+
+4. **Access dashboard**: Navigate to `http://localhost:3000`
+
+### Data Persistence
+
+- Database stored in `./data/polyrust.db` (persisted across container restarts)
+- To reset state: `rm -rf ./data && docker-compose restart`
+
+### Production Considerations
+
+- **Secrets management**: Use Docker secrets or external secrets manager (not environment variables in production)
+- **Live trading**: Set `[paper] enabled = false` in `config.toml` and provide credentials
+- **Monitoring**: `docker-compose logs -f polyrust` for real-time logs
+- **Health checks**: Dashboard health endpoint (implementation pending)
+
 ## Configuration
 
-Configuration is loaded from `config/default.toml` with environment variable overrides:
+Configuration is loaded from `config.example.toml` (copy to `config.toml`) with environment variable overrides:
 
 | Setting | Env Variable | Default |
 |---------|-------------|---------|
