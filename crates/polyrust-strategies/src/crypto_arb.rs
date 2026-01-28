@@ -503,9 +503,10 @@ pub struct ArbitrageOpportunity {
     pub confidence: Decimal,
     /// Gross profit margin (1 - buy_price) before fees.
     pub profit_margin: Decimal,
-    /// Estimated taker fee per share at entry (0 for maker/GTC orders).
+    /// Estimated taker fee **per share** at entry (0 for maker/GTC orders).
+    /// Total fee for position = `estimated_fee * size`.
     pub estimated_fee: Decimal,
-    /// Net profit margin after fees: `profit_margin - estimated_fee`.
+    /// Net profit margin **per share** after fees: `profit_margin - estimated_fee`.
     pub net_margin: Decimal,
 }
 
@@ -540,7 +541,8 @@ pub struct ArbitragePosition {
     pub peak_bid: Decimal,
     /// Trading mode that opened this position.
     pub mode: ArbitrageMode,
-    /// Estimated fee per share at entry (for P&L calculation).
+    /// Estimated fee **per share** at entry (for P&L calculation).
+    /// Total fee for position = `estimated_fee * size`.
     pub estimated_fee: Decimal,
 }
 
@@ -664,6 +666,7 @@ struct PendingOrder {
     order_type: OrderType,
     mode: ArbitrageMode,
     kelly_fraction: Option<Decimal>,
+    /// Estimated fee **per share** at entry. Total fee = `estimated_fee * size`.
     estimated_fee: Decimal,
 }
 
@@ -695,7 +698,8 @@ pub struct OpenLimitOrder {
     pub mode: ArbitrageMode,
     /// Kelly fraction used for sizing (None if fixed).
     pub kelly_fraction: Option<Decimal>,
-    /// Estimated fee (0 for GTC maker orders).
+    /// Estimated fee **per share** at entry (0 for GTC maker orders).
+    /// Total fee = `estimated_fee * size`.
     pub estimated_fee: Decimal,
 }
 
@@ -1624,7 +1628,7 @@ impl CryptoArbitrageStrategy {
                 base_distance
             };
             let drop_from_peak = pos.peak_bid - current_bid;
-            drop_from_peak > effective_distance
+            drop_from_peak >= effective_distance
         } else {
             false
         };
@@ -1744,14 +1748,14 @@ impl CryptoArbitrageStrategy {
                     };
                     if won {
                         // Winner: payout $1 per share
-                        (Decimal::ONE - pos.entry_price) * pos.size - pos.estimated_fee
+                        (Decimal::ONE - pos.entry_price) * pos.size - (pos.estimated_fee * pos.size)
                     } else {
                         // Loser: shares worth $0
-                        -pos.entry_price * pos.size - pos.estimated_fee
+                        -pos.entry_price * pos.size - (pos.estimated_fee * pos.size)
                     }
                 } else {
                     // No price data — assume loss (conservative)
-                    -pos.entry_price * pos.size - pos.estimated_fee
+                    -pos.entry_price * pos.size - (pos.estimated_fee * pos.size)
                 };
 
                 self.record_trade_pnl(&pos.mode, pnl);
@@ -1785,7 +1789,7 @@ impl CryptoArbitrageStrategy {
             if result.success {
                 // Sell confirmed — remove the position and record P&L
                 if let Some(pos) = self.remove_position_by_token(&result.token_id) {
-                    let pnl = (exit_price - pos.entry_price) * pos.size - pos.estimated_fee;
+                    let pnl = (exit_price - pos.entry_price) * pos.size - (pos.estimated_fee * pos.size);
                     self.record_trade_pnl(&pos.mode, pnl);
                     info!(
                         token_id = %result.token_id,
@@ -5235,39 +5239,42 @@ mod tests {
 
     #[test]
     fn pnl_calculation_win() {
-        // Winner: pnl = (1.0 - entry_price) * size - estimated_fee
+        // Winner: pnl = (1.0 - entry_price) * size - (estimated_fee * size)
         let entry_price = dec!(0.60);
         let size = dec!(10);
-        let estimated_fee = dec!(0.01);
+        // Fee per share at p=0.60: 2 * 0.60 * 0.40 * 0.0315 = 0.01512
+        let fee_per_share = taker_fee(entry_price, dec!(0.0315));
 
-        let pnl = (Decimal::ONE - entry_price) * size - estimated_fee;
-        // (1.0 - 0.60) * 10 - 0.01 = 4.0 - 0.01 = 3.99
-        assert_eq!(pnl, dec!(3.99));
+        let pnl = (Decimal::ONE - entry_price) * size - (fee_per_share * size);
+        // (1.0 - 0.60) * 10 - (0.01512 * 10) = 4.0 - 0.1512 = 3.8488
+        assert_eq!(pnl, dec!(3.8488));
     }
 
     #[test]
     fn pnl_calculation_loss() {
-        // Loser: pnl = -entry_price * size - estimated_fee
+        // Loser: pnl = -entry_price * size - (estimated_fee * size)
         let entry_price = dec!(0.60);
         let size = dec!(10);
-        let estimated_fee = dec!(0.01);
+        // Fee per share at p=0.60: 2 * 0.60 * 0.40 * 0.0315 = 0.01512
+        let fee_per_share = taker_fee(entry_price, dec!(0.0315));
 
-        let pnl = -entry_price * size - estimated_fee;
-        // -0.60 * 10 - 0.01 = -6.01
-        assert_eq!(pnl, dec!(-6.01));
+        let pnl = -entry_price * size - (fee_per_share * size);
+        // -0.60 * 10 - (0.01512 * 10) = -6.0 - 0.1512 = -6.1512
+        assert_eq!(pnl, dec!(-6.1512));
     }
 
     #[test]
     fn pnl_calculation_stop_loss_exit() {
-        // Stop-loss: pnl = (exit_price - entry_price) * size - estimated_fee
+        // Stop-loss: pnl = (exit_price - entry_price) * size - (estimated_fee * size)
         let entry_price = dec!(0.60);
         let exit_price = dec!(0.55);
         let size = dec!(10);
-        let estimated_fee = dec!(0.01);
+        // Fee per share at p=0.60: 2 * 0.60 * 0.40 * 0.0315 = 0.01512
+        let fee_per_share = taker_fee(entry_price, dec!(0.0315));
 
-        let pnl = (exit_price - entry_price) * size - estimated_fee;
-        // (0.55 - 0.60) * 10 - 0.01 = -0.50 - 0.01 = -0.51
-        assert_eq!(pnl, dec!(-0.51));
+        let pnl = (exit_price - entry_price) * size - (fee_per_share * size);
+        // (0.55 - 0.60) * 10 - (0.01512 * 10) = -0.50 - 0.1512 = -0.6512
+        assert_eq!(pnl, dec!(-0.6512));
     }
 
     #[test]
