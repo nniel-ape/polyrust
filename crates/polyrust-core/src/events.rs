@@ -57,7 +57,9 @@ pub enum OrderEvent {
     Placed(OrderResult),
     Filled {
         order_id: OrderId,
+        market_id: MarketId,
         token_id: TokenId,
+        side: OrderSide,
         price: Decimal,
         size: Decimal,
     },

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::Utc;
 use polyrust_core::prelude::*;
 use polyrust_dashboard::Dashboard;
 use polyrust_execution::{FillMode, LiveBackend, PaperBackend};
@@ -8,6 +9,7 @@ use polyrust_store::Store;
 use polyrust_strategies::CryptoArbitrageStrategy;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -54,10 +56,8 @@ async fn main() -> anyhow::Result<()> {
     let (feed_cmd_tx, feed_cmd_rx) = feed_command_channel();
 
     // Build engine with crypto arbitrage strategy
-    let strategy = CryptoArbitrageStrategy::new(
-        Default::default(),
-        config.polymarket.rpc_urls.clone(),
-    );
+    let strategy =
+        CryptoArbitrageStrategy::new(Default::default(), config.polymarket.rpc_urls.clone());
     let mut engine = Engine::builder()
         .config(config.clone())
         .strategy(strategy)
@@ -92,6 +92,66 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         if let Err(e) = discovery_feed.start(discovery_bus).await {
             error!("discovery feed failed to start: {e}");
+        }
+    });
+
+    // Start trade persistence task
+    let persistence_store = Arc::clone(&store);
+    let persistence_bus = event_bus.clone();
+    let persistence_context = engine.context().clone();
+    tokio::spawn(async move {
+        let mut rx = persistence_bus.subscribe();
+
+        loop {
+            match rx.recv().await {
+                Some(Event::OrderUpdate(OrderEvent::Filled {
+                    order_id,
+                    market_id,
+                    token_id,
+                    side,
+                    price,
+                    size,
+                })) => {
+                    // Calculate realized P&L for closing trades (Sell orders)
+                    let realized_pnl = if side == OrderSide::Sell {
+                        let positions = persistence_context.positions.read().await;
+                        // Find position by token_id
+                        positions
+                            .open_positions
+                            .values()
+                            .find(|p| p.token_id == token_id)
+                            .map(|pos| (price - pos.entry_price) * size)
+                    } else {
+                        None
+                    };
+
+                    let trade = Trade {
+                        id: Uuid::new_v4(),
+                        order_id: order_id.clone(),
+                        market_id: market_id.clone(),
+                        token_id: token_id.clone(),
+                        side,
+                        price,
+                        size,
+                        realized_pnl,
+                        strategy_name: "engine".to_string(), // Default strategy name
+                        timestamp: Utc::now(),
+                    };
+
+                    if let Err(e) = persistence_store.insert_trade(&trade).await {
+                        error!(
+                            order_id = %order_id,
+                            error = %e,
+                            "Failed to persist trade"
+                        );
+                    }
+                }
+                Some(_) => continue, // Ignore other events
+                None => {
+                    error!("Trade persistence event bus closed");
+                    break;
+                }
+            }
         }
     });
 

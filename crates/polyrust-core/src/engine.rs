@@ -6,7 +6,7 @@ use crate::event_bus::EventBus;
 use crate::events::{Event, MarketDataEvent, OrderEvent, SignalEvent, SystemEvent};
 use crate::execution::ExecutionBackend;
 use crate::strategy::Strategy;
-use crate::types::MarketInfo;
+use crate::types::{MarketId, MarketInfo, TokenId};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
@@ -333,6 +333,23 @@ impl Engine {
     }
 }
 
+/// Helper function to look up market_id from token_id using market data state.
+/// Public to allow usage from main.rs for trade persistence.
+pub async fn find_market_id_for_token(
+    context: &StrategyContext,
+    token_id: &TokenId,
+) -> Option<MarketId> {
+    let market_data = context.market_data.read().await;
+    for (market_id, market_info) in market_data.markets.iter() {
+        if market_info.token_ids.outcome_a == *token_id
+            || market_info.token_ids.outcome_b == *token_id
+        {
+            return Some(market_id.clone());
+        }
+    }
+    None
+}
+
 /// Execute a single action from a strategy.
 async fn execute_action(
     action: &Action,
@@ -352,7 +369,31 @@ async fn execute_action(
                         bal.available_usdc = balance;
                     }
                     if result.success {
-                        event_bus.publish(Event::OrderUpdate(OrderEvent::Placed(result)));
+                        event_bus.publish(Event::OrderUpdate(OrderEvent::Placed(result.clone())));
+
+                        // If order was immediately filled, publish Filled event for trade persistence
+                        if result.status.as_deref() == Some("Filled")
+                            && let Some(ref order_id) = result.order_id
+                        {
+                            // Look up market_id from token_id
+                            if let Some(market_id) =
+                                find_market_id_for_token(context, &result.token_id).await
+                            {
+                                event_bus.publish(Event::OrderUpdate(OrderEvent::Filled {
+                                    order_id: order_id.clone(),
+                                    market_id,
+                                    token_id: result.token_id.clone(),
+                                    side: result.side,
+                                    price: result.price,
+                                    size: result.size,
+                                }));
+                            } else {
+                                warn!(
+                                    token_id = %result.token_id,
+                                    "Cannot publish Filled event: market_id not found for token"
+                                );
+                            }
+                        }
                     } else {
                         // Backend returned Ok but the order was rejected (e.g. validation
                         // failure, insufficient balance). Publish as Rejected so consumers

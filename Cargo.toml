@@ -57,6 +57,8 @@ anyhow.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 rust_decimal.workspace = true
+chrono.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros = "1"

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use polyrust_core::prelude::*;
 use polyrust_market::ChainlinkHistoricalClient;
@@ -913,31 +913,9 @@ impl CryptoArbitrageStrategy {
             );
         }
 
-        // Pre-filter: skip evaluation unless price delta is large enough or spike detected.
-        // This avoids wasting compute on tiny price moves that can't be profitable.
-        let should_evaluate = if spike.is_some() {
-            true
-        } else {
-            // Check if any active market for this coin has enough price delta to be profitable
-            let fee_rate = self.config.fee.taker_fee_rate;
-            self.active_markets.values().any(|m| {
-                if m.coin != symbol {
-                    return false;
-                }
-                if m.reference_price.is_zero() {
-                    return false;
-                }
-                let delta_pct = ((price - m.reference_price) / m.reference_price).abs();
-                // Approximate mid-price fee + min margin as threshold
-                let mid_fee = taker_fee(Decimal::new(50, 2), fee_rate);
-                let min_margin = self.config.min_profit_margin.min(self.config.late_window_margin);
-                delta_pct > mid_fee + min_margin
-            })
-        };
-
-        if !should_evaluate {
-            return Ok(actions);
-        }
+        // Note: Pre-filter removed to ensure all price updates trigger evaluation.
+        // The actual profit checks happen in evaluate_opportunity().
+        // Spike detection is still tracked for correlation-based signals.
 
         // Evaluate each active market for this coin
         let matching_market_ids: Vec<MarketId> = self
@@ -1125,8 +1103,22 @@ impl CryptoArbitrageStrategy {
     ) -> Result<Vec<ArbitrageOpportunity>> {
         let time_remaining = market.market.seconds_remaining();
 
+        info!(
+            coin = %market.coin,
+            market_id = %market.market.id,
+            current_price = %current_price,
+            reference_price = %market.reference_price,
+            time_remaining = time_remaining,
+            "Evaluating opportunity"
+        );
+
         // Skip ended or almost-ended markets
         if time_remaining <= 0 {
+            info!(
+                coin = %market.coin,
+                market_id = %market.market.id,
+                "Market expired, skipping"
+            );
             return Ok(vec![]);
         }
 
@@ -2740,13 +2732,18 @@ impl Strategy for CryptoArbitrageStrategy {
     }
 
     async fn on_event(&mut self, event: &Event, ctx: &StrategyContext) -> Result<Vec<Action>> {
+        debug!("on_event called: {:?}", event);
+
         let mut actions = match event {
             Event::MarketData(MarketDataEvent::ExternalPrice {
                 symbol,
                 price,
                 source,
                 ..
-            }) => self.on_crypto_price(symbol, *price, source, ctx).await?,
+            }) => {
+                debug!("ExternalPrice event: {} = {} from {}", symbol, price, source);
+                self.on_crypto_price(symbol, *price, source, ctx).await?
+            },
 
             Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot)) => {
                 self.on_orderbook_update(snapshot, ctx).await?
@@ -2767,6 +2764,7 @@ impl Strategy for CryptoArbitrageStrategy {
                 token_id,
                 price,
                 size,
+                ..
             }) => self.on_order_filled(order_id, token_id, *price, *size),
 
             Event::OrderUpdate(OrderEvent::PartiallyFilled {
