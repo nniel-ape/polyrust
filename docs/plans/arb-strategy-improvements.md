@@ -184,17 +184,17 @@ T10 (Verify + docs)
 - [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 10: Verify acceptance criteria
-- [ ] Verify fee-aware margins filter unprofitable trades at mid-range prices
-- [ ] Verify hybrid mode: Confirmed/TwoSided use GTC, TailEnd uses FOK
-- [ ] Verify Kelly sizing scales with confidence
-- [ ] Verify spike detection filters small moves, allows large moves
-- [ ] Verify trailing stops lock in profits
-- [ ] Verify batch orders work for TwoSided mode
-- [ ] Verify cross-market correlation generates signals (when enabled)
-- [ ] Verify performance tracking and auto-disable (when enabled)
-- [ ] Run full test suite: `cargo test --workspace`
-- [ ] Run linter: `cargo clippy --workspace -- -D warnings`
-- [ ] Paper trading dry-run: `POLY_PAPER_TRADING=true cargo run` — check dashboard
+- [x] Verify fee-aware margins filter unprofitable trades at mid-range prices
+- [x] Verify hybrid mode: Confirmed/TwoSided use GTC, TailEnd uses FOK
+- [x] Verify Kelly sizing scales with confidence
+- [x] Verify spike detection filters small moves, allows large moves
+- [x] Verify trailing stops lock in profits
+- [x] Verify batch orders work for TwoSided mode
+- [x] Verify cross-market correlation generates signals (when enabled)
+- [x] Verify performance tracking and auto-disable (when enabled)
+- [x] Run full test suite: `cargo test --workspace`
+- [x] Run linter: `cargo clippy --workspace -- -D warnings`
+- [x] Paper trading dry-run: `POLY_PAPER_TRADING=true cargo run` — check dashboard
 
 ### Task 11: [Final] Update documentation
 - [ ] Update `CLAUDE.md` with new config sub-structures
