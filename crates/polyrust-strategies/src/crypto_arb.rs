@@ -816,8 +816,8 @@ impl CryptoArbitrageStrategy {
         // A boundary is at :00, :15, :30, :45 of each hour.
         let ts = now.timestamp();
         let boundary_ts = ts - (ts % WINDOW_SECS);
-        let secs_from_boundary = ts - boundary_ts;
-        if secs_from_boundary.unsigned_abs() <= BOUNDARY_TOLERANCE_SECS as u64 {
+        let secs_from_boundary = (ts - boundary_ts).abs();
+        if secs_from_boundary <= BOUNDARY_TOLERANCE_SECS {
             let key = format!("{symbol}-{boundary_ts}");
             // Only record if we haven't already (prefer Chainlink source)
             let should_insert = match self.boundary_prices.get(&key) {
@@ -1115,7 +1115,7 @@ impl CryptoArbitrageStrategy {
             return Ok(vec![]);
         }
 
-        // Already have a position or pending order in this market
+        // Already have a position, pending order, or open limit order in this market
         if self.positions.contains_key(&market.market.id) {
             return Ok(vec![]);
         }
@@ -1124,6 +1124,14 @@ impl CryptoArbitrageStrategy {
             .pending_orders
             .values()
             .any(|p| p.market_id == market.market.id)
+        {
+            return Ok(vec![]);
+        }
+        // Check if any open limit orders target this market
+        if self
+            .open_limit_orders
+            .values()
+            .any(|lo| lo.market_id == market.market.id)
         {
             return Ok(vec![]);
         }
@@ -1478,7 +1486,7 @@ impl CryptoArbitrageStrategy {
                     price: order_price,
                     size,
                     order_type,
-                    neg_risk: market.market.neg_risk,
+                    neg_risk: false, // 15-min markets always use false
                 };
 
                 self.pending_orders.insert(
@@ -1771,12 +1779,12 @@ impl CryptoArbitrageStrategy {
                         // Winner: payout $1 per share
                         (Decimal::ONE - pos.entry_price) * pos.size - (pos.estimated_fee * pos.size)
                     } else {
-                        // Loser: shares worth $0
-                        -pos.entry_price * pos.size - (pos.estimated_fee * pos.size)
+                        // Loser: shares worth $0 (fee already paid at entry)
+                        -pos.entry_price * pos.size
                     }
                 } else {
-                    // No price data — assume loss (conservative)
-                    -pos.entry_price * pos.size - (pos.estimated_fee * pos.size)
+                    // No price data — assume loss (conservative, fee already paid at entry)
+                    -pos.entry_price * pos.size
                 };
 
                 self.record_trade_pnl(&pos.mode, pnl);
@@ -1810,7 +1818,11 @@ impl CryptoArbitrageStrategy {
             if result.success {
                 // Sell confirmed — remove the position and record P&L
                 if let Some(pos) = self.remove_position_by_token(&result.token_id) {
-                    let pnl = (exit_price - pos.entry_price) * pos.size - (pos.estimated_fee * pos.size);
+                    // Calculate exit fee (FOK order at current bid incurs taker fee)
+                    let exit_fee = taker_fee(exit_price, self.config.fee.taker_fee_rate);
+                    let pnl = (exit_price - pos.entry_price) * pos.size
+                        - (pos.estimated_fee * pos.size)
+                        - (exit_fee * pos.size);
                     self.record_trade_pnl(&pos.mode, pnl);
                     info!(
                         token_id = %result.token_id,

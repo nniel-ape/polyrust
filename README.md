@@ -87,6 +87,8 @@ Configuration is loaded from `config/default.toml` with environment variable ove
 
 > **Note:** Paper mode defaults to `true` via `config/default.toml`. If the config file is missing, the Rust struct default is `false` (live mode). Always ensure the config file is present or set `POLY_PAPER_TRADING=true`.
 
+> **Strategy Configuration:** The crypto arbitrage strategy supports additional configuration options (fees, sizing, stop-loss, cross-correlation, performance tracking). Currently, these must be configured programmatically by modifying `src/main.rs` to pass a custom `ArbitrageConfig` instead of `Default::default()`. See [Reference Strategy](#reference-strategy-crypto-arbitrage) section below for available options. Future versions will support TOML-based strategy configuration.
+
 ## Strategy Plugin Example
 
 Implement the `Strategy` trait to create a custom trading strategy:
@@ -136,6 +138,47 @@ engine.run().await?;
 - `polyrust-store` — Turso (embedded SQLite) persistence
 - `polyrust-strategies` — reference strategy implementations
 - `polyrust-dashboard` — Axum + HTMX monitoring UI
+
+## Reference Strategy: Crypto Arbitrage
+
+The included crypto arbitrage strategy exploits mispricing in 15-minute Up/Down crypto markets with four trading modes:
+
+1. **Tail-End** — <2 min remaining, market >= 90% certainty (highest confidence, uses FOK taker orders for speed)
+2. **Two-Sided** — Both outcomes priced below combined threshold (guaranteed profit, places both legs atomically)
+3. **Confirmed** — Standard directional trades with dynamic confidence model (uses GTC maker orders when hybrid mode enabled)
+4. **Cross-Correlated** — Leader coin spike (BTC) triggers follower signals (ETH, SOL) with discounted confidence
+
+### Key Features
+
+- **Fee-aware profit margins** — Net profit calculation accounts for Polymarket's dynamic taker fees (3.15% at 50/50, ~0% at extremes)
+- **Hybrid order execution** — GTC maker orders (0% fee) for most trades, FOK taker orders only for tail-end urgency
+- **Kelly criterion sizing** — Position size scales with confidence and edge, clamped to configured min/max
+- **Spike detection** — Pre-filters small moves, triggers evaluation only on significant price changes
+- **Trailing stop-loss** — Locks in profits as position moves favorably, with optional time decay near expiration
+- **Performance tracking** — Per-mode win rate and P&L tracking with optional auto-disable for underperforming modes
+
+### Configuration
+
+Modify `ArbitrageConfig` in `src/main.rs` to customize behavior. Available sub-configs:
+
+- **FeeConfig** — Taker fee model (default 3.15%)
+- **SpikeConfig** — Spike detection thresholds and history
+- **OrderConfig** — Hybrid maker/taker mode, limit order offset, max age
+- **SizingConfig** — Kelly criterion parameters, min/max position size
+- **StopLossConfig** — Dual-trigger + trailing stops, time decay
+- **CorrelationConfig** — Cross-market correlation pairs (BTC → ETH/SOL)
+- **PerformanceConfig** — Per-mode tracking, auto-disable thresholds
+
+See `CLAUDE.md` for detailed configuration documentation and the complete list of available parameters.
+
+### Dashboard
+
+Strategy-specific dashboard available at `http://127.0.0.1:3000/strategy/crypto-arb` shows:
+- Live positions with P&L and peak bid tracking
+- Open limit orders (GTC maker orders)
+- Active markets with reference prices and spreads
+- Recent spike events for cross-correlation
+- Per-mode performance statistics (win rate, total P&L, recent trades)
 
 ## License
 
