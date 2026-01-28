@@ -91,26 +91,26 @@ T10 (Verify + docs)
 - [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 4: Hybrid order mode — GTC default, FOK for tail-end
-- [ ] Extend `PendingOrder` with `order_type: OrderType`, `submitted_at: tokio::time::Instant`, `mode: ArbitrageMode`
-- [ ] Add `open_limit_orders: HashMap<OrderId, OpenLimitOrder>` state to strategy
-- [ ] Define `OpenLimitOrder { order_id, market_id, token_id, side, price, size, reference_price, coin, placed_at, mode }`
-- [ ] Modify order creation (line ~443-450): TailEnd → FOK at `best_ask`; Confirmed/TwoSided → GTC at `best_ask - limit_offset` (when `hybrid_mode` enabled)
-- [ ] Modify `on_order_placed()`: FOK success → create position (existing); GTC success → create `OpenLimitOrder`
-- [ ] Handle `OrderEvent::Filled` in `on_event()` → move from `open_limit_orders` to `positions`
-- [ ] Handle `OrderEvent::PartiallyFilled` → update size in `open_limit_orders`
-- [ ] Handle `OrderEvent::Cancelled` → remove from `open_limit_orders`
-- [ ] Implement `check_stale_limit_orders() -> Vec<Action>` — cancel orders older than `max_age_secs`
-- [ ] Call `check_stale_limit_orders()` on each event tick
-- [ ] Update position limit checks to count `open_limit_orders`
-- [ ] Update `net_profit_margin` calls: pass `is_maker=true` for GTC orders (0 fee)
-- [ ] Skip duplicate opportunities when limit order already open for market
-- [ ] Write test: Confirmed mode produces GTC order with price = `ask - 0.01`
-- [ ] Write test: TailEnd mode still produces FOK at ask price
-- [ ] Write test: stale order cancelled after `max_age_secs`
-- [ ] Write test: GTC order fill creates position correctly
-- [ ] Write test: duplicate detection skips market with open limit
-- [ ] Write test: `hybrid_mode=false` preserves all-FOK behavior
-- [ ] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
+- [x] Extend `PendingOrder` with `order_type: OrderType`, `submitted_at: tokio::time::Instant`, `mode: ArbitrageMode`
+- [x] Add `open_limit_orders: HashMap<OrderId, OpenLimitOrder>` state to strategy
+- [x] Define `OpenLimitOrder { order_id, market_id, token_id, side, price, size, reference_price, coin, placed_at, mode }`
+- [x] Modify order creation (line ~443-450): TailEnd → FOK at `best_ask`; Confirmed/TwoSided → GTC at `best_ask - limit_offset` (when `hybrid_mode` enabled)
+- [x] Modify `on_order_placed()`: FOK success → create position (existing); GTC success → create `OpenLimitOrder`
+- [x] Handle `OrderEvent::Filled` in `on_event()` → move from `open_limit_orders` to `positions`
+- [x] Handle `OrderEvent::PartiallyFilled` → update size in `open_limit_orders`
+- [x] Handle `OrderEvent::Cancelled` → remove from `open_limit_orders`
+- [x] Implement `check_stale_limit_orders() -> Vec<Action>` — cancel orders older than `max_age_secs`
+- [x] Call `check_stale_limit_orders()` on each event tick
+- [x] Update position limit checks to count `open_limit_orders`
+- [x] Update `net_profit_margin` calls: pass `is_maker=true` for GTC orders (0 fee)
+- [x] Skip duplicate opportunities when limit order already open for market
+- [x] Write test: Confirmed mode produces GTC order with price = `ask - 0.01`
+- [x] Write test: TailEnd mode still produces FOK at ask price
+- [x] Write test: stale order cancelled after `max_age_secs`
+- [x] Write test: GTC order fill creates position correctly
+- [x] Write test: duplicate detection skips market with open limit
+- [x] Write test: `hybrid_mode=false` preserves all-FOK behavior
+- [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 5: Kelly criterion position sizing
 - [ ] Implement `kelly_position_size(confidence: Decimal, price: Decimal) -> Decimal`:

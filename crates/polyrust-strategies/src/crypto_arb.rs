@@ -495,6 +495,23 @@ struct PendingOrder {
     size: Decimal,
     reference_price: Decimal,
     coin: String,
+    order_type: OrderType,
+    mode: ArbitrageMode,
+}
+
+/// An open GTC limit order that has been placed but not yet fully filled.
+#[derive(Debug, Clone)]
+pub struct OpenLimitOrder {
+    pub order_id: OrderId,
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+    pub side: OutcomeSide,
+    pub price: Decimal,
+    pub size: Decimal,
+    pub reference_price: Decimal,
+    pub coin: String,
+    pub placed_at: tokio::time::Instant,
+    pub mode: ArbitrageMode,
 }
 
 /// Crypto arbitrage strategy that exploits mispricing in 15-minute Up/Down
@@ -525,6 +542,8 @@ pub struct CryptoArbitrageStrategy {
     /// Orders submitted but not yet confirmed — keyed by token_id.
     /// Prevents re-entry while orders are in flight.
     pending_orders: HashMap<TokenId, PendingOrder>,
+    /// Open GTC limit orders awaiting fill, keyed by order_id.
+    open_limit_orders: HashMap<OrderId, OpenLimitOrder>,
     /// Token IDs with active stop-loss sell orders awaiting confirmation.
     /// Positions are only removed once the sell is confirmed or rejected.
     pending_stop_loss: HashSet<TokenId>,
@@ -559,6 +578,7 @@ impl CryptoArbitrageStrategy {
             boundary_prices: HashMap::new(),
             positions: HashMap::new(),
             pending_orders: HashMap::new(),
+            open_limit_orders: HashMap::new(),
             pending_stop_loss: HashSet::new(),
             last_scan: None,
             last_dashboard_emit: None,
@@ -733,9 +753,20 @@ impl CryptoArbitrageStrategy {
             let opps = self.evaluate_opportunity(&market, price, ctx).await?;
             let total_positions: usize = self.positions.values().map(|v| v.len()).sum();
             let total_pending = self.pending_orders.len();
+            let total_limits = self.open_limit_orders.len();
             if !opps.is_empty()
-                && (total_positions + total_pending + opps.len()) <= self.config.max_positions
+                && (total_positions + total_pending + total_limits + opps.len())
+                    <= self.config.max_positions
             {
+                // Skip if a limit order is already open for this market
+                if self
+                    .open_limit_orders
+                    .values()
+                    .any(|lo| lo.market_id == market_id)
+                {
+                    continue;
+                }
+
                 // For TwoSided mode, compute equal share count across both outcomes
                 // so total cost = position_size and each side gets N shares.
                 let two_sided_size = if opps.len() == 2 && opps[0].mode == ArbitrageMode::TwoSided {
@@ -756,19 +787,32 @@ impl CryptoArbitrageStrategy {
                     }
                     let size =
                         two_sided_size.unwrap_or_else(|| self.config.sizing.base_size / opp.buy_price);
+
+                    // Hybrid order mode: TailEnd → FOK at best_ask (speed matters);
+                    // Confirmed/TwoSided → GTC at best_ask - limit_offset (maker, $0 fee).
+                    let (order_type, order_price) =
+                        if self.config.order.hybrid_mode && opp.mode != ArbitrageMode::TailEnd {
+                            let limit_price =
+                                (opp.buy_price - self.config.order.limit_offset).max(Decimal::new(1, 2));
+                            (OrderType::Gtc, limit_price)
+                        } else {
+                            (OrderType::Fok, opp.buy_price)
+                        };
+
                     let order = OrderRequest {
                         token_id: opp.token_id.clone(),
-                        price: opp.buy_price,
+                        price: order_price,
                         size,
                         side: OrderSide::Buy,
-                        order_type: OrderType::Fok,
+                        order_type,
                         neg_risk: false,
                     };
                     info!(
                         mode = ?opp.mode,
                         market = %market_id,
                         confidence = %opp.confidence,
-                        price = %opp.buy_price,
+                        price = %order_price,
+                        order_type = ?order_type,
                         side = ?opp.outcome_to_buy,
                         "Submitting arbitrage order"
                     );
@@ -779,10 +823,12 @@ impl CryptoArbitrageStrategy {
                             market_id: market_id.clone(),
                             token_id: opp.token_id.clone(),
                             side: opp.outcome_to_buy,
-                            price: opp.buy_price,
+                            price: order_price,
                             size,
                             reference_price: market.reference_price,
                             coin: market.coin.clone(),
+                            order_type,
+                            mode: opp.mode,
                         },
                     );
                     actions.push(Action::PlaceOrder(order));
@@ -869,9 +915,18 @@ impl CryptoArbitrageStrategy {
             let combined = ua + da;
             if combined < Decimal::new(98, 2) {
                 let profit_margin = Decimal::ONE - combined;
-                // Fees on both legs (taker orders)
-                let fee_up = taker_fee(ua, self.config.fee.taker_fee_rate);
-                let fee_down = taker_fee(da, self.config.fee.taker_fee_rate);
+                // In hybrid mode, TwoSided uses GTC maker orders (0 fee)
+                let is_maker = self.config.order.hybrid_mode;
+                let fee_up = if is_maker {
+                    Decimal::ZERO
+                } else {
+                    taker_fee(ua, self.config.fee.taker_fee_rate)
+                };
+                let fee_down = if is_maker {
+                    Decimal::ZERO
+                } else {
+                    taker_fee(da, self.config.fee.taker_fee_rate)
+                };
                 let total_fee = fee_up + fee_down;
                 let net_margin = profit_margin - total_fee;
                 // Skip if net margin is negative after fees
@@ -917,7 +972,13 @@ impl CryptoArbitrageStrategy {
             if let Some(ask_price) = ask {
                 let confidence = market.get_confidence(current_price, ask_price, time_remaining);
                 let profit_margin = Decimal::ONE - ask_price;
-                let estimated_fee = taker_fee(ask_price, self.config.fee.taker_fee_rate);
+                // In hybrid mode, Confirmed uses GTC maker orders (0 fee)
+                let is_maker = self.config.order.hybrid_mode;
+                let estimated_fee = if is_maker {
+                    Decimal::ZERO
+                } else {
+                    taker_fee(ask_price, self.config.fee.taker_fee_rate)
+                };
                 let net_margin = profit_margin - estimated_fee;
                 let min_margin = if time_remaining < 300 {
                     self.config.late_window_margin
@@ -1203,6 +1264,36 @@ impl CryptoArbitrageStrategy {
             return vec![];
         }
 
+        // GTC orders: track as open limit order; position created on fill event.
+        // FOK orders: immediate fill — create position now.
+        if pending.order_type == OrderType::Gtc {
+            if let Some(order_id) = &result.order_id {
+                info!(
+                    order_id = %order_id,
+                    market = %pending.market_id,
+                    mode = ?pending.mode,
+                    price = %pending.price,
+                    "GTC limit order placed, tracking for fill"
+                );
+                self.open_limit_orders.insert(
+                    order_id.clone(),
+                    OpenLimitOrder {
+                        order_id: order_id.clone(),
+                        market_id: pending.market_id,
+                        token_id: pending.token_id,
+                        side: pending.side,
+                        price: pending.price,
+                        size: pending.size,
+                        reference_price: pending.reference_price,
+                        coin: pending.coin,
+                        placed_at: tokio::time::Instant::now(),
+                        mode: pending.mode,
+                    },
+                );
+            }
+            return vec![];
+        }
+
         let position = ArbitragePosition {
             market_id: pending.market_id.clone(),
             token_id: pending.token_id,
@@ -1231,6 +1322,49 @@ impl CryptoArbitrageStrategy {
         vec![]
     }
 
+    /// Handle a fully filled order event — move from open_limit_orders to positions.
+    fn on_order_filled(
+        &mut self,
+        order_id: &str,
+        token_id: &str,
+        price: Decimal,
+        size: Decimal,
+    ) -> Vec<Action> {
+        if let Some(lo) = self.open_limit_orders.remove(order_id) {
+            info!(
+                order_id = %order_id,
+                market = %lo.market_id,
+                mode = ?lo.mode,
+                price = %price,
+                size = %size,
+                "GTC limit order filled, creating position"
+            );
+            let position = ArbitragePosition {
+                market_id: lo.market_id.clone(),
+                token_id: lo.token_id,
+                side: lo.side,
+                entry_price: price,
+                size,
+                reference_price: lo.reference_price,
+                coin: lo.coin,
+                order_id: Some(order_id.to_string()),
+                entry_time: Utc::now(),
+            };
+            self.positions
+                .entry(lo.market_id)
+                .or_default()
+                .push(position);
+        } else {
+            // Could be a fill for a non-limit order we don't track here
+            info!(
+                order_id = %order_id,
+                token_id = %token_id,
+                "Received fill for unknown order (may be external)"
+            );
+        }
+        vec![]
+    }
+
     /// Remove a position by token_id across all markets.
     fn remove_position_by_token(&mut self, token_id: &str) {
         let mut empty_markets = Vec::new();
@@ -1243,6 +1377,33 @@ impl CryptoArbitrageStrategy {
         for market_id in empty_markets {
             self.positions.remove(&market_id);
         }
+    }
+
+    /// Cancel GTC limit orders that have been open longer than `max_age_secs`.
+    fn check_stale_limit_orders(&mut self) -> Vec<Action> {
+        let max_age = std::time::Duration::from_secs(self.config.order.max_age_secs);
+        let now = tokio::time::Instant::now();
+
+        let stale_ids: Vec<OrderId> = self
+            .open_limit_orders
+            .iter()
+            .filter(|(_, lo)| now.duration_since(lo.placed_at) >= max_age)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let mut actions = Vec::new();
+        for order_id in stale_ids {
+            if let Some(lo) = self.open_limit_orders.remove(&order_id) {
+                info!(
+                    order_id = %order_id,
+                    market = %lo.market_id,
+                    age_secs = now.duration_since(lo.placed_at).as_secs(),
+                    "Cancelling stale GTC limit order"
+                );
+                actions.push(Action::CancelOrder(order_id));
+            }
+        }
+        actions
     }
 
     // -- Dashboard ----------------------------------------------------------
@@ -1779,6 +1940,41 @@ impl Strategy for CryptoArbitrageStrategy {
 
             Event::OrderUpdate(OrderEvent::Placed(result)) => self.on_order_placed(result),
 
+            Event::OrderUpdate(OrderEvent::Filled {
+                order_id,
+                token_id,
+                price,
+                size,
+            }) => self.on_order_filled(order_id, token_id, *price, *size),
+
+            Event::OrderUpdate(OrderEvent::PartiallyFilled {
+                order_id,
+                filled_size,
+                remaining_size,
+            }) => {
+                if let Some(lo) = self.open_limit_orders.get_mut(order_id) {
+                    lo.size = *remaining_size;
+                    info!(
+                        order_id = %order_id,
+                        filled = %filled_size,
+                        remaining = %remaining_size,
+                        "GTC limit order partially filled"
+                    );
+                }
+                vec![]
+            }
+
+            Event::OrderUpdate(OrderEvent::Cancelled(order_id)) => {
+                if let Some(lo) = self.open_limit_orders.remove(order_id) {
+                    info!(
+                        order_id = %order_id,
+                        market = %lo.market_id,
+                        "GTC limit order cancelled, removing"
+                    );
+                }
+                vec![]
+            }
+
             Event::OrderUpdate(OrderEvent::Rejected { token_id, .. }) => {
                 if let Some(token_id) = token_id {
                     // Clear pending buy order
@@ -1802,6 +1998,9 @@ impl Strategy for CryptoArbitrageStrategy {
 
             _ => vec![],
         };
+
+        // Check for stale GTC limit orders on every event tick
+        actions.extend(self.check_stale_limit_orders());
 
         // Throttled dashboard update signal for real-time SSE view refresh
         if let Some(dashboard_action) = self.maybe_emit_dashboard_update() {
@@ -2012,7 +2211,7 @@ mod tests {
         let ctx = StrategyContext::new();
 
         // Both asks low: 0.40 + 0.40 = 0.80 < 0.98
-        // Gross margin = 0.20, fees = ~0.03, net > 0 → opportunity generated
+        // Gross margin = 0.20, net = 0.20 (maker fee = $0 in hybrid mode)
         {
             let mut md = ctx.market_data.write().await;
             md.orderbooks.insert(
@@ -2036,7 +2235,8 @@ mod tests {
         assert_eq!(opps[1].outcome_to_buy, OutcomeSide::Down);
         assert_eq!(opps[0].profit_margin, dec!(0.20)); // 1.0 - 0.80
         assert!(opps[0].net_margin > Decimal::ZERO);
-        assert!(opps[0].estimated_fee > Decimal::ZERO);
+        // In hybrid mode (default), TwoSided uses maker orders with $0 fee
+        assert_eq!(opps[0].estimated_fee, Decimal::ZERO);
     }
 
     #[tokio::test]
@@ -2069,9 +2269,11 @@ mod tests {
         assert_eq!(opp.mode, ArbitrageMode::Confirmed);
         assert_eq!(opp.outcome_to_buy, OutcomeSide::Up);
         assert!(opp.confidence >= dec!(0.50));
-        assert!(opp.estimated_fee > Decimal::ZERO);
+        // In hybrid mode (default), Confirmed uses maker orders with $0 fee
+        assert_eq!(opp.estimated_fee, Decimal::ZERO);
         assert!(opp.net_margin > Decimal::ZERO);
-        assert!(opp.net_margin < opp.profit_margin);
+        // net_margin == profit_margin when maker fee is $0
+        assert_eq!(opp.net_margin, opp.profit_margin);
     }
 
     #[tokio::test]
@@ -2806,8 +3008,10 @@ mod tests {
         }
 
         // Use a high fee rate that makes the 3¢ gross margin negative
+        // Must disable hybrid mode to test taker fee filtering
         let mut config = ArbitrageConfig::default();
         config.use_chainlink = false;
+        config.order.hybrid_mode = false;
         config.fee.taker_fee_rate = dec!(0.60); // Extreme fee rate for testing
         config.late_window_margin = dec!(0.02);
         let strategy = CryptoArbitrageStrategy::new(config);
@@ -2861,6 +3065,7 @@ mod tests {
     async fn two_sided_filtered_when_fees_exceed_margin() {
         // Both asks near 0.49 → combined 0.98 just under threshold
         // but fees on both legs eat up the tiny 2¢ margin
+        // Must disable hybrid mode to test taker fee filtering
         let mwr = make_mwr(dec!(50000), 400);
         let ctx = StrategyContext::new();
 
@@ -2880,7 +3085,9 @@ mod tests {
             );
         }
 
-        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut config = ArbitrageConfig::default();
+        config.order.hybrid_mode = false; // Use taker orders to test fee filtering
+        let strategy = CryptoArbitrageStrategy::new(config);
         let opps = strategy
             .evaluate_opportunity(&mwr, dec!(50100), &ctx)
             .await
@@ -3179,5 +3386,285 @@ mod tests {
         let html = strategy.render_view().unwrap();
         assert!(html.contains("Spike Events (0)"));
         assert!(html.contains("No spike events detected"));
+    }
+
+    // --- hybrid order mode tests ---
+
+    #[tokio::test]
+    async fn confirmed_mode_produces_gtc_order_with_offset() {
+        let mut strategy = make_strategy_no_chainlink();
+        let ctx = StrategyContext::new();
+
+        // Late window, large move for high confidence
+        let mwr = make_mwr(dec!(50000), 200);
+        strategy.active_markets.insert("market1".to_string(), mwr);
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.external_prices.insert("BTC".to_string(), dec!(52000));
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                make_orderbook("token_up", dec!(0.55), dec!(0.60)),
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                make_orderbook("token_down", dec!(0.35), dec!(0.40)),
+            );
+        }
+
+        // Set up price history with large spike for prefilter to pass
+        let now = Utc::now();
+        let mut history = VecDeque::new();
+        history.push_back((now - Duration::seconds(15), dec!(50000), "binance".to_string()));
+        history.push_back((now - Duration::seconds(1), dec!(52000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        // hybrid_mode=true by default, so Confirmed should produce GTC
+        let actions = strategy
+            .on_crypto_price("BTC", dec!(52000), "binance", &ctx)
+            .await
+            .unwrap();
+
+        let orders: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::PlaceOrder(req) => Some(req),
+                _ => None,
+            })
+            .collect();
+        assert!(!orders.is_empty(), "should place an order");
+        let order = orders[0];
+        assert_eq!(order.order_type, OrderType::Gtc, "Confirmed should use GTC in hybrid mode");
+        // Price should be best_ask - limit_offset = 0.60 - 0.01 = 0.59
+        assert_eq!(order.price, dec!(0.59));
+
+        // Verify pending order recorded with correct type and mode
+        let pending = strategy.pending_orders.values().next().unwrap();
+        assert_eq!(pending.order_type, OrderType::Gtc);
+        assert_eq!(pending.mode, ArbitrageMode::Confirmed);
+    }
+
+    #[tokio::test]
+    async fn tail_end_mode_produces_fok_at_ask() {
+        let mut strategy = make_strategy_no_chainlink();
+        let ctx = StrategyContext::new();
+
+        // < 120s remaining, ask >= 0.90
+        let mwr = make_mwr(dec!(50000), 60);
+        strategy.active_markets.insert("market1".to_string(), mwr);
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.external_prices.insert("BTC".to_string(), dec!(51000));
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                make_orderbook("token_up", dec!(0.93), dec!(0.95)),
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                make_orderbook("token_down", dec!(0.03), dec!(0.05)),
+            );
+        }
+
+        // Price history for prefilter
+        let now = Utc::now();
+        let mut history = VecDeque::new();
+        history.push_back((now - Duration::seconds(15), dec!(50000), "binance".to_string()));
+        history.push_back((now - Duration::seconds(1), dec!(51000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        let actions = strategy
+            .on_crypto_price("BTC", dec!(51000), "binance", &ctx)
+            .await
+            .unwrap();
+
+        let orders: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::PlaceOrder(req) => Some(req),
+                _ => None,
+            })
+            .collect();
+        assert!(!orders.is_empty(), "should place a tail-end order");
+        let order = orders[0];
+        assert_eq!(order.order_type, OrderType::Fok, "TailEnd should always use FOK");
+        assert_eq!(order.price, dec!(0.95), "TailEnd price should be at ask");
+    }
+
+    #[test]
+    fn stale_order_cancelled_after_max_age() {
+        let mut config = ArbitrageConfig::default();
+        config.order.max_age_secs = 0; // Expire immediately
+        let mut strategy = CryptoArbitrageStrategy::new(config);
+
+        strategy.open_limit_orders.insert(
+            "order-1".to_string(),
+            OpenLimitOrder {
+                order_id: "order-1".to_string(),
+                market_id: "market1".to_string(),
+                token_id: "token_up".to_string(),
+                side: OutcomeSide::Up,
+                price: dec!(0.59),
+                size: dec!(10),
+                reference_price: dec!(50000),
+                coin: "BTC".to_string(),
+                placed_at: tokio::time::Instant::now() - std::time::Duration::from_secs(1),
+                mode: ArbitrageMode::Confirmed,
+            },
+        );
+
+        let actions = strategy.check_stale_limit_orders();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(&actions[0], Action::CancelOrder(id) if id == "order-1"));
+        assert!(strategy.open_limit_orders.is_empty(), "stale order should be removed");
+    }
+
+    #[test]
+    fn gtc_order_fill_creates_position() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        // Simulate a placed GTC limit order
+        strategy.open_limit_orders.insert(
+            "order-1".to_string(),
+            OpenLimitOrder {
+                order_id: "order-1".to_string(),
+                market_id: "market1".to_string(),
+                token_id: "token_up".to_string(),
+                side: OutcomeSide::Up,
+                price: dec!(0.59),
+                size: dec!(10),
+                reference_price: dec!(50000),
+                coin: "BTC".to_string(),
+                placed_at: tokio::time::Instant::now(),
+                mode: ArbitrageMode::Confirmed,
+            },
+        );
+
+        // Simulate fill event
+        let actions = strategy.on_order_filled("order-1", "token_up", dec!(0.59), dec!(10));
+        assert!(actions.is_empty());
+
+        // Should have removed from open_limit_orders
+        assert!(strategy.open_limit_orders.is_empty());
+
+        // Should have created a position
+        let positions = strategy.positions.get("market1").unwrap();
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].entry_price, dec!(0.59));
+        assert_eq!(positions[0].side, OutcomeSide::Up);
+        assert_eq!(positions[0].coin, "BTC");
+        assert_eq!(positions[0].order_id.as_deref(), Some("order-1"));
+    }
+
+    #[tokio::test]
+    async fn duplicate_detection_skips_market_with_open_limit() {
+        let mut strategy = make_strategy_no_chainlink();
+        let ctx = StrategyContext::new();
+
+        let mwr = make_mwr(dec!(50000), 200);
+        strategy.active_markets.insert("market1".to_string(), mwr);
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.external_prices.insert("BTC".to_string(), dec!(52000));
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                make_orderbook("token_up", dec!(0.55), dec!(0.60)),
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                make_orderbook("token_down", dec!(0.35), dec!(0.40)),
+            );
+        }
+
+        let now = Utc::now();
+        let mut history = VecDeque::new();
+        history.push_back((now - Duration::seconds(15), dec!(50000), "binance".to_string()));
+        history.push_back((now - Duration::seconds(1), dec!(52000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        // Place a limit order for this market
+        strategy.open_limit_orders.insert(
+            "existing-order".to_string(),
+            OpenLimitOrder {
+                order_id: "existing-order".to_string(),
+                market_id: "market1".to_string(),
+                token_id: "token_up".to_string(),
+                side: OutcomeSide::Up,
+                price: dec!(0.59),
+                size: dec!(10),
+                reference_price: dec!(50000),
+                coin: "BTC".to_string(),
+                placed_at: tokio::time::Instant::now(),
+                mode: ArbitrageMode::Confirmed,
+            },
+        );
+
+        let actions = strategy
+            .on_crypto_price("BTC", dec!(52000), "binance", &ctx)
+            .await
+            .unwrap();
+
+        let order_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, Action::PlaceOrder(_)))
+            .collect();
+        assert!(
+            order_actions.is_empty(),
+            "should skip when limit order already open for market"
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_mode_false_preserves_fok_behavior() {
+        let mut config = ArbitrageConfig::default();
+        config.order.hybrid_mode = false;
+        config.use_chainlink = false;
+        let mut strategy = CryptoArbitrageStrategy::new(config);
+        let ctx = StrategyContext::new();
+
+        let mwr = make_mwr(dec!(50000), 200);
+        strategy.active_markets.insert("market1".to_string(), mwr);
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.external_prices.insert("BTC".to_string(), dec!(52000));
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                make_orderbook("token_up", dec!(0.55), dec!(0.60)),
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                make_orderbook("token_down", dec!(0.35), dec!(0.40)),
+            );
+        }
+
+        let now = Utc::now();
+        let mut history = VecDeque::new();
+        history.push_back((now - Duration::seconds(15), dec!(50000), "binance".to_string()));
+        history.push_back((now - Duration::seconds(1), dec!(52000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        let actions = strategy
+            .on_crypto_price("BTC", dec!(52000), "binance", &ctx)
+            .await
+            .unwrap();
+
+        let orders: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::PlaceOrder(req) => Some(req),
+                _ => None,
+            })
+            .collect();
+        assert!(!orders.is_empty(), "should place an order");
+        let order = orders[0];
+        assert_eq!(
+            order.order_type,
+            OrderType::Fok,
+            "with hybrid_mode=false, all orders should be FOK"
+        );
+        // Price should be at the ask, not offset
+        assert_eq!(order.price, dec!(0.60));
     }
 }
