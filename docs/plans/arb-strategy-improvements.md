@@ -168,20 +168,20 @@ T10 (Verify + docs)
 - [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 9: Performance tracking
-- [ ] Define `ModeStats { entered: u64, won: u64, lost: u64, total_pnl: Decimal, recent_pnl: VecDeque<Decimal> }` with `win_rate()` and `avg_pnl()` methods
-- [ ] Add `mode_stats: HashMap<ArbitrageMode, ModeStats>` state to strategy
-- [ ] Add `mode: ArbitrageMode` field to `ArbitragePosition`
-- [ ] On position close (market expiry or stop-loss): compute P&L including fees, update `ModeStats`
+- [x] Define `ModeStats { entered: u64, won: u64, lost: u64, total_pnl: Decimal, recent_pnl: VecDeque<Decimal> }` with `win_rate()` and `avg_pnl()` methods
+- [x] Add `mode_stats: HashMap<ArbitrageMode, ModeStats>` state to strategy
+- [x] Add `mode: ArbitrageMode` field to `ArbitragePosition`
+- [x] On position close (market expiry or stop-loss): compute P&L including fees, update `ModeStats`
   - Winner: `pnl = (1.0 - entry_price) * size - estimated_fee`
   - Loser: `pnl = -entry_price * size - estimated_fee`
   - Stop-loss: `pnl = (exit_price - entry_price) * size - estimated_fee`
-- [ ] In `evaluate_opportunity()`: check auto-disable — skip mode if `trades >= min_trades && win_rate < min_win_rate` (when `auto_disable` enabled)
-- [ ] Add performance stats section to dashboard (per-mode table: trades, win rate, P&L, status)
-- [ ] Write test: `ModeStats::win_rate()` correct with 7 wins, 3 losses
-- [ ] Write test: auto-disable triggers after `min_trades` with low win rate
-- [ ] Write test: auto-disable does NOT trigger before `min_trades`
-- [ ] Write test: P&L calculation for wins, losses, stop-loss exits with fee deduction
-- [ ] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
+- [x] In `evaluate_opportunity()`: check auto-disable — skip mode if `trades >= min_trades && win_rate < min_win_rate` (when `auto_disable` enabled)
+- [x] Add performance stats section to dashboard (per-mode table: trades, win rate, P&L, status)
+- [x] Write test: `ModeStats::win_rate()` correct with 7 wins, 3 losses
+- [x] Write test: auto-disable triggers after `min_trades` with low win rate
+- [x] Write test: auto-disable does NOT trigger before `min_trades`
+- [x] Write test: P&L calculation for wins, losses, stop-loss exits with fee deduction
+- [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 10: Verify acceptance criteria
 - [ ] Verify fee-aware margins filter unprofitable trades at mid-range prices

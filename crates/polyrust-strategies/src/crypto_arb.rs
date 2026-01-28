@@ -457,7 +457,7 @@ pub fn kelly_position_size(
 }
 
 /// Arbitrage trading modes, ordered by priority.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ArbitrageMode {
     /// < 2 min remaining, market price >= 90%
     TailEnd,
@@ -504,6 +504,10 @@ pub struct ArbitragePosition {
     pub kelly_fraction: Option<Decimal>,
     /// Highest bid price observed since position entry (for trailing stop-loss).
     pub peak_bid: Decimal,
+    /// Trading mode that opened this position.
+    pub mode: ArbitrageMode,
+    /// Estimated fee per share at entry (for P&L calculation).
+    pub estimated_fee: Decimal,
 }
 
 /// A detected price spike event.
@@ -515,6 +519,85 @@ pub struct SpikeEvent {
     pub from_price: Decimal,
     pub to_price: Decimal,
     pub acted: bool,
+}
+
+impl std::fmt::Display for ArbitrageMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ArbitrageMode::TailEnd => write!(f, "TailEnd"),
+            ArbitrageMode::TwoSided => write!(f, "TwoSided"),
+            ArbitrageMode::Confirmed => write!(f, "Confirmed"),
+            ArbitrageMode::CrossCorrelated { leader } => write!(f, "Cross({})", leader),
+        }
+    }
+}
+
+/// Per-mode performance statistics for tracking trade outcomes.
+#[derive(Debug, Clone)]
+pub struct ModeStats {
+    /// Total trades entered in this mode.
+    pub entered: u64,
+    /// Trades that resolved profitably.
+    pub won: u64,
+    /// Trades that resolved at a loss.
+    pub lost: u64,
+    /// Cumulative realized P&L (after fees).
+    pub total_pnl: Decimal,
+    /// Rolling window of recent P&L values.
+    pub recent_pnl: VecDeque<Decimal>,
+    /// Maximum window size for recent_pnl.
+    window_size: usize,
+}
+
+impl ModeStats {
+    fn new(window_size: usize) -> Self {
+        Self {
+            entered: 0,
+            won: 0,
+            lost: 0,
+            total_pnl: Decimal::ZERO,
+            recent_pnl: VecDeque::new(),
+            window_size,
+        }
+    }
+
+    /// Win rate as a fraction in [0, 1]. Returns ZERO if no completed trades.
+    pub fn win_rate(&self) -> Decimal {
+        let completed = self.won + self.lost;
+        if completed == 0 {
+            return Decimal::ZERO;
+        }
+        Decimal::from(self.won) / Decimal::from(completed)
+    }
+
+    /// Average P&L from the recent rolling window. Returns ZERO if empty.
+    pub fn avg_pnl(&self) -> Decimal {
+        if self.recent_pnl.is_empty() {
+            return Decimal::ZERO;
+        }
+        let sum: Decimal = self.recent_pnl.iter().copied().sum();
+        sum / Decimal::from(self.recent_pnl.len() as u64)
+    }
+
+    /// Record a trade outcome.
+    fn record(&mut self, pnl: Decimal) {
+        self.entered += 1;
+        if pnl >= Decimal::ZERO {
+            self.won += 1;
+        } else {
+            self.lost += 1;
+        }
+        self.total_pnl += pnl;
+        self.recent_pnl.push_back(pnl);
+        if self.recent_pnl.len() > self.window_size {
+            self.recent_pnl.pop_front();
+        }
+    }
+
+    /// Total completed trades (won + lost).
+    pub fn total_trades(&self) -> u64 {
+        self.won + self.lost
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -534,6 +617,7 @@ struct PendingOrder {
     order_type: OrderType,
     mode: ArbitrageMode,
     kelly_fraction: Option<Decimal>,
+    estimated_fee: Decimal,
 }
 
 /// An open GTC limit order that has been placed but not yet fully filled.
@@ -550,6 +634,7 @@ pub struct OpenLimitOrder {
     pub placed_at: tokio::time::Instant,
     pub mode: ArbitrageMode,
     pub kelly_fraction: Option<Decimal>,
+    pub estimated_fee: Decimal,
 }
 
 /// Crypto arbitrage strategy that exploits mispricing in 15-minute Up/Down
@@ -583,8 +668,9 @@ pub struct CryptoArbitrageStrategy {
     /// Open GTC limit orders awaiting fill, keyed by order_id.
     open_limit_orders: HashMap<OrderId, OpenLimitOrder>,
     /// Token IDs with active stop-loss sell orders awaiting confirmation.
+    /// Value is the exit (sell) price for P&L calculation.
     /// Positions are only removed once the sell is confirmed or rejected.
-    pending_stop_loss: HashSet<TokenId>,
+    pending_stop_loss: HashMap<TokenId, Decimal>,
     last_scan: Option<tokio::time::Instant>,
     /// Throttle for dashboard-update signal emission (~5 seconds).
     last_dashboard_emit: Option<tokio::time::Instant>,
@@ -596,6 +682,8 @@ pub struct CryptoArbitrageStrategy {
     pending_discovery: HashMap<String, MarketInfo>,
     /// Recent spike events for display and analysis.
     spike_events: VecDeque<SpikeEvent>,
+    /// Per-mode performance statistics (wins, losses, P&L).
+    mode_stats: HashMap<ArbitrageMode, ModeStats>,
 }
 
 impl CryptoArbitrageStrategy {
@@ -617,12 +705,13 @@ impl CryptoArbitrageStrategy {
             positions: HashMap::new(),
             pending_orders: HashMap::new(),
             open_limit_orders: HashMap::new(),
-            pending_stop_loss: HashSet::new(),
+            pending_stop_loss: HashMap::new(),
             last_scan: None,
             last_dashboard_emit: None,
             cached_asks: HashMap::new(),
             pending_discovery: HashMap::new(),
             spike_events: VecDeque::new(),
+            mode_stats: HashMap::new(),
         }
     }
 
@@ -900,6 +989,7 @@ impl CryptoArbitrageStrategy {
                             order_type,
                             mode: opp.mode.clone(),
                             kelly_fraction: kelly_frac,
+                            estimated_fee: opp.estimated_fee,
                         },
                     );
 
@@ -972,6 +1062,7 @@ impl CryptoArbitrageStrategy {
 
         // 1. Tail-End mode: < 120s remaining + predicted winner ask >= 0.90
         if time_remaining < 120
+            && !self.is_mode_disabled(&ArbitrageMode::TailEnd)
             && let Some(predicted) = market.predict_winner(current_price)
         {
             let (token_id, ask) = match predicted {
@@ -1003,7 +1094,9 @@ impl CryptoArbitrageStrategy {
         // 2. Two-Sided mode: sum of both asks < 0.98 — buy BOTH outcomes
         //    for guaranteed profit (one resolves to $1, the other to $0,
         //    total cost < $1 so net profit = 1 - combined).
-        if let (Some(ua), Some(da)) = (up_ask, down_ask) {
+        if !self.is_mode_disabled(&ArbitrageMode::TwoSided)
+            && let (Some(ua), Some(da)) = (up_ask, down_ask)
+        {
             let combined = ua + da;
             if combined < Decimal::new(98, 2) {
                 let profit_margin = Decimal::ONE - combined;
@@ -1053,7 +1146,9 @@ impl CryptoArbitrageStrategy {
         }
 
         // 3. Confirmed mode: confidence >= threshold + sufficient margin
-        if let Some(predicted) = market.predict_winner(current_price) {
+        if !self.is_mode_disabled(&ArbitrageMode::Confirmed)
+            && let Some(predicted) = market.predict_winner(current_price)
+        {
             let (token_id, ask) = match predicted {
                 OutcomeSide::Up | OutcomeSide::Yes => (&market.market.token_ids.outcome_a, up_ask),
                 OutcomeSide::Down | OutcomeSide::No => {
@@ -1312,6 +1407,7 @@ impl CryptoArbitrageStrategy {
                         order_type,
                         mode: opp.mode.clone(),
                         kelly_fraction: kelly_frac,
+                        estimated_fee: opp.estimated_fee,
                     },
                 );
 
@@ -1368,19 +1464,20 @@ impl CryptoArbitrageStrategy {
                 }
 
                 // Skip if stop-loss sell already in flight for this token
-                if self.pending_stop_loss.contains(&pos.token_id) {
+                if self.pending_stop_loss.contains_key(&pos.token_id) {
                     continue;
                 }
 
-                if let Some(action) = self.check_stop_loss(pos, snapshot)? {
+                if let Some((action, exit_price)) = self.check_stop_loss(pos, snapshot)? {
                     info!(
                         market = %market_id,
                         entry = %pos.entry_price,
+                        exit = %exit_price,
                         side = ?pos.side,
                         "Stop-loss triggered, selling position"
                     );
-                    // Track pending stop-loss — position removed only on sell confirmation
-                    self.pending_stop_loss.insert(pos.token_id.clone());
+                    // Track pending stop-loss with exit price for P&L calculation
+                    self.pending_stop_loss.insert(pos.token_id.clone(), exit_price);
                     actions.push(action);
                 }
             }
@@ -1395,11 +1492,13 @@ impl CryptoArbitrageStrategy {
     /// 1. Crypto price reversed by >= stop_loss_reversal_pct (0.5%)
     /// 2. Market price dropped by >= stop_loss_min_drop (5¢) from entry
     /// 3. Time remaining > 60s (don't sell in final minute)
+    ///
+    /// Returns `Some((action, exit_price))` when stop-loss should trigger.
     fn check_stop_loss(
         &self,
         pos: &ArbitragePosition,
         snapshot: &OrderbookSnapshot,
-    ) -> Result<Option<Action>> {
+    ) -> Result<Option<(Action, Decimal)>> {
         let market = match self.active_markets.get(&pos.market_id) {
             Some(m) => m,
             None => return Ok(None),
@@ -1477,7 +1576,7 @@ impl CryptoArbitrageStrategy {
                 order_type: OrderType::Fok,
                 neg_risk: false,
             };
-            Ok(Some(Action::PlaceOrder(order)))
+            Ok(Some((Action::PlaceOrder(order), current_bid)))
         } else {
             Ok(None)
         }
@@ -1551,6 +1650,12 @@ impl CryptoArbitrageStrategy {
         market_id: &str,
         _ctx: &StrategyContext,
     ) -> Result<Vec<Action>> {
+        // Capture coin before removing market (needed for price lookup)
+        let market_coin = self
+            .active_markets
+            .get(market_id)
+            .map(|m| m.coin.clone());
+
         if let Some(market) = self.active_markets.remove(market_id) {
             info!(
                 market = %market_id,
@@ -1563,11 +1668,39 @@ impl CryptoArbitrageStrategy {
 
         if let Some(positions) = self.positions.remove(market_id) {
             for pos in &positions {
+                // Estimate outcome: check if crypto price moved in our direction.
+                // Up side wins if current_price > reference_price, Down wins otherwise.
+                let current_crypto = market_coin
+                    .as_ref()
+                    .and_then(|coin| self.price_history.get(coin.as_str()))
+                    .and_then(|h| h.back().map(|(_, p, _)| *p));
+
+                let pnl = if let Some(current) = current_crypto {
+                    let won = match pos.side {
+                        OutcomeSide::Up | OutcomeSide::Yes => current > pos.reference_price,
+                        OutcomeSide::Down | OutcomeSide::No => current < pos.reference_price,
+                    };
+                    if won {
+                        // Winner: payout $1 per share
+                        (Decimal::ONE - pos.entry_price) * pos.size - pos.estimated_fee
+                    } else {
+                        // Loser: shares worth $0
+                        -pos.entry_price * pos.size - pos.estimated_fee
+                    }
+                } else {
+                    // No price data — assume loss (conservative)
+                    -pos.entry_price * pos.size - pos.estimated_fee
+                };
+
+                self.record_trade_pnl(&pos.mode, pnl);
+
                 warn!(
                     market = %market_id,
                     side = ?pos.side,
                     entry = %pos.entry_price,
-                    "Position in expired market — awaiting resolution"
+                    pnl = %pnl,
+                    mode = %pos.mode,
+                    "Position in expired market — resolved"
                 );
             }
             actions.push(Action::Log {
@@ -1586,14 +1719,19 @@ impl CryptoArbitrageStrategy {
     /// Handle order placement result — only record position on confirmed success.
     fn on_order_placed(&mut self, result: &OrderResult) -> Vec<Action> {
         // Check if this is a stop-loss sell confirmation
-        if self.pending_stop_loss.remove(&result.token_id) {
+        if let Some(exit_price) = self.pending_stop_loss.remove(&result.token_id) {
             if result.success {
-                // Sell confirmed — remove the position
-                self.remove_position_by_token(&result.token_id);
-                info!(
-                    token_id = %result.token_id,
-                    "Stop-loss sell confirmed, position removed"
-                );
+                // Sell confirmed — remove the position and record P&L
+                if let Some(pos) = self.remove_position_by_token(&result.token_id) {
+                    let pnl = (exit_price - pos.entry_price) * pos.size - pos.estimated_fee;
+                    self.record_trade_pnl(&pos.mode, pnl);
+                    info!(
+                        token_id = %result.token_id,
+                        mode = %pos.mode,
+                        pnl = %pnl,
+                        "Stop-loss sell confirmed, position removed"
+                    );
+                }
             } else {
                 warn!(
                     token_id = %result.token_id,
@@ -1644,12 +1782,14 @@ impl CryptoArbitrageStrategy {
                         placed_at: tokio::time::Instant::now(),
                         mode: pending.mode,
                         kelly_fraction: pending.kelly_fraction,
+                        estimated_fee: pending.estimated_fee,
                     },
                 );
             }
             return vec![];
         }
 
+        let mode = pending.mode.clone();
         let position = ArbitragePosition {
             market_id: pending.market_id.clone(),
             token_id: pending.token_id,
@@ -1662,6 +1802,8 @@ impl CryptoArbitrageStrategy {
             entry_time: Utc::now(),
             kelly_fraction: pending.kelly_fraction,
             peak_bid: pending.price,
+            mode: pending.mode,
+            estimated_fee: pending.estimated_fee,
         };
 
         info!(
@@ -1669,6 +1811,7 @@ impl CryptoArbitrageStrategy {
             side = ?position.side,
             price = %position.entry_price,
             size = %position.size,
+            mode = %mode,
             "Position confirmed after order fill"
         );
 
@@ -1709,6 +1852,8 @@ impl CryptoArbitrageStrategy {
                 entry_time: Utc::now(),
                 kelly_fraction: lo.kelly_fraction,
                 peak_bid: price,
+                mode: lo.mode,
+                estimated_fee: lo.estimated_fee,
             };
             self.positions
                 .entry(lo.market_id)
@@ -1725,11 +1870,14 @@ impl CryptoArbitrageStrategy {
         vec![]
     }
 
-    /// Remove a position by token_id across all markets.
-    fn remove_position_by_token(&mut self, token_id: &str) {
+    /// Remove a position by token_id across all markets, returning it.
+    fn remove_position_by_token(&mut self, token_id: &str) -> Option<ArbitragePosition> {
+        let mut removed = None;
         let mut empty_markets = Vec::new();
         for (market_id, positions) in &mut self.positions {
-            positions.retain(|p| p.token_id != token_id);
+            if let Some(idx) = positions.iter().position(|p| p.token_id == token_id) {
+                removed = Some(positions.remove(idx));
+            }
             if positions.is_empty() {
                 empty_markets.push(market_id.clone());
             }
@@ -1737,6 +1885,29 @@ impl CryptoArbitrageStrategy {
         for market_id in empty_markets {
             self.positions.remove(&market_id);
         }
+        removed
+    }
+
+    /// Check if a mode is auto-disabled due to poor performance.
+    fn is_mode_disabled(&self, mode: &ArbitrageMode) -> bool {
+        if !self.config.performance.auto_disable {
+            return false;
+        }
+        if let Some(stats) = self.mode_stats.get(mode) {
+            stats.total_trades() >= self.config.performance.min_trades
+                && stats.win_rate() < self.config.performance.min_win_rate
+        } else {
+            false
+        }
+    }
+
+    /// Record a trade P&L outcome for the given mode.
+    fn record_trade_pnl(&mut self, mode: &ArbitrageMode, pnl: Decimal) {
+        let window_size = self.config.performance.window_size;
+        self.mode_stats
+            .entry(mode.clone())
+            .or_insert_with(|| ModeStats::new(window_size))
+            .record(pnl);
     }
 
     /// Cancel GTC limit orders that have been open longer than `max_age_secs`.
@@ -2343,6 +2514,57 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
         }
         html.push_str("</div>");
 
+        // --- Performance Stats ---
+        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+        html.push_str(r#"<h2 class="text-lg font-bold mb-3">Performance Stats</h2>"#);
+
+        if self.mode_stats.is_empty() {
+            html.push_str(r#"<p class="text-gray-500">No trades recorded yet</p>"#);
+        } else {
+            html.push_str(r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#);
+            html.push_str("<th class=\"text-left py-1\">Mode</th>");
+            html.push_str("<th class=\"text-right py-1\">Trades</th>");
+            html.push_str("<th class=\"text-right py-1\">Won</th>");
+            html.push_str("<th class=\"text-right py-1\">Lost</th>");
+            html.push_str("<th class=\"text-right py-1\">Win Rate</th>");
+            html.push_str("<th class=\"text-right py-1\">Total P&amp;L</th>");
+            html.push_str("<th class=\"text-right py-1\">Avg P&amp;L</th>");
+            html.push_str("<th class=\"text-left py-1\">Status</th>");
+            html.push_str("</tr></thead><tbody>");
+
+            let mut modes: Vec<_> = self.mode_stats.iter().collect();
+            modes.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+
+            for (mode, stats) in &modes {
+                let win_rate_pct = stats.win_rate() * Decimal::new(100, 0);
+                let pnl_class = if stats.total_pnl >= Decimal::ZERO {
+                    "pnl-positive"
+                } else {
+                    "pnl-negative"
+                };
+                let status = if self.is_mode_disabled(mode) {
+                    r#"<span class="text-red-400">Disabled</span>"#
+                } else {
+                    r#"<span class="text-green-400">Active</span>"#
+                };
+                let _ = write!(
+                    html,
+                    r#"<tr class="border-b border-gray-800"><td class="py-1">{mode}</td><td class="text-right py-1">{trades}</td><td class="text-right py-1">{won}</td><td class="text-right py-1">{lost}</td><td class="text-right py-1">{win_rate:.1}%</td><td class="text-right py-1 {pnl_class}">${total_pnl:.2}</td><td class="text-right py-1">${avg_pnl:.4}</td><td class="py-1">{status}</td></tr>"#,
+                    mode = mode,
+                    trades = stats.total_trades(),
+                    won = stats.won,
+                    lost = stats.lost,
+                    win_rate = win_rate_pct,
+                    pnl_class = pnl_class,
+                    total_pnl = stats.total_pnl,
+                    avg_pnl = stats.avg_pnl(),
+                    status = status,
+                );
+            }
+            html.push_str("</tbody></table>");
+        }
+        html.push_str("</div>");
+
         Ok(html)
     }
 }
@@ -2437,7 +2659,7 @@ impl Strategy for CryptoArbitrageStrategy {
                         );
                     }
                     // Clear pending stop-loss — position retained for retry
-                    if self.pending_stop_loss.remove(token_id) {
+                    if self.pending_stop_loss.remove(token_id).is_some() {
                         warn!(
                             token_id = %token_id,
                             "Stop-loss sell rejected, position retained for retry"
@@ -2778,6 +3000,8 @@ mod tests {
             entry_time: Utc::now(),
             kelly_fraction: None,
             peak_bid: dec!(0.60),
+            mode: ArbitrageMode::Confirmed,
+            estimated_fee: Decimal::ZERO,
         };
 
         // Price reversed: BTC dropped from 50000 to 49500 = -1% > 0.5%
@@ -2812,6 +3036,8 @@ mod tests {
             entry_time: Utc::now(),
             kelly_fraction: None,
             peak_bid: dec!(0.60),
+            mode: ArbitrageMode::Confirmed,
+            estimated_fee: Decimal::ZERO,
         };
 
         let mut history = VecDeque::new();
@@ -2842,6 +3068,8 @@ mod tests {
             entry_time: Utc::now(),
             kelly_fraction: None,
             peak_bid: dec!(0.60),
+            mode: ArbitrageMode::Confirmed,
+            estimated_fee: Decimal::ZERO,
         };
 
         // Crypto reversed, but market price only dropped 3¢ < 5¢
@@ -2876,6 +3104,8 @@ mod tests {
             entry_time: Utc::now(),
             kelly_fraction: None,
             peak_bid: dec!(0.70), // Position was profitable, bid reached 0.70
+            mode: ArbitrageMode::Confirmed,
+            estimated_fee: Decimal::ZERO,
         };
 
         // No crypto reversal needed for trailing stop — price history irrelevant
@@ -2910,6 +3140,8 @@ mod tests {
             entry_time: Utc::now(),
             kelly_fraction: None,
             peak_bid: dec!(0.60), // Never went above entry
+            mode: ArbitrageMode::Confirmed,
+            estimated_fee: Decimal::ZERO,
         };
 
         // No crypto reversal
@@ -2945,6 +3177,8 @@ mod tests {
             entry_time: Utc::now(),
             kelly_fraction: None,
             peak_bid: dec!(0.65), // Position was profitable
+            mode: ArbitrageMode::Confirmed,
+            estimated_fee: Decimal::ZERO,
         };
 
         // No crypto reversal
@@ -2981,6 +3215,8 @@ mod tests {
             entry_time: Utc::now(),
             kelly_fraction: None,
             peak_bid: dec!(0.70), // Position was profitable, peak at 0.70
+            mode: ArbitrageMode::Confirmed,
+            estimated_fee: Decimal::ZERO,
         };
 
         // No crypto reversal (price stable)
@@ -3137,6 +3373,8 @@ mod tests {
             entry_time: Utc::now(),
             kelly_fraction: None,
             peak_bid: dec!(0.60),
+            mode: ArbitrageMode::Confirmed,
+            estimated_fee: Decimal::ZERO,
         };
         strategy
             .positions
@@ -4111,6 +4349,7 @@ mod tests {
                 placed_at: tokio::time::Instant::now() - std::time::Duration::from_secs(1),
                 mode: ArbitrageMode::Confirmed,
                 kelly_fraction: None,
+                estimated_fee: Decimal::ZERO,
             },
         );
 
@@ -4139,6 +4378,7 @@ mod tests {
                 placed_at: tokio::time::Instant::now(),
                 mode: ArbitrageMode::Confirmed,
                 kelly_fraction: None,
+                estimated_fee: Decimal::ZERO,
             },
         );
 
@@ -4200,6 +4440,7 @@ mod tests {
                 placed_at: tokio::time::Instant::now(),
                 mode: ArbitrageMode::Confirmed,
                 kelly_fraction: None,
+                estimated_fee: Decimal::ZERO,
             },
         );
 
@@ -4805,5 +5046,202 @@ mod tests {
             eth_pending2.is_some(),
             "80% spike gives 56% follower confidence (>= 50%), should generate order"
         );
+    }
+
+    // ---- Performance tracking tests ----
+
+    #[test]
+    fn mode_stats_win_rate_correct() {
+        let mut stats = ModeStats::new(50);
+        // Record 7 wins and 3 losses
+        for _ in 0..7 {
+            stats.record(dec!(0.10)); // win
+        }
+        for _ in 0..3 {
+            stats.record(dec!(-0.05)); // loss
+        }
+
+        assert_eq!(stats.entered, 10);
+        assert_eq!(stats.won, 7);
+        assert_eq!(stats.lost, 3);
+        assert_eq!(stats.total_trades(), 10);
+        assert_eq!(stats.win_rate(), dec!(0.7));
+    }
+
+    #[test]
+    fn mode_stats_avg_pnl() {
+        let mut stats = ModeStats::new(50);
+        stats.record(dec!(0.10));
+        stats.record(dec!(0.20));
+        stats.record(dec!(-0.06));
+
+        // total_pnl = 0.24
+        assert_eq!(stats.total_pnl, dec!(0.24));
+        // avg_pnl = 0.24 / 3 = 0.08
+        assert_eq!(stats.avg_pnl(), dec!(0.08));
+    }
+
+    #[test]
+    fn mode_stats_empty_returns_zero() {
+        let stats = ModeStats::new(50);
+        assert_eq!(stats.win_rate(), Decimal::ZERO);
+        assert_eq!(stats.avg_pnl(), Decimal::ZERO);
+        assert_eq!(stats.total_trades(), 0);
+    }
+
+    #[test]
+    fn mode_stats_rolling_window_evicts() {
+        let mut stats = ModeStats::new(3); // Small window
+        stats.record(dec!(1.0));
+        stats.record(dec!(2.0));
+        stats.record(dec!(3.0));
+        // Window: [1, 2, 3], avg = 2.0
+        assert_eq!(stats.avg_pnl(), dec!(2.0));
+
+        stats.record(dec!(6.0));
+        // Window: [2, 3, 6], oldest evicted
+        assert_eq!(stats.recent_pnl.len(), 3);
+        // avg = (2+3+6)/3 = 11/3
+        let expected_avg = dec!(11) / dec!(3);
+        assert_eq!(stats.avg_pnl(), expected_avg);
+    }
+
+    #[test]
+    fn auto_disable_triggers_after_min_trades_with_low_win_rate() {
+        let mut config = ArbitrageConfig::default();
+        config.performance.auto_disable = true;
+        config.performance.min_trades = 5;
+        config.performance.min_win_rate = dec!(0.40);
+
+        let mut strategy = CryptoArbitrageStrategy::new(config);
+
+        // Record 5 trades: 1 win, 4 losses = 20% win rate < 40%
+        let mode = ArbitrageMode::Confirmed;
+        strategy.record_trade_pnl(&mode, dec!(0.10)); // win
+        strategy.record_trade_pnl(&mode, dec!(-0.05)); // loss
+        strategy.record_trade_pnl(&mode, dec!(-0.05));
+        strategy.record_trade_pnl(&mode, dec!(-0.05));
+        strategy.record_trade_pnl(&mode, dec!(-0.05));
+
+        assert!(
+            strategy.is_mode_disabled(&ArbitrageMode::Confirmed),
+            "Mode should be disabled: 5 trades with 20% win rate < 40%"
+        );
+    }
+
+    #[test]
+    fn auto_disable_does_not_trigger_before_min_trades() {
+        let mut config = ArbitrageConfig::default();
+        config.performance.auto_disable = true;
+        config.performance.min_trades = 20;
+        config.performance.min_win_rate = dec!(0.40);
+
+        let mut strategy = CryptoArbitrageStrategy::new(config);
+
+        // Record only 3 trades: all losses (0% win rate)
+        let mode = ArbitrageMode::TailEnd;
+        strategy.record_trade_pnl(&mode, dec!(-0.05));
+        strategy.record_trade_pnl(&mode, dec!(-0.05));
+        strategy.record_trade_pnl(&mode, dec!(-0.05));
+
+        assert!(
+            !strategy.is_mode_disabled(&ArbitrageMode::TailEnd),
+            "Mode should NOT be disabled: only 3 trades < min_trades(20)"
+        );
+    }
+
+    #[test]
+    fn auto_disable_not_triggered_when_disabled_in_config() {
+        let mut config = ArbitrageConfig::default();
+        config.performance.auto_disable = false;
+        config.performance.min_trades = 2;
+        config.performance.min_win_rate = dec!(0.40);
+
+        let mut strategy = CryptoArbitrageStrategy::new(config);
+
+        // Record 5 losing trades
+        let mode = ArbitrageMode::Confirmed;
+        for _ in 0..5 {
+            strategy.record_trade_pnl(&mode, dec!(-0.05));
+        }
+
+        assert!(
+            !strategy.is_mode_disabled(&ArbitrageMode::Confirmed),
+            "Auto-disable is off in config, mode should stay active"
+        );
+    }
+
+    #[test]
+    fn pnl_calculation_win() {
+        // Winner: pnl = (1.0 - entry_price) * size - estimated_fee
+        let entry_price = dec!(0.60);
+        let size = dec!(10);
+        let estimated_fee = dec!(0.01);
+
+        let pnl = (Decimal::ONE - entry_price) * size - estimated_fee;
+        // (1.0 - 0.60) * 10 - 0.01 = 4.0 - 0.01 = 3.99
+        assert_eq!(pnl, dec!(3.99));
+    }
+
+    #[test]
+    fn pnl_calculation_loss() {
+        // Loser: pnl = -entry_price * size - estimated_fee
+        let entry_price = dec!(0.60);
+        let size = dec!(10);
+        let estimated_fee = dec!(0.01);
+
+        let pnl = -entry_price * size - estimated_fee;
+        // -0.60 * 10 - 0.01 = -6.01
+        assert_eq!(pnl, dec!(-6.01));
+    }
+
+    #[test]
+    fn pnl_calculation_stop_loss_exit() {
+        // Stop-loss: pnl = (exit_price - entry_price) * size - estimated_fee
+        let entry_price = dec!(0.60);
+        let exit_price = dec!(0.55);
+        let size = dec!(10);
+        let estimated_fee = dec!(0.01);
+
+        let pnl = (exit_price - entry_price) * size - estimated_fee;
+        // (0.55 - 0.60) * 10 - 0.01 = -0.50 - 0.01 = -0.51
+        assert_eq!(pnl, dec!(-0.51));
+    }
+
+    #[test]
+    fn record_trade_pnl_creates_stats() {
+        let strategy_config = ArbitrageConfig::default();
+        let mut strategy = CryptoArbitrageStrategy::new(strategy_config);
+
+        assert!(strategy.mode_stats.is_empty());
+
+        strategy.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(0.50));
+        assert_eq!(strategy.mode_stats.len(), 1);
+
+        let stats = strategy.mode_stats.get(&ArbitrageMode::TailEnd).unwrap();
+        assert_eq!(stats.won, 1);
+        assert_eq!(stats.total_pnl, dec!(0.50));
+    }
+
+    #[test]
+    fn mode_stats_win_rate_calculation() {
+        let mut stats = ModeStats::new(50);
+
+        // No trades yet
+        assert_eq!(stats.win_rate(), Decimal::ZERO);
+
+        // Add 7 wins and 3 losses
+        for _ in 0..7 {
+            stats.record(dec!(1.0)); // Positive P&L = win
+        }
+        for _ in 0..3 {
+            stats.record(dec!(-0.5)); // Negative P&L = loss
+        }
+
+        // Win rate should be 7/10 = 0.70
+        assert_eq!(stats.won, 7);
+        assert_eq!(stats.lost, 3);
+        assert_eq!(stats.total_trades(), 10);
+        assert_eq!(stats.win_rate(), Decimal::new(70, 2));
     }
 }
