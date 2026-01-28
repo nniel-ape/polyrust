@@ -197,9 +197,9 @@ T10 (Verify + docs)
 - [x] Paper trading dry-run: `POLY_PAPER_TRADING=true cargo run` — check dashboard
 
 ### Task 11: [Final] Update documentation
-- [ ] Update `CLAUDE.md` with new config sub-structures
-- [ ] Update `docs/research/arb-strategy-improvements.md` with implementation status
-- [ ] Add inline doc comments to new public types and functions
+- [x] Update `CLAUDE.md` with new config sub-structures
+- [x] Update `docs/research/arb-strategy-improvements.md` with implementation status
+- [x] Add inline doc comments to new public types and functions
 
 ## Technical Details
 

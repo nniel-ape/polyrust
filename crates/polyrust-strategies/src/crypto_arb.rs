@@ -457,15 +457,25 @@ pub fn kelly_position_size(
 }
 
 /// Arbitrage trading modes, ordered by priority.
+///
+/// Each mode represents a different market condition or signal type:
+/// - **TailEnd**: Highest confidence, market near certainty + time urgency
+/// - **TwoSided**: Risk-free arbitrage when both outcomes mispriced
+/// - **Confirmed**: Standard directional bet with dynamic confidence model
+/// - **CrossCorrelated**: Correlation-based signal from leader coin spike
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ArbitrageMode {
-    /// < 2 min remaining, market price >= 90%
+    /// Tail-end mode: < 2 min remaining, market price >= 90%.
+    /// Uses FOK orders for speed (fee ~0% at extreme prices).
     TailEnd,
-    /// Both outcomes priced below combined $0.98 (guaranteed profit)
+    /// Two-sided mode: both outcomes priced below combined $0.98.
+    /// Guaranteed profit regardless of outcome. Uses batch GTC orders.
     TwoSided,
-    /// Standard directional with dynamic confidence
+    /// Confirmed mode: standard directional with dynamic confidence.
+    /// Uses GTC maker orders to avoid taker fees.
     Confirmed,
     /// Cross-market correlation: follower coin triggered by leader spike.
+    /// Confidence discounted by 0.7x factor for correlation uncertainty.
     CrossCorrelated {
         /// The leader coin that spiked (e.g. "BTC").
         leader: String,
@@ -473,14 +483,25 @@ pub enum ArbitrageMode {
 }
 
 /// A detected arbitrage opportunity ready for execution.
+///
+/// Contains all information needed to place an order: market, outcome, price,
+/// confidence, and profitability after fees. The `net_margin` field accounts
+/// for Polymarket's dynamic taker fees (0% for maker/GTC orders).
 #[derive(Debug, Clone)]
 pub struct ArbitrageOpportunity {
+    /// Trading mode that generated this opportunity.
     pub mode: ArbitrageMode,
+    /// Market to trade.
     pub market_id: MarketId,
+    /// Outcome to buy (Up or Down).
     pub outcome_to_buy: OutcomeSide,
+    /// ERC-1155 token ID for the outcome.
     pub token_id: TokenId,
+    /// Best ask price to buy at.
     pub buy_price: Decimal,
+    /// Confidence score in [0, 1], used for Kelly sizing.
     pub confidence: Decimal,
+    /// Gross profit margin (1 - buy_price) before fees.
     pub profit_margin: Decimal,
     /// Estimated taker fee per share at entry (0 for maker/GTC orders).
     pub estimated_fee: Decimal,
@@ -489,16 +510,29 @@ pub struct ArbitrageOpportunity {
 }
 
 /// Tracks an active arbitrage position.
+///
+/// Once an order fills, it becomes a position tracked until market expiration
+/// or stop-loss trigger. The position stores all data needed for P&L calculation,
+/// stop-loss monitoring, and performance tracking.
 #[derive(Debug, Clone)]
 pub struct ArbitragePosition {
+    /// Market being traded.
     pub market_id: MarketId,
+    /// Token ID of the outcome purchased.
     pub token_id: TokenId,
+    /// Outcome side (Up or Down).
     pub side: OutcomeSide,
+    /// Entry price paid per share.
     pub entry_price: Decimal,
+    /// Position size in shares (USDC amount / entry_price).
     pub size: Decimal,
+    /// Crypto reference price at market window start.
     pub reference_price: Decimal,
+    /// Coin symbol (e.g. "BTC").
     pub coin: String,
+    /// Order ID if known (for tracking).
     pub order_id: Option<OrderId>,
+    /// Timestamp when position opened.
     pub entry_time: DateTime<Utc>,
     /// Kelly fraction used for sizing (None if fixed sizing was used).
     pub kelly_fraction: Option<Decimal>,
@@ -511,13 +545,22 @@ pub struct ArbitragePosition {
 }
 
 /// A detected price spike event.
+///
+/// Tracks large, rapid price movements that may signal arbitrage opportunities.
+/// Spike events are retained for dashboard display and correlation analysis.
 #[derive(Debug, Clone)]
 pub struct SpikeEvent {
+    /// Coin that spiked (e.g. "BTC").
     pub coin: String,
+    /// Timestamp when spike detected.
     pub timestamp: DateTime<Utc>,
+    /// Percentage change from baseline (signed: positive = up, negative = down).
     pub change_pct: Decimal,
+    /// Price at start of spike window.
     pub from_price: Decimal,
+    /// Current price that triggered spike.
     pub to_price: Decimal,
+    /// Whether this spike generated a trading action.
     pub acted: bool,
 }
 
@@ -533,17 +576,21 @@ impl std::fmt::Display for ArbitrageMode {
 }
 
 /// Per-mode performance statistics for tracking trade outcomes.
+///
+/// Accumulates win rate, P&L, and recent performance for each trading mode.
+/// Used for dashboard display and auto-disable logic (disable modes with
+/// poor win rate after min_trades threshold).
 #[derive(Debug, Clone)]
 pub struct ModeStats {
     /// Total trades entered in this mode.
     pub entered: u64,
-    /// Trades that resolved profitably.
+    /// Trades that resolved profitably (P&L >= 0).
     pub won: u64,
-    /// Trades that resolved at a loss.
+    /// Trades that resolved at a loss (P&L < 0).
     pub lost: u64,
     /// Cumulative realized P&L (after fees).
     pub total_pnl: Decimal,
-    /// Rolling window of recent P&L values.
+    /// Rolling window of recent P&L values (for volatility tracking).
     pub recent_pnl: VecDeque<Decimal>,
     /// Maximum window size for recent_pnl.
     window_size: usize,
@@ -621,19 +668,34 @@ struct PendingOrder {
 }
 
 /// An open GTC limit order that has been placed but not yet fully filled.
+///
+/// Tracks maker orders posted to the book. Orders are monitored for fills
+/// (OrderEvent::Filled) and cancelled if stale (age > max_age_secs).
 #[derive(Debug, Clone)]
 pub struct OpenLimitOrder {
+    /// Order ID from execution backend.
     pub order_id: OrderId,
+    /// Market being traded.
     pub market_id: MarketId,
+    /// Token ID of the outcome.
     pub token_id: TokenId,
+    /// Outcome side (Up or Down).
     pub side: OutcomeSide,
+    /// Limit price posted.
     pub price: Decimal,
+    /// Order size in shares (remaining if partially filled).
     pub size: Decimal,
+    /// Crypto reference price at market window start.
     pub reference_price: Decimal,
+    /// Coin symbol (e.g. "BTC").
     pub coin: String,
+    /// Instant when order was placed (for staleness check).
     pub placed_at: tokio::time::Instant,
+    /// Trading mode that generated this order.
     pub mode: ArbitrageMode,
+    /// Kelly fraction used for sizing (None if fixed).
     pub kelly_fraction: Option<Decimal>,
+    /// Estimated fee (0 for GTC maker orders).
     pub estimated_fee: Decimal,
 }
 

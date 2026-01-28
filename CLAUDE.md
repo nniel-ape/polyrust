@@ -156,10 +156,69 @@ See `examples/simple_strategy.rs` for a complete runnable example.
 
 ## Reference Strategy: Crypto Arbitrage
 
-Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-minute Up/Down crypto markets with three modes:
+Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-minute Up/Down crypto markets with four modes:
 1. **Tail-End** (<2 min remaining, market >= 90%) — highest confidence
 2. **Two-Sided** (both outcomes < $1 combined) — guaranteed profit
 3. **Confirmed** (dynamic confidence model) — standard directional trading
+4. **Cross-Correlated** (follower coin triggered by leader spike) — correlation-based signals
+
+### Strategy Configuration
+
+The crypto arbitrage strategy uses a modular configuration structure with sub-configs for different feature groups:
+
+```rust
+pub struct ArbitrageConfig {
+    // Core settings
+    pub coins: Vec<String>,
+    pub max_positions: usize,
+    pub min_profit_margin: Decimal,
+    pub late_window_margin: Decimal,
+    pub scan_interval_secs: u64,
+    pub use_chainlink: bool,
+
+    // Feature sub-configs (all with #[serde(default)])
+    pub fee: FeeConfig,           // Taker fee model (default 3.15% at 50/50)
+    pub spike: SpikeConfig,       // Spike detection (threshold, window, history)
+    pub order: OrderConfig,       // Hybrid GTC/FOK orders (maker vs taker)
+    pub sizing: SizingConfig,     // Kelly criterion position sizing
+    pub stop_loss: StopLossConfig, // Dual-trigger + trailing stops
+    pub correlation: CorrelationConfig, // Cross-market correlation pairs
+    pub performance: PerformanceConfig, // Performance tracking & auto-disable
+}
+```
+
+#### Sub-Config Breakdown
+
+- **FeeConfig**: Taker fee rate for net profit margin calculation
+- **SpikeConfig**: Price spike detection (threshold_pct, window_secs, history_size)
+- **OrderConfig**: Hybrid order mode (hybrid_mode, limit_offset, max_age_secs)
+  - GTC maker orders for Confirmed/TwoSided modes (0% fee)
+  - FOK taker orders for TailEnd mode (speed matters)
+- **SizingConfig**: Kelly criterion sizing (base_size, kelly_multiplier, min/max_size, use_kelly)
+  - Scales position size with confidence and edge
+  - Falls back to fixed sizing when disabled or for TwoSided mode
+- **StopLossConfig**: Dual-trigger stop-loss + trailing stops
+  - reversal_pct: crypto price reversal threshold
+  - min_drop: minimum market price drop
+  - trailing_enabled, trailing_distance: lock in profits as bid rises
+  - time_decay: tighten stops near expiration
+- **CorrelationConfig**: Cross-market correlation (leader → follower coin pairs)
+  - BTC spike triggers ETH/SOL signals
+  - Confidence discounted by 0.7x for followers
+- **PerformanceConfig**: Per-mode tracking and auto-disable
+  - Tracks win rate, P&L per mode (TailEnd, TwoSided, Confirmed, CrossCorrelated)
+  - Auto-disable modes with low win rate after min_trades
+
+### Key Features
+
+- **Fee-aware profit margins**: Net profit calculation accounts for Polymarket's dynamic taker fees (3.15% at 50/50, ~0% near 0/1)
+- **Hybrid order execution**: GTC maker orders (0% fee) for most trades, FOK taker orders only for tail-end urgency
+- **Kelly criterion sizing**: Position size scales with confidence and edge, clamped to [min_size, max_size]
+- **Spike detection**: Pre-filters small moves, triggers evaluation only on significant price changes or when delta exceeds fee+margin threshold
+- **Trailing stop-loss**: Locks in profits as position moves favorably, with optional time decay near expiration
+- **Batch order API**: TwoSided mode places both legs in a single API call for atomic execution
+- **Cross-market correlation**: Leader coin spikes (BTC) generate signals for follower coins (ETH, SOL)
+- **Performance tracking**: Per-mode statistics with optional auto-disable for underperforming modes
 
 ## Polymarket API Endpoints
 

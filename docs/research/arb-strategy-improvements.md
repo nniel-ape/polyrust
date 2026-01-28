@@ -41,6 +41,25 @@ Note: exact formula not publicly documented — verify from [exchange-fee-module
 - Estimated $40M extracted by arb bots Apr 2024–Apr 2025
 - Only 0.5% of users made >$1,000 profit
 
+## Implementation Status
+
+All P0-P1 improvements have been implemented (as of 2026-01-28):
+
+- ✅ **Fee-aware margins** (#2) — Net profit calculation includes dynamic taker fees
+- ✅ **Spike detection** (#3) — Pre-filter for small moves, spike event tracking
+- ✅ **Maker orders** (#1) — Hybrid GTC/FOK mode (GTC for Confirmed/TwoSided, FOK for TailEnd)
+- ✅ **Kelly sizing** (#5) — Position size scales with confidence and edge
+- ✅ **Batch API** (#7) — TwoSided mode uses batch orders for atomic execution
+- ✅ **Cross-market arb** (#4) — Leader spike triggers follower signals (BTC → ETH/SOL)
+- ✅ **Trailing stops** (#8) — Lock in profits with time decay option
+- ✅ **Performance tracking** (#9) — Per-mode stats with auto-disable capability
+
+Remaining work:
+- 🔲 Market-making mode (#6, P3) — Two-sided liquidity provision
+- 🔲 Multi-source oracle (#10, P3) — Coinbase, aggregated VWAP
+
+See `docs/plans/arb-strategy-improvements.md` for detailed implementation plan and test coverage.
+
 ## 10 Improvements (Ranked by Impact)
 
 ### 1. Become a Maker, Not a Taker
