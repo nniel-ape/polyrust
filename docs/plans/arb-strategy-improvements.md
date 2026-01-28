@@ -143,16 +143,16 @@ T10 (Verify + docs)
 - [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 7: Cross-market correlation
-- [ ] Add `CrossCorrelated { leader: String }` variant to `ArbitrageMode` enum
-- [ ] In `on_crypto_price()`: when spike detected for leader coin, find active markets for follower coins from `correlation.pairs`
-- [ ] Generate opportunities for followers: confidence = `leader_confidence * 0.7` (correlation discount)
-- [ ] Skip if follower market ask already moved away from 0.50 (market caught up)
-- [ ] Add correlation signals to dashboard
-- [ ] Write test: BTC 2% spike with active ETH market generates ETH Up opportunity
-- [ ] Write test: no signal when `correlation.enabled = false`
-- [ ] Write test: no signal when follower market already moved (ask > 0.60 or < 0.40)
-- [ ] Write test: confidence properly discounted by 0.7x factor
-- [ ] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
+- [x] Add `CrossCorrelated { leader: String }` variant to `ArbitrageMode` enum
+- [x] In `on_crypto_price()`: when spike detected for leader coin, find active markets for follower coins from `correlation.pairs`
+- [x] Generate opportunities for followers: confidence = `leader_confidence * 0.7` (correlation discount)
+- [x] Skip if follower market ask already moved away from 0.50 (market caught up)
+- [x] Add correlation signals to dashboard
+- [x] Write test: BTC 2% spike with active ETH market generates ETH Up opportunity
+- [x] Write test: no signal when `correlation.enabled = false`
+- [x] Write test: no signal when follower market already moved (ask > 0.60 or < 0.40)
+- [x] Write test: confidence properly discounted by 0.7x factor
+- [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 8: Trailing stop-loss
 - [ ] Add `peak_bid: Decimal` field to `ArbitragePosition`, initialize to `entry_price`

@@ -456,8 +456,8 @@ pub fn kelly_position_size(
     size.max(config.min_size).min(config.max_size)
 }
 
-/// Three arbitrage trading modes, ordered by priority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Arbitrage trading modes, ordered by priority.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArbitrageMode {
     /// < 2 min remaining, market price >= 90%
     TailEnd,
@@ -465,6 +465,11 @@ pub enum ArbitrageMode {
     TwoSided,
     /// Standard directional with dynamic confidence
     Confirmed,
+    /// Cross-market correlation: follower coin triggered by leader spike.
+    CrossCorrelated {
+        /// The leader coin that spiked (e.g. "BTC").
+        leader: String,
+    },
 }
 
 /// A detected arbitrage opportunity ready for execution.
@@ -891,7 +896,7 @@ impl CryptoArbitrageStrategy {
                             reference_price: market.reference_price,
                             coin: market.coin.clone(),
                             order_type,
-                            mode: opp.mode,
+                            mode: opp.mode.clone(),
                             kelly_fraction: kelly_frac,
                         },
                     );
@@ -908,6 +913,17 @@ impl CryptoArbitrageStrategy {
                     actions.push(Action::PlaceBatchOrder(batch_orders));
                 }
             }
+        }
+
+        // -- Cross-market correlation: leader spike → follower opportunities --
+        if self.config.correlation.enabled
+            && let Some(change_pct) = spike
+            && change_pct.abs() >= self.config.correlation.min_spike_pct
+        {
+            let corr_actions = self
+                .generate_cross_correlated_opportunities(symbol, change_pct, price, ctx)
+                .await?;
+            actions.extend(corr_actions);
         }
 
         Ok(actions)
@@ -1077,6 +1093,231 @@ impl CryptoArbitrageStrategy {
         }
 
         Ok(vec![])
+    }
+
+    /// Generate cross-correlated opportunities for follower coins when a leader
+    /// coin spikes. Finds active markets for each follower, checks that the
+    /// follower market hasn't already moved (ask still near 0.50), and creates
+    /// discounted-confidence opportunities.
+    async fn generate_cross_correlated_opportunities(
+        &mut self,
+        leader_coin: &str,
+        leader_change_pct: Decimal,
+        _leader_price: Decimal,
+        ctx: &StrategyContext,
+    ) -> Result<Vec<Action>> {
+        let mut actions = Vec::new();
+
+        // Find follower coins for this leader
+        let followers: Vec<String> = self
+            .config
+            .correlation
+            .pairs
+            .iter()
+            .filter(|(leader, _)| leader == leader_coin)
+            .flat_map(|(_, followers)| followers.clone())
+            .collect();
+
+        if followers.is_empty() {
+            return Ok(actions);
+        }
+
+        // Compute leader confidence from the spike magnitude
+        // Use the same confidence model: larger spikes = higher confidence
+        let leader_confidence = leader_change_pct.abs().min(Decimal::ONE);
+        let correlation_discount = Decimal::new(7, 1); // 0.7
+        let follower_confidence = leader_confidence * correlation_discount;
+
+        // Need at least 50% confidence to act (same threshold as Confirmed mode)
+        if follower_confidence < Decimal::new(50, 2) {
+            return Ok(actions);
+        }
+
+        let md = ctx.market_data.read().await;
+
+        for follower_coin in &followers {
+            // Find active markets for this follower coin
+            let follower_market_ids: Vec<MarketId> = self
+                .active_markets
+                .iter()
+                .filter(|(_, m)| m.coin == *follower_coin)
+                .map(|(id, _)| id.clone())
+                .collect();
+
+            for market_id in follower_market_ids {
+                let market = match self.active_markets.get(&market_id) {
+                    Some(m) => m.clone(),
+                    None => continue,
+                };
+
+                // Skip if we already have a position or pending order
+                if self.positions.contains_key(&market.market.id) {
+                    continue;
+                }
+                if self
+                    .pending_orders
+                    .values()
+                    .any(|p| p.market_id == market.market.id)
+                {
+                    continue;
+                }
+                if self
+                    .open_limit_orders
+                    .values()
+                    .any(|lo| lo.market_id == market.market.id)
+                {
+                    continue;
+                }
+
+                // Skip ended markets
+                if market.market.seconds_remaining() <= 0 {
+                    continue;
+                }
+
+                // Determine predicted side: leader went up → follower Up, leader went down → follower Down
+                let predicted = if leader_change_pct > Decimal::ZERO {
+                    OutcomeSide::Up
+                } else {
+                    OutcomeSide::Down
+                };
+
+                let (token_id, ask) = match predicted {
+                    OutcomeSide::Up | OutcomeSide::Yes => (
+                        &market.market.token_ids.outcome_a,
+                        md.orderbooks
+                            .get(&market.market.token_ids.outcome_a)
+                            .and_then(|ob| ob.best_ask()),
+                    ),
+                    OutcomeSide::Down | OutcomeSide::No => (
+                        &market.market.token_ids.outcome_b,
+                        md.orderbooks
+                            .get(&market.market.token_ids.outcome_b)
+                            .and_then(|ob| ob.best_ask()),
+                    ),
+                };
+
+                let ask_price = match ask {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                // Skip if follower market already moved away from 0.50
+                // (market has already caught up to the leader's move)
+                if ask_price > Decimal::new(60, 2) || ask_price < Decimal::new(40, 2) {
+                    info!(
+                        leader = %leader_coin,
+                        follower = %follower_coin,
+                        ask = %ask_price,
+                        "Skipping cross-correlated signal: follower market already moved"
+                    );
+                    continue;
+                }
+
+                let profit_margin = Decimal::ONE - ask_price;
+                let is_maker = self.config.order.hybrid_mode;
+                let estimated_fee = if is_maker {
+                    Decimal::ZERO
+                } else {
+                    taker_fee(ask_price, self.config.fee.taker_fee_rate)
+                };
+                let net_margin = profit_margin - estimated_fee;
+                let min_margin = self.config.min_profit_margin;
+
+                if net_margin < min_margin {
+                    continue;
+                }
+
+                // Check position limits
+                let total_positions: usize = self.positions.values().map(|v| v.len()).sum();
+                let total_pending = self.pending_orders.len();
+                let total_limits = self.open_limit_orders.len();
+                if total_positions + total_pending + total_limits + 1 > self.config.max_positions {
+                    break;
+                }
+
+                info!(
+                    leader = %leader_coin,
+                    follower = %follower_coin,
+                    leader_change = %leader_change_pct,
+                    follower_confidence = %follower_confidence,
+                    ask = %ask_price,
+                    net_margin = %net_margin,
+                    "Cross-correlated opportunity detected"
+                );
+
+                let opp = ArbitrageOpportunity {
+                    mode: ArbitrageMode::CrossCorrelated {
+                        leader: leader_coin.to_string(),
+                    },
+                    market_id: market.market.id.clone(),
+                    outcome_to_buy: predicted,
+                    token_id: token_id.clone(),
+                    buy_price: ask_price,
+                    confidence: follower_confidence,
+                    profit_margin,
+                    estimated_fee,
+                    net_margin,
+                };
+
+                // Use Kelly sizing for CrossCorrelated (like Confirmed mode)
+                let (size, kelly_frac) = if self.config.sizing.use_kelly {
+                    let kelly_size =
+                        kelly_position_size(opp.confidence, opp.buy_price, &self.config.sizing);
+                    if kelly_size.is_zero() {
+                        continue;
+                    }
+                    let shares = kelly_size / opp.buy_price;
+                    let payout = Decimal::ONE / opp.buy_price - Decimal::ONE;
+                    let kf = if payout > Decimal::ZERO {
+                        (opp.confidence * payout - (Decimal::ONE - opp.confidence)) / payout
+                    } else {
+                        Decimal::ZERO
+                    };
+                    (shares, Some(kf))
+                } else {
+                    (self.config.sizing.base_size / opp.buy_price, None)
+                };
+
+                // Use hybrid order mode (GTC for maker, like Confirmed)
+                let (order_type, order_price) =
+                    if self.config.order.hybrid_mode {
+                        let limit_price =
+                            (opp.buy_price - self.config.order.limit_offset).max(Decimal::new(1, 2));
+                        (OrderType::Gtc, limit_price)
+                    } else {
+                        (OrderType::Fok, opp.buy_price)
+                    };
+
+                let order = OrderRequest {
+                    token_id: token_id.clone(),
+                    side: polyrust_core::types::OrderSide::Buy,
+                    price: order_price,
+                    size,
+                    order_type,
+                    neg_risk: market.market.neg_risk,
+                };
+
+                self.pending_orders.insert(
+                    token_id.clone(),
+                    PendingOrder {
+                        market_id: market.market.id.clone(),
+                        token_id: token_id.clone(),
+                        side: predicted,
+                        price: order_price,
+                        size,
+                        reference_price: market.reference_price,
+                        coin: follower_coin.clone(),
+                        order_type,
+                        mode: opp.mode.clone(),
+                        kelly_fraction: kelly_frac,
+                    },
+                );
+
+                actions.push(Action::PlaceOrder(order));
+            }
+        }
+
+        Ok(actions)
     }
 
     async fn on_orderbook_update(
@@ -1972,6 +2213,91 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
                 );
             }
             html.push_str("</tbody></table>");
+        }
+        html.push_str("</div>");
+
+        // --- Cross-Market Correlation ---
+        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+        html.push_str(r#"<h2 class="text-lg font-bold mb-3">Cross-Market Correlation</h2>"#);
+
+        if !self.config.correlation.enabled {
+            html.push_str(r#"<p class="text-gray-500">Correlation signals disabled</p>"#);
+        } else {
+            // Show configured pairs
+            html.push_str(r#"<p class="text-gray-400 text-sm mb-2">Pairs: "#);
+            for (i, (leader, followers)) in self.config.correlation.pairs.iter().enumerate() {
+                if i > 0 {
+                    html.push_str(", ");
+                }
+                let _ = write!(
+                    html,
+                    "{} → [{}]",
+                    escape_html(leader),
+                    followers
+                        .iter()
+                        .map(|f| escape_html(f))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            html.push_str("</p>");
+
+            // Show active cross-correlated positions/orders
+            let cross_pending: Vec<_> = self
+                .pending_orders
+                .values()
+                .filter(|p| matches!(&p.mode, ArbitrageMode::CrossCorrelated { .. }))
+                .collect();
+            let cross_limits: Vec<_> = self
+                .open_limit_orders
+                .values()
+                .filter(|lo| matches!(&lo.mode, ArbitrageMode::CrossCorrelated { .. }))
+                .collect();
+
+            let cross_count = cross_pending.len() + cross_limits.len();
+            if cross_count == 0 {
+                html.push_str(r#"<p class="text-gray-500">No active correlation signals</p>"#);
+            } else {
+                html.push_str(r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#);
+                html.push_str("<th class=\"text-left py-1\">Leader</th>");
+                html.push_str("<th class=\"text-left py-1\">Follower</th>");
+                html.push_str("<th class=\"text-right py-1\">Price</th>");
+                html.push_str("<th class=\"text-right py-1\">Size</th>");
+                html.push_str("<th class=\"text-left py-1\">Status</th>");
+                html.push_str("</tr></thead><tbody>");
+
+                for p in &cross_pending {
+                    let leader_name = match &p.mode {
+                        ArbitrageMode::CrossCorrelated { leader } => leader.as_str(),
+                        _ => "-",
+                    };
+                    let _ = write!(
+                        html,
+                        r#"<tr class="border-b border-gray-800"><td class="py-1">{leader}</td><td class="py-1">{follower}</td><td class="text-right py-1">{price}</td><td class="text-right py-1">{size}</td><td class="py-1">Pending</td></tr>"#,
+                        leader = escape_html(leader_name),
+                        follower = escape_html(&p.coin),
+                        price = fmt_usd(p.price),
+                        size = p.size.round_dp(2),
+                    );
+                }
+
+                for lo in &cross_limits {
+                    let leader_name = match &lo.mode {
+                        ArbitrageMode::CrossCorrelated { leader } => leader.as_str(),
+                        _ => "-",
+                    };
+                    let _ = write!(
+                        html,
+                        r#"<tr class="border-b border-gray-800"><td class="py-1">{leader}</td><td class="py-1">{follower}</td><td class="text-right py-1">{price}</td><td class="text-right py-1">{size}</td><td class="py-1">Open Limit</td></tr>"#,
+                        leader = escape_html(leader_name),
+                        follower = escape_html(&lo.coin),
+                        price = fmt_usd(lo.price),
+                        size = lo.size.round_dp(2),
+                    );
+                }
+
+                html.push_str("</tbody></table>");
+            }
         }
         html.push_str("</div>");
 
@@ -3931,5 +4257,366 @@ mod tests {
             .filter(|a| matches!(a, Action::PlaceOrder(_)))
             .collect();
         assert!(individual_orders.is_empty(), "TwoSided should not emit individual PlaceOrder");
+    }
+
+    // --- Cross-market correlation tests ---
+
+    fn make_market_info_for_coin(
+        id: &str,
+        coin: &str,
+        end_date: DateTime<Utc>,
+    ) -> MarketInfo {
+        MarketInfo {
+            id: id.to_string(),
+            slug: format!("{}-up-down", coin.to_lowercase()),
+            question: format!("Will {} go up?", coin),
+            start_date: None,
+            end_date,
+            token_ids: TokenIds {
+                outcome_a: format!("{}_token_up", coin.to_lowercase()),
+                outcome_b: format!("{}_token_down", coin.to_lowercase()),
+            },
+            accepting_orders: true,
+            neg_risk: false,
+        }
+    }
+
+    fn make_mwr_for_coin(
+        coin: &str,
+        market_id: &str,
+        reference_price: Decimal,
+        time_remaining_secs: i64,
+    ) -> MarketWithReference {
+        MarketWithReference {
+            market: make_market_info_for_coin(
+                market_id,
+                coin,
+                Utc::now() + Duration::seconds(time_remaining_secs),
+            ),
+            reference_price,
+            reference_quality: ReferenceQuality::Exact,
+            discovery_time: Utc::now(),
+            coin: coin.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_correlated_btc_spike_generates_eth_opportunity() {
+        // BTC large spike should generate ETH Up opportunity when correlation enabled.
+        // Need leader_confidence >= ~0.72 so follower_confidence (0.7x) >= 0.50.
+        // A 80% move gives leader_confidence=0.80, follower=0.56 (above 50%).
+        let mut strategy = make_strategy_no_chainlink();
+        strategy.config.correlation.enabled = true;
+        strategy.config.correlation.min_spike_pct = dec!(0.01);
+        // Disable Kelly to simplify order generation
+        strategy.config.sizing.use_kelly = false;
+        let ctx = StrategyContext::new();
+
+        // Set up BTC price history with a large spike (80% move)
+        let now = Utc::now();
+        let mut btc_history = VecDeque::new();
+        btc_history.push_back((now - Duration::seconds(15), dec!(50000), "binance".to_string()));
+        btc_history.push_back((now, dec!(90000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), btc_history);
+
+        // Set up ETH price history (needed for any eval)
+        let mut eth_history = VecDeque::new();
+        eth_history.push_back((now - Duration::seconds(10), dec!(3000), "binance".to_string()));
+        strategy.price_history.insert("ETH".to_string(), eth_history);
+
+        // Add an active ETH market (follower)
+        let eth_mwr = make_mwr_for_coin("ETH", "eth_market1", dec!(3000), 600);
+        strategy
+            .active_markets
+            .insert("eth_market1".to_string(), eth_mwr);
+
+        // Also add a BTC market (leader) so the evaluation path runs
+        let btc_mwr = make_mwr_for_coin("BTC", "btc_market1", dec!(50000), 600);
+        strategy
+            .active_markets
+            .insert("btc_market1".to_string(), btc_mwr);
+
+        // Set up orderbooks: ETH ask near 0.50 (hasn't moved yet)
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "eth_token_up".to_string(),
+                make_orderbook("eth_token_up", dec!(0.48), dec!(0.52)),
+            );
+            md.orderbooks.insert(
+                "eth_token_down".to_string(),
+                make_orderbook("eth_token_down", dec!(0.44), dec!(0.48)),
+            );
+            // BTC orderbooks
+            md.orderbooks.insert(
+                "btc_token_up".to_string(),
+                make_orderbook("btc_token_up", dec!(0.55), dec!(0.60)),
+            );
+            md.orderbooks.insert(
+                "btc_token_down".to_string(),
+                make_orderbook("btc_token_down", dec!(0.35), dec!(0.40)),
+            );
+        }
+
+        let actions = strategy
+            .on_crypto_price("BTC", dec!(90000), "binance", &ctx)
+            .await
+            .unwrap();
+
+        // Should have generated at least one PlaceOrder for the ETH follower
+        let place_orders: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::PlaceOrder(req) => Some(req),
+                _ => None,
+            })
+            .collect();
+
+        // Find the ETH cross-correlated order
+        let eth_order = place_orders
+            .iter()
+            .find(|o| o.token_id.starts_with("eth_"));
+        assert!(
+            eth_order.is_some(),
+            "BTC spike should generate ETH cross-correlated order, got actions: {:?}",
+            actions
+        );
+
+        // Verify the pending order has CrossCorrelated mode
+        let eth_pending = strategy
+            .pending_orders
+            .values()
+            .find(|p| p.coin == "ETH");
+        assert!(eth_pending.is_some(), "ETH pending order should exist");
+        let pending = eth_pending.unwrap();
+        assert!(
+            matches!(&pending.mode, ArbitrageMode::CrossCorrelated { leader } if leader == "BTC"),
+            "Mode should be CrossCorrelated with BTC leader, got {:?}",
+            pending.mode
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_correlated_disabled_produces_no_signal() {
+        // When correlation.enabled = false, no cross-correlated signals
+        let mut strategy = make_strategy_no_chainlink();
+        strategy.config.correlation.enabled = false;
+        let ctx = StrategyContext::new();
+
+        let now = Utc::now();
+        let mut btc_history = VecDeque::new();
+        btc_history.push_back((now - Duration::seconds(15), dec!(50000), "binance".to_string()));
+        btc_history.push_back((now, dec!(51000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), btc_history);
+
+        let eth_mwr = make_mwr_for_coin("ETH", "eth_market1", dec!(3000), 600);
+        strategy
+            .active_markets
+            .insert("eth_market1".to_string(), eth_mwr);
+
+        let btc_mwr = make_mwr_for_coin("BTC", "btc_market1", dec!(50000), 600);
+        strategy
+            .active_markets
+            .insert("btc_market1".to_string(), btc_mwr);
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "eth_token_up".to_string(),
+                make_orderbook("eth_token_up", dec!(0.48), dec!(0.52)),
+            );
+            md.orderbooks.insert(
+                "eth_token_down".to_string(),
+                make_orderbook("eth_token_down", dec!(0.44), dec!(0.48)),
+            );
+            md.orderbooks.insert(
+                "btc_token_up".to_string(),
+                make_orderbook("btc_token_up", dec!(0.55), dec!(0.60)),
+            );
+            md.orderbooks.insert(
+                "btc_token_down".to_string(),
+                make_orderbook("btc_token_down", dec!(0.35), dec!(0.40)),
+            );
+        }
+
+        let actions = strategy
+            .on_crypto_price("BTC", dec!(51000), "binance", &ctx)
+            .await
+            .unwrap();
+
+        // Should NOT have any ETH orders since correlation is disabled
+        let eth_orders: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::PlaceOrder(req) if req.token_id.starts_with("eth_") => Some(req),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            eth_orders.is_empty(),
+            "Correlation disabled should produce no ETH signals"
+        );
+
+        // No cross-correlated pending orders
+        let cross_pending = strategy
+            .pending_orders
+            .values()
+            .any(|p| matches!(&p.mode, ArbitrageMode::CrossCorrelated { .. }));
+        assert!(!cross_pending, "No cross-correlated pending orders when disabled");
+    }
+
+    #[tokio::test]
+    async fn cross_correlated_skips_moved_follower_market() {
+        // When follower market ask > 0.60, skip (market already caught up)
+        let mut strategy = make_strategy_no_chainlink();
+        strategy.config.correlation.enabled = true;
+        strategy.config.correlation.min_spike_pct = dec!(0.01);
+        let ctx = StrategyContext::new();
+
+        let now = Utc::now();
+        let mut btc_history = VecDeque::new();
+        btc_history.push_back((now - Duration::seconds(15), dec!(50000), "binance".to_string()));
+        btc_history.push_back((now, dec!(51000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), btc_history);
+
+        let eth_mwr = make_mwr_for_coin("ETH", "eth_market1", dec!(3000), 600);
+        strategy
+            .active_markets
+            .insert("eth_market1".to_string(), eth_mwr);
+
+        let btc_mwr = make_mwr_for_coin("BTC", "btc_market1", dec!(50000), 600);
+        strategy
+            .active_markets
+            .insert("btc_market1".to_string(), btc_mwr);
+
+        // ETH market already moved: ask at 0.65 (above 0.60 threshold)
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "eth_token_up".to_string(),
+                make_orderbook("eth_token_up", dec!(0.63), dec!(0.65)),
+            );
+            md.orderbooks.insert(
+                "eth_token_down".to_string(),
+                make_orderbook("eth_token_down", dec!(0.30), dec!(0.35)),
+            );
+            md.orderbooks.insert(
+                "btc_token_up".to_string(),
+                make_orderbook("btc_token_up", dec!(0.55), dec!(0.60)),
+            );
+            md.orderbooks.insert(
+                "btc_token_down".to_string(),
+                make_orderbook("btc_token_down", dec!(0.35), dec!(0.40)),
+            );
+        }
+
+        let actions = strategy
+            .on_crypto_price("BTC", dec!(51000), "binance", &ctx)
+            .await
+            .unwrap();
+
+        // Should NOT have ETH orders since the market already moved
+        let eth_orders: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::PlaceOrder(req) if req.token_id.starts_with("eth_") => Some(req),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            eth_orders.is_empty(),
+            "Should skip follower market that already moved (ask > 0.60)"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_correlated_confidence_properly_discounted() {
+        // Verify follower confidence = leader_change_pct.abs() * 0.7
+        let mut strategy = make_strategy_no_chainlink();
+        strategy.config.correlation.enabled = true;
+        strategy.config.correlation.min_spike_pct = dec!(0.01);
+        // Disable Kelly so we can focus on order generation
+        strategy.config.sizing.use_kelly = false;
+        let ctx = StrategyContext::new();
+
+        let now = Utc::now();
+        // BTC spike of exactly 2% = change_pct of 0.02
+        let mut btc_history = VecDeque::new();
+        btc_history.push_back((now - Duration::seconds(15), dec!(50000), "binance".to_string()));
+        btc_history.push_back((now, dec!(51000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), btc_history);
+
+        let eth_mwr = make_mwr_for_coin("ETH", "eth_market1", dec!(3000), 600);
+        strategy
+            .active_markets
+            .insert("eth_market1".to_string(), eth_mwr);
+
+        let btc_mwr = make_mwr_for_coin("BTC", "btc_market1", dec!(50000), 600);
+        strategy
+            .active_markets
+            .insert("btc_market1".to_string(), btc_mwr);
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "eth_token_up".to_string(),
+                make_orderbook("eth_token_up", dec!(0.48), dec!(0.52)),
+            );
+            md.orderbooks.insert(
+                "eth_token_down".to_string(),
+                make_orderbook("eth_token_down", dec!(0.44), dec!(0.48)),
+            );
+            md.orderbooks.insert(
+                "btc_token_up".to_string(),
+                make_orderbook("btc_token_up", dec!(0.55), dec!(0.60)),
+            );
+            md.orderbooks.insert(
+                "btc_token_down".to_string(),
+                make_orderbook("btc_token_down", dec!(0.35), dec!(0.40)),
+            );
+        }
+
+        let _actions = strategy
+            .on_crypto_price("BTC", dec!(51000), "binance", &ctx)
+            .await
+            .unwrap();
+
+        // The leader confidence = |0.02| = 0.02
+        // The follower confidence = 0.02 * 0.7 = 0.014
+        // This is below the 0.50 threshold, so no order should be generated
+        // for a 2% move. Need a much larger spike for sufficient confidence.
+        let eth_pending = strategy
+            .pending_orders
+            .values()
+            .find(|p| p.coin == "ETH");
+
+        // 2% spike * 0.7 = 1.4% confidence — well below 50% threshold
+        assert!(
+            eth_pending.is_none(),
+            "2% spike gives only 1.4% follower confidence (< 50%), should not generate order"
+        );
+
+        // Now test with a massive spike (80%) that gives sufficient confidence
+        strategy.pending_orders.clear();
+        let mut btc_history2 = VecDeque::new();
+        btc_history2.push_back((now - Duration::seconds(15), dec!(50000), "binance".to_string()));
+        btc_history2.push_back((now, dec!(90000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), btc_history2);
+
+        let _actions2 = strategy
+            .on_crypto_price("BTC", dec!(90000), "binance", &ctx)
+            .await
+            .unwrap();
+
+        // leader_confidence = min(|0.80|, 1.0) = 0.80
+        // follower_confidence = 0.80 * 0.7 = 0.56 (above 50% threshold)
+        let eth_pending2 = strategy
+            .pending_orders
+            .values()
+            .find(|p| p.coin == "ETH");
+        assert!(
+            eth_pending2.is_some(),
+            "80% spike gives 56% follower confidence (>= 50%), should generate order"
+        );
     }
 }
