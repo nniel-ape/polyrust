@@ -16,6 +16,7 @@ rust_decimal = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 alloy-primitives = "1"
+reqwest = { version = "0.12", features = ["json"] }
 futures = "0.3"
 
 [dev-dependencies]

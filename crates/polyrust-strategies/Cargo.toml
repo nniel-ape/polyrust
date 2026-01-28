@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 polyrust-core = { path = "../polyrust-core" }
+polyrust-market = { path = "../polyrust-market" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

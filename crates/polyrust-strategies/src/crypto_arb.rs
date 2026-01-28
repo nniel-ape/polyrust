@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -7,6 +8,7 @@ use rust_decimal::Decimal;
 use tracing::{info, warn};
 
 use polyrust_core::prelude::*;
+use polyrust_market::ChainlinkHistoricalClient;
 
 /// Escape a string for safe inclusion in HTML content.
 fn escape_html(s: &str) -> String {
@@ -40,8 +42,16 @@ pub struct ArbitrageConfig {
     pub stop_loss_min_drop: Decimal,
     /// Interval in seconds between market discovery scans
     pub scan_interval_secs: u64,
-    /// Whether to use Chainlink prices for resolution reference
+    /// Whether to use on-chain Chainlink RPC for resolution reference price
     pub use_chainlink: bool,
+    /// Polygon RPC endpoints for on-chain Chainlink lookups (tried in order).
+    /// Only used when `use_chainlink` is true.
+    #[serde(default = "default_chainlink_rpc_urls")]
+    pub chainlink_rpc_urls: Vec<String>,
+}
+
+fn default_chainlink_rpc_urls() -> Vec<String> {
+    vec!["https://polygon-rpc.com".to_string()]
 }
 
 impl Default for ArbitrageConfig {
@@ -56,6 +66,7 @@ impl Default for ArbitrageConfig {
             stop_loss_min_drop: Decimal::new(5, 2),     // 0.05
             scan_interval_secs: 30,
             use_chainlink: true,
+            chainlink_rpc_urls: default_chainlink_rpc_urls(),
         }
     }
 }
@@ -112,7 +123,9 @@ fn fmt_market_price(price: Decimal) -> String {
 /// How accurately the reference price matches the market's actual start-of-window price.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReferenceQuality {
-    /// Boundary snapshot captured within 2s of window start (best).
+    /// On-chain Chainlink RPC lookup — the exact settlement price Polymarket uses.
+    OnChain,
+    /// Boundary snapshot captured within 2s of window start (best real-time).
     Exact,
     /// Closest historical price entry; staleness in seconds from window start.
     Historical(u64),
@@ -122,9 +135,11 @@ pub enum ReferenceQuality {
 
 impl ReferenceQuality {
     /// Confidence discount factor based on reference accuracy.
-    /// Exact = 1.0, Historical(<5s) = 0.95, Historical(>=5s) = 0.85, Current = 0.70.
+    /// OnChain = 1.0 (exact settlement price), Exact = 1.0,
+    /// Historical(<5s) = 0.95, Historical(>=5s) = 0.85, Current = 0.70.
     pub fn quality_factor(&self) -> Decimal {
         match self {
+            ReferenceQuality::OnChain => Decimal::ONE,
             ReferenceQuality::Exact => Decimal::ONE,
             ReferenceQuality::Historical(s) if *s < 5 => Decimal::new(95, 2),
             ReferenceQuality::Historical(_) => Decimal::new(85, 2),
@@ -275,6 +290,9 @@ const WINDOW_SECS: i64 = 900;
 
 pub struct CryptoArbitrageStrategy {
     config: ArbitrageConfig,
+    /// On-chain Chainlink RPC client for exact settlement price lookups.
+    /// `None` when `config.use_chainlink` is false.
+    chainlink_client: Option<Arc<ChainlinkHistoricalClient>>,
     active_markets: HashMap<MarketId, MarketWithReference>,
     /// Price history per coin: (timestamp, price, source).
     /// Kept at PRICE_HISTORY_SIZE entries for retroactive reference lookup.
@@ -301,8 +319,17 @@ pub struct CryptoArbitrageStrategy {
 
 impl CryptoArbitrageStrategy {
     pub fn new(config: ArbitrageConfig) -> Self {
+        let chainlink_client = if config.use_chainlink {
+            Some(Arc::new(ChainlinkHistoricalClient::new(
+                config.chainlink_rpc_urls.clone(),
+            )))
+        } else {
+            None
+        };
+
         Self {
             config,
+            chainlink_client,
             active_markets: HashMap::new(),
             price_history: HashMap::new(),
             boundary_prices: HashMap::new(),
@@ -381,7 +408,7 @@ impl CryptoArbitrageStrategy {
                 .or_else(|| parse_slug_timestamp(&market.slug))
                 .unwrap_or(boundary_ts);
             let (reference_price, reference_quality) =
-                self.find_best_reference(symbol, window_ts, price);
+                self.find_best_reference(symbol, window_ts, price).await;
             let mwr = MarketWithReference {
                 market: market.clone(),
                 reference_price,
@@ -770,7 +797,7 @@ impl CryptoArbitrageStrategy {
             });
 
         let (reference_price, reference_quality) =
-            self.find_best_reference(&coin, window_ts, current_price);
+            self.find_best_reference(&coin, window_ts, current_price).await;
 
         let mwr = MarketWithReference {
             market: market.clone(),
@@ -940,15 +967,43 @@ impl CryptoArbitrageStrategy {
     /// Find the most accurate reference price for a coin at a given window start.
     ///
     /// Priority:
+    /// 0. On-chain Chainlink RPC lookup (exact settlement price)
     /// 1. Exact boundary snapshot (captured within 2s of window start)
     /// 2. Closest historical price entry (within 30s of window start)
     /// 3. Current price (fallback)
-    fn find_best_reference(
+    async fn find_best_reference(
         &self,
         coin: &str,
         window_ts: i64,
         current_price: Decimal,
     ) -> (Decimal, ReferenceQuality) {
+        // 0. On-chain Chainlink RPC — the exact price Polymarket uses for settlement
+        if let Some(client) = &self.chainlink_client {
+            match client
+                .get_price_at_timestamp(coin, window_ts as u64, 100)
+                .await
+            {
+                Ok(cp) => {
+                    let staleness = cp.timestamp.abs_diff(window_ts as u64);
+                    info!(
+                        coin = %coin,
+                        price = %cp.price,
+                        staleness_s = staleness,
+                        round_id = cp.round_id,
+                        "On-chain Chainlink reference price retrieved"
+                    );
+                    return (cp.price, ReferenceQuality::OnChain);
+                }
+                Err(e) => {
+                    warn!(
+                        coin = %coin,
+                        error = %e,
+                        "On-chain Chainlink lookup failed, falling back to local data"
+                    );
+                }
+            }
+        }
+
         // 1. Exact boundary snapshot
         let key = format!("{coin}-{window_ts}");
         if let Some(snap) = self.boundary_prices.get(&key) {
@@ -1098,6 +1153,7 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
                     .and_then(|h| h.back().map(|(_, p, _)| *p));
 
                 let ref_label = match mwr.reference_quality {
+                    ReferenceQuality::OnChain => "✓",
                     ReferenceQuality::Exact => "=",
                     ReferenceQuality::Historical(_) => "≈",
                     ReferenceQuality::Current => "~",
@@ -1712,7 +1768,7 @@ mod tests {
 
     #[tokio::test]
     async fn on_market_discovered_creates_entry() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = make_strategy_no_chainlink();
         let ctx = StrategyContext::new();
 
         // Set BTC price in context
@@ -1924,10 +1980,26 @@ mod tests {
         assert!(html.contains("≈$50,000.00"));
     }
 
+    #[test]
+    fn render_view_onchain_quality_reference() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        let mut mwr = make_mwr(dec!(50000), 300);
+        mwr.reference_quality = ReferenceQuality::OnChain;
+        strategy
+            .active_markets
+            .insert("market1".to_string(), mwr);
+
+        let html = strategy.render_view().unwrap();
+        // OnChain quality reference should show ✓ prefix
+        assert!(html.contains("✓$50,000.00"));
+    }
+
     // --- reference quality tests ---
 
     #[test]
     fn quality_factor_values() {
+        assert_eq!(ReferenceQuality::OnChain.quality_factor(), Decimal::ONE);
         assert_eq!(ReferenceQuality::Exact.quality_factor(), Decimal::ONE);
         assert_eq!(
             ReferenceQuality::Historical(3).quality_factor(),
@@ -1955,9 +2027,16 @@ mod tests {
         assert_eq!(c_current, dec!(0.350)); // 0.50 * 0.70 = 0.35
     }
 
-    #[test]
-    fn find_best_reference_exact_boundary() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+    /// Helper: create a strategy with Chainlink disabled (no RPC calls in tests).
+    fn make_strategy_no_chainlink() -> CryptoArbitrageStrategy {
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        CryptoArbitrageStrategy::new(config)
+    }
+
+    #[tokio::test]
+    async fn find_best_reference_exact_boundary() {
+        let mut strategy = make_strategy_no_chainlink();
 
         let ts = 1706000000i64;
         strategy.boundary_prices.insert(
@@ -1969,14 +2048,14 @@ mod tests {
             },
         );
 
-        let (price, quality) = strategy.find_best_reference("BTC", ts, dec!(43000));
+        let (price, quality) = strategy.find_best_reference("BTC", ts, dec!(43000)).await;
         assert_eq!(price, dec!(42500));
         assert_eq!(quality, ReferenceQuality::Exact);
     }
 
-    #[test]
-    fn find_best_reference_historical() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+    #[tokio::test]
+    async fn find_best_reference_historical() {
+        let mut strategy = make_strategy_no_chainlink();
 
         let window_ts = 1706000000i64;
         let target_dt = DateTime::from_timestamp(window_ts, 0).unwrap();
@@ -1997,14 +2076,14 @@ mod tests {
         ));
         strategy.price_history.insert("BTC".to_string(), history);
 
-        let (price, quality) = strategy.find_best_reference("BTC", window_ts, dec!(43000));
+        let (price, quality) = strategy.find_best_reference("BTC", window_ts, dec!(43000)).await;
         assert_eq!(price, dec!(42600)); // Closest to window start (5s)
         assert_eq!(quality, ReferenceQuality::Historical(5));
     }
 
-    #[test]
-    fn find_best_reference_historical_prefers_chainlink() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+    #[tokio::test]
+    async fn find_best_reference_historical_prefers_chainlink() {
+        let mut strategy = make_strategy_no_chainlink();
 
         let window_ts = 1706000000i64;
         let target_dt = DateTime::from_timestamp(window_ts, 0).unwrap();
@@ -2023,25 +2102,25 @@ mod tests {
         ));
         strategy.price_history.insert("BTC".to_string(), history);
 
-        let (price, quality) = strategy.find_best_reference("BTC", window_ts, dec!(43000));
+        let (price, quality) = strategy.find_best_reference("BTC", window_ts, dec!(43000)).await;
         // Should prefer Chainlink even though it's slightly further
         assert_eq!(price, dec!(42650));
         assert_eq!(quality, ReferenceQuality::Historical(6));
     }
 
-    #[test]
-    fn find_best_reference_fallback_to_current() {
-        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+    #[tokio::test]
+    async fn find_best_reference_fallback_to_current() {
+        let strategy = make_strategy_no_chainlink();
 
         // No boundary snapshots, no history
-        let (price, quality) = strategy.find_best_reference("BTC", 1706000000, dec!(43000));
+        let (price, quality) = strategy.find_best_reference("BTC", 1706000000, dec!(43000)).await;
         assert_eq!(price, dec!(43000));
         assert_eq!(quality, ReferenceQuality::Current);
     }
 
-    #[test]
-    fn find_best_reference_stale_history_falls_to_current() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+    #[tokio::test]
+    async fn find_best_reference_stale_history_falls_to_current() {
+        let mut strategy = make_strategy_no_chainlink();
 
         let window_ts = 1706000000i64;
         let target_dt = DateTime::from_timestamp(window_ts, 0).unwrap();
@@ -2055,7 +2134,7 @@ mod tests {
         ));
         strategy.price_history.insert("BTC".to_string(), history);
 
-        let (price, quality) = strategy.find_best_reference("BTC", window_ts, dec!(43000));
+        let (price, quality) = strategy.find_best_reference("BTC", window_ts, dec!(43000)).await;
         assert_eq!(price, dec!(43000));
         assert_eq!(quality, ReferenceQuality::Current);
     }
@@ -2112,7 +2191,7 @@ mod tests {
 
     #[tokio::test]
     async fn on_market_discovered_with_boundary_snapshot() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = make_strategy_no_chainlink();
         let ctx = StrategyContext::new();
 
         // Set BTC price in context
