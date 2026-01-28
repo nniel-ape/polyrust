@@ -87,7 +87,7 @@ impl EngineBuilder {
 
         // Set initial balance from execution backend
         {
-            let balance = execution.get_balance().await.unwrap_or_default();
+            let balance = execution.get_balance().await?;
             let mut state = context.balance.write().await;
             state.available_usdc = balance;
         }

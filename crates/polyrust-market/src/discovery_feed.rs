@@ -201,7 +201,9 @@ impl MarketDataFeed for DiscoveryFeed {
                         consecutive_failures += 1;
                         if consecutive_failures > 3 {
                             let backoff = std::cmp::min(
-                                config.poll_interval_secs * 2u64.pow(consecutive_failures - 3),
+                                config
+                                    .poll_interval_secs
+                                    .saturating_mul(2u64.saturating_pow(consecutive_failures.saturating_sub(3))),
                                 300,
                             );
                             warn!(
