@@ -78,10 +78,11 @@ Real-time updates use SSE: strategies emit `"dashboard-update"` signals, the SSE
 
 ## Configuration
 
-TOML config at `config/default.toml` with `POLY_*` environment variable overrides:
+Copy `config.example.toml` → `config.toml` and customize. Environment variable overrides use `POLY_*` prefix:
 - `POLY_PRIVATE_KEY`, `POLY_SAFE_ADDRESS` — wallet credentials
 - `POLY_BUILDER_API_KEY`, `POLY_BUILDER_API_SECRET`, `POLY_BUILDER_API_PASSPHRASE` — builder API
 - `POLY_DASHBOARD_PORT`, `POLY_DB_PATH`, `POLY_PAPER_TRADING` — runtime settings
+- `POLY_RPC_URLS` — comma-separated Polygon RPC endpoints for Chainlink oracle queries
 
 Paper mode: `[paper] enabled = true` or `POLY_PAPER_TRADING=true`
 
@@ -130,7 +131,7 @@ See `examples/simple_strategy.rs` for a complete runnable example.
 
 ## Paper Mode vs Live Mode
 
-- Paper mode (default): `[paper] enabled = true` in `config/default.toml` or `POLY_PAPER_TRADING=true`
+- Paper mode (default): `[paper] enabled = true` in `config.toml` or `POLY_PAPER_TRADING=true`
   - Simulated fills, no real orders, configurable initial balance
   - Supports Immediate and Orderbook fill modes
 - Live mode: `[paper] enabled = false` with valid Polymarket credentials

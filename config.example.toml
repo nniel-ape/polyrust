@@ -1,0 +1,152 @@
+# Polyrust Trading Bot — Configuration Reference
+#
+# Copy to config.toml and customize. All sections are optional with sensible defaults.
+# Override any value with POLY_* environment variables:
+#   POLY_PRIVATE_KEY, POLY_SAFE_ADDRESS,
+#   POLY_BUILDER_API_KEY, POLY_BUILDER_API_SECRET, POLY_BUILDER_API_PASSPHRASE,
+#   POLY_DASHBOARD_PORT, POLY_DB_PATH, POLY_PAPER_TRADING, POLY_RPC_URLS
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENGINE
+# ─────────────────────────────────────────────────────────────────────────────
+
+[engine]
+event_bus_capacity = 4096        # Tokio broadcast channel capacity
+health_check_interval_secs = 30  # Health check frequency
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POLYMARKET CREDENTIALS
+# ─────────────────────────────────────────────────────────────────────────────
+
+[polymarket]
+# Credentials — set via environment variables, never commit secrets
+# private_key = ""              # POLY_PRIVATE_KEY (wallet private key)
+# safe_address = ""             # POLY_SAFE_ADDRESS (Safe multisig address)
+# builder_api_key = ""          # POLY_BUILDER_API_KEY
+# builder_api_secret = ""       # POLY_BUILDER_API_SECRET
+# builder_api_passphrase = ""   # POLY_BUILDER_API_PASSPHRASE
+
+# Polygon RPC endpoints for on-chain Chainlink oracle queries (tried in order).
+# Override via POLY_RPC_URLS environment variable (comma-separated).
+rpc_urls = ["https://polygon-rpc.com"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DASHBOARD
+# ─────────────────────────────────────────────────────────────────────────────
+
+[dashboard]
+enabled = true
+port = 3000
+host = "127.0.0.1"  # Use "0.0.0.0" for remote access
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PERSISTENCE
+# ─────────────────────────────────────────────────────────────────────────────
+
+[store]
+db_path = "polyrust.db"  # Use ":memory:" for testing
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAPER TRADING
+# ─────────────────────────────────────────────────────────────────────────────
+
+[paper]
+enabled = true           # Set false + credentials for live trading
+initial_balance = 10000  # Starting USDC balance
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CRYPTO ARBITRAGE STRATEGY (Reference)
+# ═══════════════════════════════════════════════════════════════════════════════
+# The strategy currently uses code defaults (not loaded from TOML).
+# These sections document available options for future externalization.
+#
+# Exploits mispricing in 15-minute Up/Down crypto markets with four modes:
+#   1. Tail-End    — <2 min remaining, market >= 90% (highest confidence)
+#   2. Two-Sided   — both outcomes < $1 combined (guaranteed profit)
+#   3. Confirmed   — dynamic confidence model (standard directional)
+#   4. Cross-Correlated — follower coin triggered by leader spike
+
+# [strategy.crypto_arb]
+# coins = ["BTC", "ETH", "SOL", "XRP"]  # Coins to track
+# max_positions = 5                      # Maximum concurrent positions
+# min_profit_margin = 0.03               # 3% net profit for Confirmed mode
+# late_window_margin = 0.02              # 2% relaxed margin (120-300s remaining)
+# scan_interval_secs = 30                # Market discovery scan interval
+# use_chainlink = true                   # On-chain Chainlink vs RTDS boundary snapshots
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fee Model
+# ─────────────────────────────────────────────────────────────────────────────
+# Polymarket's dynamic taker fee: ~3.15% at 50/50, ~0% near 0/1
+
+# [strategy.crypto_arb.fee]
+# taker_fee_rate = 0.0315  # 3.15% at 50/50 probability
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Spike Detection
+# ─────────────────────────────────────────────────────────────────────────────
+# Pre-filter small price moves; trigger evaluation only on significant changes
+
+# [strategy.crypto_arb.spike]
+# threshold_pct = 0.005   # 0.5% minimum price change to count as spike
+# window_secs = 10        # Lookback window for spike detection
+# history_size = 50       # Maximum spike events to retain
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hybrid Order Mode
+# ─────────────────────────────────────────────────────────────────────────────
+# GTC maker orders (0% fee) for most trades, FOK taker only for tail-end urgency
+
+# [strategy.crypto_arb.order]
+# hybrid_mode = true      # Enable GTC maker + FOK taker strategy
+# limit_offset = 0.01     # 1¢ below best ask for GTC limit orders
+# max_age_secs = 30       # Cancel stale GTC orders after this duration
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Position Sizing (Kelly Criterion)
+# ─────────────────────────────────────────────────────────────────────────────
+# Scale position size with confidence and edge; clamp to [min_size, max_size]
+
+# [strategy.crypto_arb.sizing]
+# base_size = 10          # Base USDC position size
+# kelly_multiplier = 0.25 # 25% fractional Kelly (conservative)
+# min_size = 2            # Minimum position size
+# max_size = 25           # Maximum position size
+# use_kelly = true        # false = fixed base_size for all trades
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stop-Loss (Dual-Trigger + Trailing)
+# ─────────────────────────────────────────────────────────────────────────────
+# Dual-trigger: crypto reversal AND market drop required to exit
+
+# [strategy.crypto_arb.stop_loss]
+# reversal_pct = 0.005        # 0.5% crypto price reversal threshold
+# min_drop = 0.05             # $0.05 minimum market price drop
+# trailing_enabled = true     # Enable trailing stop-loss
+# trailing_distance = 0.03    # $0.03 from peak bid
+# time_decay = true           # Tighten stops near expiration
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-Market Correlation
+# ─────────────────────────────────────────────────────────────────────────────
+# Leader coin spikes (BTC) generate signals for follower coins (ETH, SOL)
+# Confidence discounted by 0.7x for follower signals
+
+# [strategy.crypto_arb.correlation]
+# enabled = false             # Disabled by default (experimental)
+# min_spike_pct = 0.01        # 1% leader spike threshold
+# pairs = [
+#     ["BTC", ["ETH", "SOL"]],
+#     ["ETH", ["SOL"]]
+# ]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Performance Tracking & Auto-Disable
+# ─────────────────────────────────────────────────────────────────────────────
+# Track win rate / P&L per mode; optionally auto-disable underperformers
+
+# [strategy.crypto_arb.performance]
+# min_trades = 20         # Minimum trades before auto-disable can trigger
+# min_win_rate = 0.40     # 40% win rate threshold
+# window_size = 50        # Rolling window for recent P&L tracking
+# auto_disable = false    # Auto-disable modes with low win rate

@@ -197,10 +197,6 @@ pub struct ArbitrageConfig {
     pub scan_interval_secs: u64,
     /// Whether to use on-chain Chainlink RPC for resolution reference price
     pub use_chainlink: bool,
-    /// Polygon RPC endpoints for on-chain Chainlink lookups (tried in order).
-    /// Only used when `use_chainlink` is true.
-    #[serde(default = "default_chainlink_rpc_urls")]
-    pub chainlink_rpc_urls: Vec<String>,
     /// Fee model configuration.
     #[serde(default)]
     pub fee: FeeConfig,
@@ -224,10 +220,6 @@ pub struct ArbitrageConfig {
     pub performance: PerformanceConfig,
 }
 
-fn default_chainlink_rpc_urls() -> Vec<String> {
-    vec!["https://polygon-rpc.com".to_string()]
-}
-
 impl Default for ArbitrageConfig {
     fn default() -> Self {
         Self {
@@ -237,7 +229,6 @@ impl Default for ArbitrageConfig {
             late_window_margin: Decimal::new(2, 2),     // 0.02
             scan_interval_secs: 30,
             use_chainlink: true,
-            chainlink_rpc_urls: default_chainlink_rpc_urls(),
             fee: FeeConfig::default(),
             spike: SpikeConfig::default(),
             order: OrderConfig::default(),
@@ -769,11 +760,14 @@ pub struct CryptoArbitrageStrategy {
 }
 
 impl CryptoArbitrageStrategy {
-    pub fn new(config: ArbitrageConfig) -> Self {
+    /// Create a new crypto arbitrage strategy.
+    ///
+    /// # Arguments
+    /// * `config` - Strategy configuration
+    /// * `rpc_urls` - Polygon RPC endpoints for on-chain Chainlink queries (from main config)
+    pub fn new(config: ArbitrageConfig, rpc_urls: Vec<String>) -> Self {
         let chainlink_client = if config.use_chainlink {
-            Some(Arc::new(ChainlinkHistoricalClient::new(
-                config.chainlink_rpc_urls.clone(),
-            )))
+            Some(Arc::new(ChainlinkHistoricalClient::new(rpc_urls)))
         } else {
             None
         };
@@ -3019,7 +3013,7 @@ mod tests {
             );
         }
 
-        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
         // Current price > reference => Up wins; ask = 0.95 >= 0.90
         let opps = strategy
             .evaluate_opportunity(&mwr, dec!(51000), &ctx)
@@ -3052,7 +3046,7 @@ mod tests {
             );
         }
 
-        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
         let opps = strategy
             .evaluate_opportunity(&mwr, dec!(50100), &ctx)
             .await
@@ -3085,7 +3079,7 @@ mod tests {
             );
         }
 
-        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
         // Large price move: 52000 vs 50000 = 4% distance
         // confidence = min(1.0, 0.04 * 66 * boost) will be > 0.50
         let opps = strategy
@@ -3122,7 +3116,7 @@ mod tests {
             );
         }
 
-        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
         // Tiny move: 50010 vs 50000 = 0.02% distance
         // confidence = 0.0002 * 50 = 0.01 < 0.50
         let opps = strategy
@@ -3137,7 +3131,7 @@ mod tests {
     #[test]
     fn stop_loss_triggers() {
         // Reversal > 0.5% AND price drop > 5¢ AND time > 60s
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         let mwr = make_mwr(dec!(50000), 300);
         strategy.active_markets.insert("market1".to_string(), mwr);
@@ -3173,7 +3167,7 @@ mod tests {
 
     #[test]
     fn stop_loss_does_not_trigger_final_60s() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         // Only 30 seconds left
         let mwr = make_mwr(dec!(50000), 30);
@@ -3206,7 +3200,7 @@ mod tests {
 
     #[test]
     fn stop_loss_does_not_trigger_small_drop() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         let mwr = make_mwr(dec!(50000), 300);
         strategy.active_markets.insert("market1".to_string(), mwr);
@@ -3242,7 +3236,7 @@ mod tests {
     #[test]
     fn trailing_stop_triggers_when_bid_drops_from_peak() {
         // peak=0.70, current_bid=0.67 → drop=0.03 >= trailing_distance=0.03
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         let mwr = make_mwr(dec!(50000), 300);
         strategy.active_markets.insert("market1".to_string(), mwr);
@@ -3278,7 +3272,7 @@ mod tests {
     #[test]
     fn trailing_stop_does_not_trigger_when_position_underwater() {
         // peak == entry (position never went up) → trailing should NOT trigger
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         let mwr = make_mwr(dec!(50000), 300);
         strategy.active_markets.insert("market1".to_string(), mwr);
@@ -3315,7 +3309,7 @@ mod tests {
         // 30s remaining out of 900s → decay_factor = 30/900 = 0.0333
         // effective_distance = 0.03 * 0.0333 ≈ 0.001
         // So even a tiny 0.002 drop from peak should trigger
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         let mwr = make_mwr(dec!(50000), 90); // 90 seconds remaining (past the 60s cutoff)
         strategy.active_markets.insert("market1".to_string(), mwr);
@@ -3353,7 +3347,7 @@ mod tests {
         // With trailing_enabled=false, only dual-trigger logic should work
         let mut config = ArbitrageConfig::default();
         config.stop_loss.trailing_enabled = false;
-        let mut strategy = CryptoArbitrageStrategy::new(config);
+        let mut strategy = CryptoArbitrageStrategy::new(config, vec![]);
 
         let mwr = make_mwr(dec!(50000), 300);
         strategy.active_markets.insert("market1".to_string(), mwr);
@@ -3413,7 +3407,7 @@ mod tests {
 
     #[tokio::test]
     async fn on_market_expired_removes_market() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
         let ctx = StrategyContext::new();
 
         let mwr = make_mwr(dec!(50000), 0);
@@ -3429,7 +3423,7 @@ mod tests {
 
     #[test]
     fn extract_coin_from_question() {
-        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
         assert_eq!(
             strategy.extract_coin("Will BTC go up in the next 15 minutes?"),
             Some("BTC".to_string())
@@ -3462,7 +3456,7 @@ mod tests {
 
     #[test]
     fn dashboard_view_returns_some() {
-        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
         let view = strategy.dashboard_view();
         assert!(view.is_some());
         assert_eq!(view.unwrap().view_name(), "crypto-arb");
@@ -3470,7 +3464,7 @@ mod tests {
 
     #[test]
     fn render_view_empty_state() {
-        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
         let html = strategy.render_view().unwrap();
         // Should contain all three section headers
         assert!(html.contains("Reference Prices"));
@@ -3483,7 +3477,7 @@ mod tests {
 
     #[test]
     fn render_view_with_active_markets_and_prices() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         // Add an active market
         let mwr = make_mwr(dec!(50000), 300);
@@ -3513,7 +3507,7 @@ mod tests {
 
     #[test]
     fn render_view_with_positions() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         // Add a position
         let pos = ArbitragePosition {
@@ -3550,7 +3544,7 @@ mod tests {
 
     #[test]
     fn maybe_emit_dashboard_update_first_call_emits() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
         let action = strategy.maybe_emit_dashboard_update();
         assert!(action.is_some(), "first call should emit");
         if let Some(Action::EmitSignal {
@@ -3565,7 +3559,7 @@ mod tests {
 
     #[test]
     fn maybe_emit_dashboard_update_throttles() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         // First call emits
         let action = strategy.maybe_emit_dashboard_update();
@@ -3578,7 +3572,7 @@ mod tests {
 
     #[test]
     fn render_view_current_quality_reference() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         let mut mwr = make_mwr(dec!(50000), 300);
         mwr.reference_quality = ReferenceQuality::Current;
@@ -3593,7 +3587,7 @@ mod tests {
 
     #[test]
     fn render_view_historical_quality_reference() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         let mut mwr = make_mwr(dec!(50000), 300);
         mwr.reference_quality = ReferenceQuality::Historical(10);
@@ -3608,7 +3602,7 @@ mod tests {
 
     #[test]
     fn render_view_onchain_quality_reference() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         let mut mwr = make_mwr(dec!(50000), 300);
         mwr.reference_quality = ReferenceQuality::OnChain(5);
@@ -3672,7 +3666,7 @@ mod tests {
     fn make_strategy_no_chainlink() -> CryptoArbitrageStrategy {
         let mut config = ArbitrageConfig::default();
         config.use_chainlink = false;
-        CryptoArbitrageStrategy::new(config)
+        CryptoArbitrageStrategy::new(config, vec![])
     }
 
     #[tokio::test]
@@ -3800,7 +3794,7 @@ mod tests {
 
     #[test]
     fn prune_boundary_snapshots_removes_old() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         let now_ts = Utc::now().timestamp();
         let old_ts = now_ts - (WINDOW_SECS * 5); // 5 windows ago
@@ -4022,7 +4016,7 @@ mod tests {
         config.order.hybrid_mode = false;
         config.fee.taker_fee_rate = dec!(0.60); // Extreme fee rate for testing
         config.late_window_margin = dec!(0.02);
-        let strategy = CryptoArbitrageStrategy::new(config);
+        let strategy = CryptoArbitrageStrategy::new(config, vec![]);
 
         // Large move for high confidence (52000 vs 50000 = 4%)
         let opps = strategy
@@ -4055,7 +4049,7 @@ mod tests {
             );
         }
 
-        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
         let opps = strategy
             .evaluate_opportunity(&mwr, dec!(51000), &ctx)
             .await
@@ -4095,7 +4089,7 @@ mod tests {
 
         let mut config = ArbitrageConfig::default();
         config.order.hybrid_mode = false; // Use taker orders to test fee filtering
-        let strategy = CryptoArbitrageStrategy::new(config);
+        let strategy = CryptoArbitrageStrategy::new(config, vec![]);
         let opps = strategy
             .evaluate_opportunity(&mwr, dec!(50100), &ctx)
             .await
@@ -4173,7 +4167,7 @@ mod tests {
 
     #[test]
     fn detect_spike_returns_some_for_1pct_move_in_10s() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
         // Default spike config: threshold_pct = 0.005, window_secs = 10
 
         let now = Utc::now();
@@ -4195,7 +4189,7 @@ mod tests {
 
     #[test]
     fn detect_spike_returns_none_for_small_move() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         let now = Utc::now();
         let mut history = VecDeque::new();
@@ -4212,14 +4206,14 @@ mod tests {
 
     #[test]
     fn detect_spike_returns_none_no_history() {
-        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
         let result = strategy.detect_spike("BTC", dec!(50000));
         assert!(result.is_none(), "no history should return None");
     }
 
     #[test]
     fn detect_spike_returns_none_no_baseline_before_window() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         let now = Utc::now();
         let mut history = VecDeque::new();
@@ -4234,7 +4228,7 @@ mod tests {
 
     #[test]
     fn detect_spike_negative_direction() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         let now = Utc::now();
         let mut history = VecDeque::new();
@@ -4349,7 +4343,7 @@ mod tests {
     fn spike_events_capped_at_history_size() {
         let mut config = ArbitrageConfig::default();
         config.spike.history_size = 3;
-        let mut strategy = CryptoArbitrageStrategy::new(config);
+        let mut strategy = CryptoArbitrageStrategy::new(config, vec![]);
 
         for i in 0..5 {
             strategy.spike_events.push_back(SpikeEvent {
@@ -4370,7 +4364,7 @@ mod tests {
 
     #[test]
     fn render_view_with_spike_events() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         strategy.spike_events.push_back(SpikeEvent {
             coin: "BTC".to_string(),
@@ -4390,7 +4384,7 @@ mod tests {
 
     #[test]
     fn render_view_empty_spike_events() {
-        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
         let html = strategy.render_view().unwrap();
         assert!(html.contains("Spike Events (0)"));
         assert!(html.contains("No spike events detected"));
@@ -4503,7 +4497,7 @@ mod tests {
     fn stale_order_cancelled_after_max_age() {
         let mut config = ArbitrageConfig::default();
         config.order.max_age_secs = 0; // Expire immediately
-        let mut strategy = CryptoArbitrageStrategy::new(config);
+        let mut strategy = CryptoArbitrageStrategy::new(config, vec![]);
 
         strategy.open_limit_orders.insert(
             "order-1".to_string(),
@@ -4531,7 +4525,7 @@ mod tests {
 
     #[test]
     fn gtc_order_fill_creates_position() {
-        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default(), vec![]);
 
         // Simulate a placed GTC limit order
         strategy.open_limit_orders.insert(
@@ -4634,7 +4628,7 @@ mod tests {
         let mut config = ArbitrageConfig::default();
         config.order.hybrid_mode = false;
         config.use_chainlink = false;
-        let mut strategy = CryptoArbitrageStrategy::new(config);
+        let mut strategy = CryptoArbitrageStrategy::new(config, vec![]);
         let ctx = StrategyContext::new();
 
         let mwr = make_mwr(dec!(50000), 200);
@@ -5283,7 +5277,7 @@ mod tests {
         config.performance.min_trades = 5;
         config.performance.min_win_rate = dec!(0.40);
 
-        let mut strategy = CryptoArbitrageStrategy::new(config);
+        let mut strategy = CryptoArbitrageStrategy::new(config, vec![]);
 
         // Record 5 trades: 1 win, 4 losses = 20% win rate < 40%
         let mode = ArbitrageMode::Confirmed;
@@ -5306,7 +5300,7 @@ mod tests {
         config.performance.min_trades = 20;
         config.performance.min_win_rate = dec!(0.40);
 
-        let mut strategy = CryptoArbitrageStrategy::new(config);
+        let mut strategy = CryptoArbitrageStrategy::new(config, vec![]);
 
         // Record only 3 trades: all losses (0% win rate)
         let mode = ArbitrageMode::TailEnd;
@@ -5327,7 +5321,7 @@ mod tests {
         config.performance.min_trades = 2;
         config.performance.min_win_rate = dec!(0.40);
 
-        let mut strategy = CryptoArbitrageStrategy::new(config);
+        let mut strategy = CryptoArbitrageStrategy::new(config, vec![]);
 
         // Record 5 losing trades
         let mode = ArbitrageMode::Confirmed;
@@ -5384,7 +5378,7 @@ mod tests {
     #[test]
     fn record_trade_pnl_creates_stats() {
         let strategy_config = ArbitrageConfig::default();
-        let mut strategy = CryptoArbitrageStrategy::new(strategy_config);
+        let mut strategy = CryptoArbitrageStrategy::new(strategy_config, vec![]);
 
         assert!(strategy.mode_stats.is_empty());
 

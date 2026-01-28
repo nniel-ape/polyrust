@@ -40,13 +40,34 @@ fn default_health_interval() -> u64 {
     30
 }
 
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, Deserialize)]
 pub struct PolymarketConfig {
     pub private_key: Option<String>,
     pub safe_address: Option<String>,
     pub builder_api_key: Option<String>,
     pub builder_api_secret: Option<String>,
     pub builder_api_passphrase: Option<String>,
+    /// Polygon RPC endpoints for on-chain queries (Chainlink oracles).
+    /// Tried in order with automatic failover.
+    #[serde(default = "default_rpc_urls")]
+    pub rpc_urls: Vec<String>,
+}
+
+fn default_rpc_urls() -> Vec<String> {
+    vec!["https://polygon-rpc.com".to_string()]
+}
+
+impl Default for PolymarketConfig {
+    fn default() -> Self {
+        Self {
+            private_key: None,
+            safe_address: None,
+            builder_api_key: None,
+            builder_api_secret: None,
+            builder_api_passphrase: None,
+            rpc_urls: default_rpc_urls(),
+        }
+    }
 }
 
 impl Serialize for PolymarketConfig {
@@ -55,7 +76,7 @@ impl Serialize for PolymarketConfig {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("PolymarketConfig", 5)?;
+        let mut s = serializer.serialize_struct("PolymarketConfig", 6)?;
         s.serialize_field(
             "private_key",
             &self.private_key.as_ref().map(|_| "[REDACTED]"),
@@ -73,6 +94,7 @@ impl Serialize for PolymarketConfig {
             "builder_api_passphrase",
             &self.builder_api_passphrase.as_ref().map(|_| "[REDACTED]"),
         )?;
+        s.serialize_field("rpc_urls", &self.rpc_urls)?;
         s.end()
     }
 }
@@ -97,6 +119,7 @@ impl std::fmt::Debug for PolymarketConfig {
                 "builder_api_passphrase",
                 &self.builder_api_passphrase.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("rpc_urls", &self.rpc_urls)
             .finish()
     }
 }
@@ -206,6 +229,14 @@ impl Config {
         }
         if let Ok(v) = std::env::var("POLY_PAPER_TRADING") {
             self.paper.enabled = v == "true" || v == "1";
+        }
+        // POLY_RPC_URLS — comma-separated list of RPC endpoints
+        if let Ok(urls) = std::env::var("POLY_RPC_URLS") {
+            self.polymarket.rpc_urls = urls
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
         self
     }

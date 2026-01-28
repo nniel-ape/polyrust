@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
     info!("polyrust starting");
 
     // Load configuration
-    let config = match Config::from_file("config/default.toml") {
+    let config = match Config::from_file("config.toml") {
         Ok(c) => c,
         Err(e) => {
             info!("no config file loaded ({e}), using defaults");
@@ -54,7 +54,10 @@ async fn main() -> anyhow::Result<()> {
     let (feed_cmd_tx, feed_cmd_rx) = feed_command_channel();
 
     // Build engine with crypto arbitrage strategy
-    let strategy = CryptoArbitrageStrategy::new(Default::default());
+    let strategy = CryptoArbitrageStrategy::new(
+        Default::default(),
+        config.polymarket.rpc_urls.clone(),
+    );
     let mut engine = Engine::builder()
         .config(config.clone())
         .strategy(strategy)
