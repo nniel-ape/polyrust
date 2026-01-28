@@ -48,19 +48,19 @@ T10 (Verify + docs)
 ## Implementation Steps
 
 ### Task 1: Restructure ArbitrageConfig into sub-configs
-- [ ] Create `FeeConfig` struct with `taker_fee_rate: Decimal` (default 0.0315)
-- [ ] Create `SpikeConfig` struct with `threshold_pct: Decimal` (0.005), `window_secs: u64` (10), `history_size: usize` (50)
-- [ ] Create `OrderConfig` struct with `hybrid_mode: bool` (true), `limit_offset: Decimal` (0.01), `max_age_secs: u64` (30)
-- [ ] Create `SizingConfig` struct with `base_size: Decimal` (10), `kelly_multiplier: Decimal` (0.25), `min_size: Decimal` (2), `max_size: Decimal` (25), `use_kelly: bool` (true)
-- [ ] Create `StopLossConfig` struct — migrate existing `stop_loss_reversal_pct` and `stop_loss_min_drop` into it, add `trailing_enabled: bool` (true), `trailing_distance: Decimal` (0.03), `time_decay: bool` (true)
-- [ ] Create `CorrelationConfig` struct with `enabled: bool` (false), `min_spike_pct: Decimal` (0.01), `pairs: Vec<(String, Vec<String>)>` (default BTC→[ETH,SOL], ETH→[SOL])
-- [ ] Create `PerformanceConfig` struct with `min_trades: u64` (20), `min_win_rate: Decimal` (0.40), `window_size: usize` (50), `auto_disable: bool` (false)
-- [ ] Add all sub-configs to `ArbitrageConfig` with `#[serde(default)]`
-- [ ] Update `ArbitrageConfig::default()` to use sub-config defaults
-- [ ] Update all references to `self.config.stop_loss_reversal_pct` → `self.config.stop_loss.reversal_pct` etc.
-- [ ] Write tests for config deserialization with missing sub-configs (backward compat)
-- [ ] Write tests for config with explicit sub-config values
-- [ ] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
+- [x] Create `FeeConfig` struct with `taker_fee_rate: Decimal` (default 0.0315)
+- [x] Create `SpikeConfig` struct with `threshold_pct: Decimal` (0.005), `window_secs: u64` (10), `history_size: usize` (50)
+- [x] Create `OrderConfig` struct with `hybrid_mode: bool` (true), `limit_offset: Decimal` (0.01), `max_age_secs: u64` (30)
+- [x] Create `SizingConfig` struct with `base_size: Decimal` (10), `kelly_multiplier: Decimal` (0.25), `min_size: Decimal` (2), `max_size: Decimal` (25), `use_kelly: bool` (true)
+- [x] Create `StopLossConfig` struct — migrate existing `stop_loss_reversal_pct` and `stop_loss_min_drop` into it, add `trailing_enabled: bool` (true), `trailing_distance: Decimal` (0.03), `time_decay: bool` (true)
+- [x] Create `CorrelationConfig` struct with `enabled: bool` (false), `min_spike_pct: Decimal` (0.01), `pairs: Vec<(String, Vec<String>)>` (default BTC→[ETH,SOL], ETH→[SOL])
+- [x] Create `PerformanceConfig` struct with `min_trades: u64` (20), `min_win_rate: Decimal` (0.40), `window_size: usize` (50), `auto_disable: bool` (false)
+- [x] Add all sub-configs to `ArbitrageConfig` with `#[serde(default)]`
+- [x] Update `ArbitrageConfig::default()` to use sub-config defaults
+- [x] Update all references to `self.config.stop_loss_reversal_pct` → `self.config.stop_loss.reversal_pct` etc.
+- [x] Write tests for config deserialization with missing sub-configs (backward compat)
+- [x] Write tests for config with explicit sub-config values
+- [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 2: Fee-aware profit margins
 - [ ] Add `taker_fee(price: Decimal, rate: Decimal) -> Decimal` helper: `2 * p * (1-p) * rate`
