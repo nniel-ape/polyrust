@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 1: Builder - Compile Rust application with musl target
+# Stage 1: Builder - Compile Rust application with optimized layer caching
 # ─────────────────────────────────────────────────────────────────────────────
 FROM rust:1.92.0-alpine AS builder
 
@@ -12,16 +12,39 @@ RUN apk add --no-cache \
 
 WORKDIR /build
 
-# Copy workspace manifests first (leverage Docker layer caching)
+# ── Layer 1: Copy workspace manifests ────────────────────────────────────────
 COPY Cargo.toml Cargo.lock ./
 
-# Copy all crate sources
-COPY crates/ ./crates/
+# ── Layer 2: Copy all crate manifests (cache until deps change) ──────────────
+COPY crates/polyrust-core/Cargo.toml ./crates/polyrust-core/
+COPY crates/polyrust-market/Cargo.toml ./crates/polyrust-market/
+COPY crates/polyrust-execution/Cargo.toml ./crates/polyrust-execution/
+COPY crates/polyrust-store/Cargo.toml ./crates/polyrust-store/
+COPY crates/polyrust-strategies/Cargo.toml ./crates/polyrust-strategies/
+COPY crates/polyrust-dashboard/Cargo.toml ./crates/polyrust-dashboard/
+
+# ── Layer 3: Create dummy sources to trigger dependency compilation ──────────
+RUN mkdir -p src && echo "fn main() {}" > src/main.rs && \
+    mkdir -p crates/polyrust-core/src && echo "pub fn dummy() {}" > crates/polyrust-core/src/lib.rs && \
+    mkdir -p crates/polyrust-market/src && echo "pub fn dummy() {}" > crates/polyrust-market/src/lib.rs && \
+    mkdir -p crates/polyrust-execution/src && echo "pub fn dummy() {}" > crates/polyrust-execution/src/lib.rs && \
+    mkdir -p crates/polyrust-store/src && echo "pub fn dummy() {}" > crates/polyrust-store/src/lib.rs && \
+    mkdir -p crates/polyrust-strategies/src && echo "pub fn dummy() {}" > crates/polyrust-strategies/src/lib.rs && \
+    mkdir -p crates/polyrust-dashboard/src && echo "pub fn dummy() {}" > crates/polyrust-dashboard/src/lib.rs
+
+# ── Layer 4: Build dependencies ONLY (expensive, cached until deps change) ───
+ENV RUSTFLAGS="-C target-feature=-crt-static"
+RUN cargo build --release --locked
+
+# ── Layer 5: Remove dummy sources (keep compiled deps in target/) ────────────
+RUN rm -rf src crates/*/src
+
+# ── Layer 6: Copy real source code ───────────────────────────────────────────
 COPY src/ ./src/
+COPY crates/ ./crates/
 COPY examples/ ./examples/
 
-# Build release binary with musl target for static linking
-ENV RUSTFLAGS="-C target-feature=-crt-static"
+# ── Layer 7: Build application (fast, only your code recompiles) ─────────────
 RUN cargo build --release --locked --bin polyrust
 
 # Verify binary exists (fail fast if build config is wrong)

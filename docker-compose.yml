@@ -3,7 +3,7 @@ services:
     build: .
     container_name: polyrust-bot
     ports:
-      - "3000:3000"  # Dashboard HTTP
+      - "3000:3000" # Dashboard HTTP
     volumes:
       # Config file (read-only) - customize config.toml before mounting
       - ./config.toml:/app/config.toml:ro
@@ -15,7 +15,7 @@ services:
 
       # - POLY_PAPER_TRADING=true
       # - POLY_DASHBOARD_PORT=3000
-      # - POLY_DB_PATH=/app/data/polyrust.db
+      - POLY_DB_PATH=/app/data/polyrust.db
 
       # Wallet credentials (REQUIRED for live trading)
       # Recommended: use docker-compose.override.yml or .env file for secrets
