@@ -482,6 +482,19 @@ pub enum ArbitrageMode {
     },
 }
 
+impl ArbitrageMode {
+    /// Get the canonical mode variant for performance tracking.
+    /// Strips the leader field from CrossCorrelated to unify stats across all leaders.
+    fn canonical(&self) -> Self {
+        match self {
+            ArbitrageMode::CrossCorrelated { .. } => ArbitrageMode::CrossCorrelated {
+                leader: String::new(),
+            },
+            other => other.clone(),
+        }
+    }
+}
+
 /// A detected arbitrage opportunity ready for execution.
 ///
 /// Contains all information needed to place an order: market, outcome, price,
@@ -1296,6 +1309,14 @@ impl CryptoArbitrageStrategy {
             return Ok(actions);
         }
 
+        // Check if CrossCorrelated mode is auto-disabled for this leader
+        let cross_mode = ArbitrageMode::CrossCorrelated {
+            leader: leader_coin.to_string(),
+        };
+        if self.is_mode_disabled(&cross_mode) {
+            return Ok(actions);
+        }
+
         let md = ctx.market_data.read().await;
 
         for follower_coin in &followers {
@@ -1959,7 +1980,8 @@ impl CryptoArbitrageStrategy {
         if !self.config.performance.auto_disable {
             return false;
         }
-        if let Some(stats) = self.mode_stats.get(mode) {
+        let canonical_mode = mode.canonical();
+        if let Some(stats) = self.mode_stats.get(&canonical_mode) {
             stats.total_trades() >= self.config.performance.min_trades
                 && stats.win_rate() < self.config.performance.min_win_rate
         } else {
@@ -1970,8 +1992,9 @@ impl CryptoArbitrageStrategy {
     /// Record a trade P&L outcome for the given mode.
     fn record_trade_pnl(&mut self, mode: &ArbitrageMode, pnl: Decimal) {
         let window_size = self.config.performance.window_size;
+        let canonical_mode = mode.canonical();
         self.mode_stats
-            .entry(mode.clone())
+            .entry(canonical_mode)
             .or_insert_with(|| ModeStats::new(window_size))
             .record(pnl);
     }
@@ -2414,7 +2437,7 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
                     let current = self.cached_asks.get(&pos.token_id).copied();
                     let (current_str, pnl_str, pnl_class) = match current {
                         Some(cp) => {
-                            let pnl = (cp - pos.entry_price) * pos.size;
+                            let pnl = (cp - pos.entry_price) * pos.size - (pos.estimated_fee * pos.size);
                             let cls = if pnl >= Decimal::ZERO {
                                 "pnl-positive"
                             } else {
