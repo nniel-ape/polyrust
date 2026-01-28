@@ -4,5 +4,9 @@ target/
 .env
 config.toml
 
+# Docker volumes and overrides
+data/
+docker-compose.override.yml
+
 # ralphex progress logs
 progress*.txt
