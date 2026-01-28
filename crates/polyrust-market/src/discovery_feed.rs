@@ -155,7 +155,11 @@ fn convert_market(market: &gamma::types::response::Market) -> Option<MarketInfo>
         return None;
     }
 
-    let start_date = market.start_date.or_else(|| parse_slug_timestamp(slug));
+    // Prefer event_start_time (explicit settlement reference) over start_date, then slug parsing
+    let start_date = market
+        .event_start_time
+        .or(market.start_date)
+        .or_else(|| parse_slug_timestamp(slug));
 
     Some(MarketInfo {
         id: condition_id.to_string(),
@@ -376,5 +380,82 @@ mod tests {
     #[test]
     fn test_parse_slug_timestamp_empty() {
         assert!(parse_slug_timestamp("").is_none());
+    }
+
+    #[test]
+    fn test_convert_market_prefers_event_start_time() {
+        use chrono::TimeZone;
+        use polymarket_client_sdk::gamma::types::response::Market;
+
+        let event_start = Utc.with_ymd_and_hms(2024, 1, 23, 14, 30, 0).unwrap();
+        let start_date = Utc.with_ymd_and_hms(2024, 1, 23, 14, 0, 0).unwrap();
+
+        let market = Market::builder()
+            .id("test-id".to_string())
+            .condition_id("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".parse().unwrap())
+            .question("Will BTC go up?".to_string())
+            .slug("btc-updown-15m-1706000000".to_string())
+            .end_date(Utc.with_ymd_and_hms(2024, 1, 23, 15, 0, 0).unwrap())
+            .clob_token_ids(vec!["123".parse().unwrap(), "456".parse().unwrap()])
+            .event_start_time(event_start)
+            .start_date(start_date)
+            .accepting_orders(true)
+            .neg_risk(false)
+            .build();
+
+        let info = convert_market(&market).expect("convert_market should succeed");
+
+        // Should prefer event_start_time over start_date
+        assert_eq!(info.start_date, Some(event_start));
+        assert_ne!(info.start_date, Some(start_date));
+    }
+
+    #[test]
+    fn test_convert_market_falls_back_to_start_date() {
+        use chrono::TimeZone;
+        use polymarket_client_sdk::gamma::types::response::Market;
+
+        let start_date = Utc.with_ymd_and_hms(2024, 1, 23, 14, 0, 0).unwrap();
+
+        let market = Market::builder()
+            .id("test-id".to_string())
+            .condition_id("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".parse().unwrap())
+            .question("Will BTC go up?".to_string())
+            .slug("btc-updown-15m-1706000000".to_string())
+            .end_date(Utc.with_ymd_and_hms(2024, 1, 23, 15, 0, 0).unwrap())
+            .clob_token_ids(vec!["123".parse().unwrap(), "456".parse().unwrap()])
+            // No event_start_time set
+            .start_date(start_date)
+            .accepting_orders(true)
+            .neg_risk(false)
+            .build();
+
+        let info = convert_market(&market).expect("convert_market should succeed");
+
+        // Should fall back to start_date when event_start_time is not set
+        assert_eq!(info.start_date, Some(start_date));
+    }
+
+    #[test]
+    fn test_convert_market_falls_back_to_slug_timestamp() {
+        use chrono::TimeZone;
+        use polymarket_client_sdk::gamma::types::response::Market;
+
+        let market = Market::builder()
+            .id("test-id".to_string())
+            .condition_id("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".parse().unwrap())
+            .question("Will BTC go up?".to_string())
+            .slug("btc-updown-15m-1706000000".to_string())
+            .end_date(Utc.with_ymd_and_hms(2024, 1, 23, 15, 0, 0).unwrap())
+            .clob_token_ids(vec!["123".parse().unwrap(), "456".parse().unwrap()])
+            // No event_start_time or start_date set
+            .accepting_orders(true)
+            .neg_risk(false)
+            .build();
+
+        let info = convert_market(&market).expect("convert_market should succeed");
+
+        // Should fall back to parsing slug timestamp (1706000000)
+        assert_eq!(info.start_date.map(|d| d.timestamp()), Some(1706000000));
     }
 }
