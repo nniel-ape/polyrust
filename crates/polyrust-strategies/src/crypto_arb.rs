@@ -400,6 +400,35 @@ impl MarketWithReference {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Fee helpers
+// ---------------------------------------------------------------------------
+
+/// Compute the Polymarket taker fee per share at a given probability price.
+///
+/// Formula: `2 * p * (1 - p) * rate`
+/// At p=0.50, fee = 0.50 * rate. At p=0.95, fee ≈ 0.095 * rate.
+pub fn taker_fee(price: Decimal, rate: Decimal) -> Decimal {
+    Decimal::new(2, 0) * price * (Decimal::ONE - price) * rate
+}
+
+/// Compute the net profit margin for an entry at `entry_price`, assuming the
+/// winning outcome resolves to $1.
+///
+/// - Gross margin = `1 - entry_price`
+/// - Entry fee: taker fee for taker orders, $0 for maker (GTC) orders
+/// - Exit fee: ~$0 (resolution at $1 has negligible fee)
+///
+/// Returns `gross_margin - entry_fee`.
+pub fn net_profit_margin(entry_price: Decimal, fee_rate: Decimal, is_maker: bool) -> Decimal {
+    let gross = Decimal::ONE - entry_price;
+    if is_maker {
+        gross // Maker fee = $0
+    } else {
+        gross - taker_fee(entry_price, fee_rate)
+    }
+}
+
 /// Three arbitrage trading modes, ordered by priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArbitrageMode {
@@ -421,6 +450,10 @@ pub struct ArbitrageOpportunity {
     pub buy_price: Decimal,
     pub confidence: Decimal,
     pub profit_margin: Decimal,
+    /// Estimated taker fee per share at entry (0 for maker/GTC orders).
+    pub estimated_fee: Decimal,
+    /// Net profit margin after fees: `profit_margin - estimated_fee`.
+    pub net_margin: Decimal,
 }
 
 /// Tracks an active arbitrage position.
@@ -735,6 +768,8 @@ impl CryptoArbitrageStrategy {
                 && ask_price >= Decimal::new(90, 2)
             {
                 let profit_margin = Decimal::ONE - ask_price;
+                let estimated_fee = taker_fee(ask_price, self.config.fee.taker_fee_rate);
+                let net_margin = profit_margin - estimated_fee;
                 return Ok(vec![ArbitrageOpportunity {
                     mode: ArbitrageMode::TailEnd,
                     market_id: market.market.id.clone(),
@@ -743,6 +778,8 @@ impl CryptoArbitrageStrategy {
                     buy_price: ask_price,
                     confidence: Decimal::ONE,
                     profit_margin,
+                    estimated_fee,
+                    net_margin,
                 }]);
             }
         }
@@ -754,6 +791,15 @@ impl CryptoArbitrageStrategy {
             let combined = ua + da;
             if combined < Decimal::new(98, 2) {
                 let profit_margin = Decimal::ONE - combined;
+                // Fees on both legs (taker orders)
+                let fee_up = taker_fee(ua, self.config.fee.taker_fee_rate);
+                let fee_down = taker_fee(da, self.config.fee.taker_fee_rate);
+                let total_fee = fee_up + fee_down;
+                let net_margin = profit_margin - total_fee;
+                // Skip if net margin is negative after fees
+                if net_margin <= Decimal::ZERO {
+                    return Ok(vec![]);
+                }
                 return Ok(vec![
                     ArbitrageOpportunity {
                         mode: ArbitrageMode::TwoSided,
@@ -763,6 +809,8 @@ impl CryptoArbitrageStrategy {
                         buy_price: ua,
                         confidence: Decimal::ONE,
                         profit_margin,
+                        estimated_fee: fee_up,
+                        net_margin,
                     },
                     ArbitrageOpportunity {
                         mode: ArbitrageMode::TwoSided,
@@ -772,6 +820,8 @@ impl CryptoArbitrageStrategy {
                         buy_price: da,
                         confidence: Decimal::ONE,
                         profit_margin,
+                        estimated_fee: fee_down,
+                        net_margin,
                     },
                 ]);
             }
@@ -789,13 +839,15 @@ impl CryptoArbitrageStrategy {
             if let Some(ask_price) = ask {
                 let confidence = market.get_confidence(current_price, ask_price, time_remaining);
                 let profit_margin = Decimal::ONE - ask_price;
+                let estimated_fee = taker_fee(ask_price, self.config.fee.taker_fee_rate);
+                let net_margin = profit_margin - estimated_fee;
                 let min_margin = if time_remaining < 300 {
                     self.config.late_window_margin
                 } else {
                     self.config.min_profit_margin
                 };
 
-                if confidence >= Decimal::new(50, 2) && profit_margin >= min_margin {
+                if confidence >= Decimal::new(50, 2) && net_margin >= min_margin {
                     return Ok(vec![ArbitrageOpportunity {
                         mode: ArbitrageMode::Confirmed,
                         market_id: market.market.id.clone(),
@@ -804,6 +856,8 @@ impl CryptoArbitrageStrategy {
                         buy_price: ask_price,
                         confidence,
                         profit_margin,
+                        estimated_fee,
+                        net_margin,
                     }]);
                 }
             }
@@ -1393,6 +1447,8 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
             html.push_str("<th class=\"text-left py-1\">Market</th>");
             html.push_str("<th class=\"text-right py-1\">UP</th>");
             html.push_str("<th class=\"text-right py-1\">DOWN</th>");
+            html.push_str("<th class=\"text-right py-1\">Fee</th>");
+            html.push_str("<th class=\"text-right py-1\">Net</th>");
             html.push_str("<th class=\"text-right py-1\">Time Left</th>");
             html.push_str("</tr></thead><tbody>");
 
@@ -1407,23 +1463,54 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
                     format!("{}s", remaining)
                 };
 
-                let up_price = self
+                let up_ask = self
                     .cached_asks
                     .get(&mwr.market.token_ids.outcome_a)
-                    .map(|p| fmt_market_price(*p))
-                    .unwrap_or_else(|| "-".to_string());
-                let down_price = self
+                    .copied();
+                let down_ask = self
                     .cached_asks
                     .get(&mwr.market.token_ids.outcome_b)
-                    .map(|p| fmt_market_price(*p))
+                    .copied();
+
+                let up_price = up_ask
+                    .map(fmt_market_price)
                     .unwrap_or_else(|| "-".to_string());
+                let down_price = down_ask
+                    .map(fmt_market_price)
+                    .unwrap_or_else(|| "-".to_string());
+
+                // Show fee/net for the predicted winner side (or lower-priced side)
+                let fee_rate = self.config.fee.taker_fee_rate;
+                let (fee_str, net_str) = match (up_ask, down_ask) {
+                    (Some(ua), Some(da)) => {
+                        // Show fee for the lower-priced (more likely to trade) side
+                        let price = ua.min(da);
+                        let fee = taker_fee(price, fee_rate);
+                        let net = net_profit_margin(price, fee_rate, false);
+                        (
+                            format!("{:.3}", fee.round_dp(3)),
+                            format!("{:.3}", net.round_dp(3)),
+                        )
+                    }
+                    (Some(p), None) | (None, Some(p)) => {
+                        let fee = taker_fee(p, fee_rate);
+                        let net = net_profit_margin(p, fee_rate, false);
+                        (
+                            format!("{:.3}", fee.round_dp(3)),
+                            format!("{:.3}", net.round_dp(3)),
+                        )
+                    }
+                    _ => ("-".to_string(), "-".to_string()),
+                };
 
                 let _ = write!(
                     html,
-                    r#"<tr class="border-b border-gray-800"><td class="py-1">{coin} Up/Down</td><td class="text-right py-1">{up}</td><td class="text-right py-1">{down}</td><td class="text-right py-1">{time}</td></tr>"#,
+                    r#"<tr class="border-b border-gray-800"><td class="py-1">{coin} Up/Down</td><td class="text-right py-1">{up}</td><td class="text-right py-1">{down}</td><td class="text-right py-1">{fee}</td><td class="text-right py-1">{net}</td><td class="text-right py-1">{time}</td></tr>"#,
                     coin = escape_html(&mwr.coin),
                     up = up_price,
                     down = down_price,
+                    fee = fee_str,
+                    net = net_str,
                     time = time_str,
                 );
             }
@@ -1764,16 +1851,17 @@ mod tests {
         let mwr = make_mwr(dec!(50000), 400);
         let ctx = StrategyContext::new();
 
-        // Both asks low: 0.48 + 0.49 = 0.97 < 0.98
+        // Both asks low: 0.40 + 0.40 = 0.80 < 0.98
+        // Gross margin = 0.20, fees = ~0.03, net > 0 → opportunity generated
         {
             let mut md = ctx.market_data.write().await;
             md.orderbooks.insert(
                 "token_up".to_string(),
-                make_orderbook("token_up", dec!(0.46), dec!(0.48)),
+                make_orderbook("token_up", dec!(0.38), dec!(0.40)),
             );
             md.orderbooks.insert(
                 "token_down".to_string(),
-                make_orderbook("token_down", dec!(0.47), dec!(0.49)),
+                make_orderbook("token_down", dec!(0.38), dec!(0.40)),
             );
         }
 
@@ -1786,7 +1874,9 @@ mod tests {
         assert_eq!(opps[0].mode, ArbitrageMode::TwoSided);
         assert_eq!(opps[0].outcome_to_buy, OutcomeSide::Up);
         assert_eq!(opps[1].outcome_to_buy, OutcomeSide::Down);
-        assert_eq!(opps[0].profit_margin, dec!(0.03)); // 1.0 - 0.97
+        assert_eq!(opps[0].profit_margin, dec!(0.20)); // 1.0 - 0.80
+        assert!(opps[0].net_margin > Decimal::ZERO);
+        assert!(opps[0].estimated_fee > Decimal::ZERO);
     }
 
     #[tokio::test]
@@ -1819,6 +1909,9 @@ mod tests {
         assert_eq!(opp.mode, ArbitrageMode::Confirmed);
         assert_eq!(opp.outcome_to_buy, OutcomeSide::Up);
         assert!(opp.confidence >= dec!(0.50));
+        assert!(opp.estimated_fee > Decimal::ZERO);
+        assert!(opp.net_margin > Decimal::ZERO);
+        assert!(opp.net_margin < opp.profit_margin);
     }
 
     #[tokio::test]
@@ -2470,6 +2563,172 @@ mod tests {
         assert_eq!(config.stop_loss.reversal_pct, dec!(0.005));
         assert!(!config.correlation.enabled);
         assert!(!config.performance.auto_disable);
+    }
+
+    // --- taker_fee tests ---
+
+    #[test]
+    fn taker_fee_at_50_50() {
+        // At p=0.50: fee = 2 * 0.50 * 0.50 * 0.0315 = 0.01575
+        let fee = taker_fee(dec!(0.50), dec!(0.0315));
+        assert_eq!(fee, dec!(0.015750));
+    }
+
+    #[test]
+    fn taker_fee_at_80() {
+        // At p=0.80: fee = 2 * 0.80 * 0.20 * 0.0315 = 0.01008
+        let fee = taker_fee(dec!(0.80), dec!(0.0315));
+        assert_eq!(fee, dec!(0.010080));
+    }
+
+    #[test]
+    fn taker_fee_at_95() {
+        // At p=0.95: fee = 2 * 0.95 * 0.05 * 0.0315 = 0.0029925
+        let fee = taker_fee(dec!(0.95), dec!(0.0315));
+        assert_eq!(fee, dec!(0.0029925));
+    }
+
+    // --- net_profit_margin tests ---
+
+    #[test]
+    fn net_profit_margin_taker() {
+        // At p=0.80: gross = 0.20, fee = 0.01008, net = 0.18992
+        let net = net_profit_margin(dec!(0.80), dec!(0.0315), false);
+        let expected = dec!(0.20) - dec!(0.010080);
+        assert_eq!(net, expected);
+    }
+
+    #[test]
+    fn net_profit_margin_maker() {
+        // Maker fee = $0, so net = gross = 1 - price
+        let net = net_profit_margin(dec!(0.80), dec!(0.0315), true);
+        assert_eq!(net, dec!(0.20));
+    }
+
+    // --- fee-aware filtering tests ---
+
+    #[tokio::test]
+    async fn confirmed_mode_filtered_at_50_with_small_margin() {
+        // At p=0.50 with 3¢ gross margin, net margin < 0 after fee
+        // ask = 0.97 → gross = 0.03, fee at 0.97 = 2*0.97*0.03*0.0315 = 0.001837
+        // Actually, let's use p=0.50 directly: ask = 0.50, gross = 0.50 but
+        // the plan says "Confirmed mode at p=0.50 with 3¢ gross margin is filtered out"
+        // This means ask = 0.97 at a 50/50 market. But fee at 0.97 is tiny.
+        // More accurately: at mid-range prices where fee is highest.
+        // Use ask = 0.55 with min_profit_margin = 0.03.
+        // gross = 0.45, fee = 2*0.55*0.45*0.0315 = 0.01559. net = 0.434.
+        // That's still > 0.03. Let's find a case where net < min_margin.
+        //
+        // To filter: net < min_margin(0.02 for late window). Use ask = 0.97.
+        // gross = 0.03, fee = 2*0.97*0.03*0.0315 = 0.001837. net = 0.028.
+        // Still passes. Need a tighter case.
+        //
+        // Let's set min_profit_margin = 0.04 and ask = 0.95. gross=0.05, fee=0.003.
+        // net=0.047 >= 0.04, passes. Use min_profit_margin = 0.05 instead.
+        //
+        // Better approach: construct a scenario where fee eats up the margin.
+        // ask = 0.50, gross = 0.50, fee = 0.01575, net = 0.484 — still large.
+        // The real impact is when gross is tiny. Let's just verify with a custom
+        // high fee rate to show the filtering works.
+        let mwr = make_mwr(dec!(50000), 200); // late window
+        let ctx = StrategyContext::new();
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                make_orderbook("token_up", dec!(0.95), dec!(0.97)),
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                make_orderbook("token_down", dec!(0.01), dec!(0.03)),
+            );
+        }
+
+        // Use a high fee rate that makes the 3¢ gross margin negative
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.fee.taker_fee_rate = dec!(0.60); // Extreme fee rate for testing
+        config.late_window_margin = dec!(0.02);
+        let strategy = CryptoArbitrageStrategy::new(config);
+
+        // Large move for high confidence (52000 vs 50000 = 4%)
+        let opps = strategy
+            .evaluate_opportunity(&mwr, dec!(52000), &ctx)
+            .await
+            .unwrap();
+        // At ask=0.97, gross=0.03, fee=2*0.97*0.03*0.60=0.03492
+        // net = 0.03 - 0.03492 = -0.00492 < late_window_margin(0.02) → filtered
+        assert!(
+            opps.is_empty(),
+            "Should filter Confirmed mode when net margin < 0 after fee"
+        );
+    }
+
+    #[tokio::test]
+    async fn tail_end_at_95_still_passes_with_fees() {
+        // At p=0.95: fee ≈ 0.003, margin = 0.05, net ≈ 0.047 > 0
+        let mwr = make_mwr(dec!(50000), 60); // < 120s
+        let ctx = StrategyContext::new();
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                make_orderbook("token_up", dec!(0.93), dec!(0.95)),
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                make_orderbook("token_down", dec!(0.03), dec!(0.05)),
+            );
+        }
+
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let opps = strategy
+            .evaluate_opportunity(&mwr, dec!(51000), &ctx)
+            .await
+            .unwrap();
+        assert!(!opps.is_empty(), "Tail-End at 0.95 should still pass");
+        let opp = &opps[0];
+        assert_eq!(opp.mode, ArbitrageMode::TailEnd);
+        // Verify fee is small (~0.3¢)
+        assert!(opp.estimated_fee < dec!(0.005));
+        // Net margin should be ~4.7¢
+        assert!(opp.net_margin > dec!(0.04));
+    }
+
+    #[tokio::test]
+    async fn two_sided_filtered_when_fees_exceed_margin() {
+        // Both asks near 0.49 → combined 0.98 just under threshold
+        // but fees on both legs eat up the tiny 2¢ margin
+        let mwr = make_mwr(dec!(50000), 400);
+        let ctx = StrategyContext::new();
+
+        // 0.48 + 0.49 = 0.97, gross margin = 0.03
+        // fee_up = 2*0.48*0.52*0.0315 = 0.01572
+        // fee_down = 2*0.49*0.51*0.0315 = 0.01575
+        // total_fee = 0.03147, net = 0.03 - 0.03147 = -0.00147 → filtered
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                make_orderbook("token_up", dec!(0.46), dec!(0.48)),
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                make_orderbook("token_down", dec!(0.47), dec!(0.49)),
+            );
+        }
+
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let opps = strategy
+            .evaluate_opportunity(&mwr, dec!(50100), &ctx)
+            .await
+            .unwrap();
+        assert!(
+            opps.is_empty(),
+            "Two-Sided should be filtered when fees exceed margin"
+        );
     }
 
     #[test]

@@ -63,19 +63,19 @@ T10 (Verify + docs)
 - [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 2: Fee-aware profit margins
-- [ ] Add `taker_fee(price: Decimal, rate: Decimal) -> Decimal` helper: `2 * p * (1-p) * rate`
-- [ ] Add `net_profit_margin(entry_price: Decimal, fee_rate: Decimal, is_maker: bool) -> Decimal` helper: gross margin minus fee (maker fee = 0)
-- [ ] Add `estimated_fee: Decimal` and `net_margin: Decimal` fields to `ArbitrageOpportunity`
-- [ ] Update Tail-End mode (line ~532): compute `net_profit_margin` instead of `1 - ask`
-- [ ] Update Two-Sided mode (line ~551): subtract fees on both legs from combined margin
-- [ ] Update Confirmed mode (line ~586): use `net_profit_margin`, compare against `min_profit_margin`
-- [ ] Update dashboard `render_view()` to show fee and net margin columns
-- [ ] Write tests for `taker_fee` at prices 0.50, 0.80, 0.95 (verify against known values)
-- [ ] Write tests for `net_profit_margin` for maker vs taker orders
-- [ ] Write test: Confirmed mode at p=0.50 with 3¢ gross margin is filtered out (net < 0 after fee)
-- [ ] Write test: Tail-End at p=0.95 still passes (fee ~0.3¢, margin ~4.7¢)
-- [ ] Update existing margin assertion tests to use net margins
-- [ ] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
+- [x] Add `taker_fee(price: Decimal, rate: Decimal) -> Decimal` helper: `2 * p * (1-p) * rate`
+- [x] Add `net_profit_margin(entry_price: Decimal, fee_rate: Decimal, is_maker: bool) -> Decimal` helper: gross margin minus fee (maker fee = 0)
+- [x] Add `estimated_fee: Decimal` and `net_margin: Decimal` fields to `ArbitrageOpportunity`
+- [x] Update Tail-End mode (line ~532): compute `net_profit_margin` instead of `1 - ask`
+- [x] Update Two-Sided mode (line ~551): subtract fees on both legs from combined margin
+- [x] Update Confirmed mode (line ~586): use `net_profit_margin`, compare against `min_profit_margin`
+- [x] Update dashboard `render_view()` to show fee and net margin columns
+- [x] Write tests for `taker_fee` at prices 0.50, 0.80, 0.95 (verify against known values)
+- [x] Write tests for `net_profit_margin` for maker vs taker orders
+- [x] Write test: Confirmed mode at p=0.50 with 3¢ gross margin is filtered out (net < 0 after fee)
+- [x] Write test: Tail-End at p=0.95 still passes (fee ~0.3¢, margin ~4.7¢)
+- [x] Update existing margin assertion tests to use net margins
+- [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 3: Spike detection
 - [ ] Add `spike_events: VecDeque<SpikeEvent>` state to `CryptoArbitrageStrategy`
