@@ -62,6 +62,7 @@ pub enum OrderEvent {
         side: OrderSide,
         price: Decimal,
         size: Decimal,
+        strategy_name: String,
     },
     PartiallyFilled {
         order_id: OrderId,

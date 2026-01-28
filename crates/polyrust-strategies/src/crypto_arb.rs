@@ -2764,6 +2764,7 @@ impl Strategy for CryptoArbitrageStrategy {
                 token_id,
                 price,
                 size,
+                strategy_name: _,
                 ..
             }) => self.on_order_filled(order_id, token_id, *price, *size),
 

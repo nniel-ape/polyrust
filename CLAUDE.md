@@ -20,6 +20,13 @@ cargo test --workspace -- --ignored  # Run live API tests (requires credentials)
 cargo run                        # Run bot (paper mode by default)
 cargo run --example simple_strategy  # Run minimal example
 cargo build --release            # Optimized single binary → target/release/polyrust
+
+# Docker deployment
+docker-compose up -d             # Build and start bot in background
+docker-compose logs -f polyrust  # View real-time logs
+docker-compose down              # Stop and remove containers
+docker-compose restart           # Restart after config changes
+docker-compose build --no-cache  # Rebuild from scratch
 ```
 
 Never run `go build`. Never commit binary artifacts from `target/`.
@@ -53,6 +60,9 @@ src/main.rs → wires all crates into a single binary
 3. Strategies return `Vec<Action>` (PlaceOrder, CancelOrder, EmitSignal, etc.)
 4. Engine executes actions via the execution backend
 5. Action results become new events, flowing back through the bus
+6. Trade persistence handler subscribes to `OrderEvent::Filled` events
+7. For each fill, calculates realized P&L (for closing trades) and persists to database
+8. Dashboard queries persisted trades for historical analysis
 
 ### Shared State
 
@@ -81,10 +91,11 @@ Real-time updates use SSE: strategies emit `"dashboard-update"` signals, the SSE
 Copy `config.example.toml` → `config.toml` and customize. Environment variable overrides use `POLY_*` prefix:
 - `POLY_PRIVATE_KEY`, `POLY_SAFE_ADDRESS` — wallet credentials
 - `POLY_BUILDER_API_KEY`, `POLY_BUILDER_API_SECRET`, `POLY_BUILDER_API_PASSPHRASE` — builder API
-- `POLY_DASHBOARD_PORT`, `POLY_DB_PATH`, `POLY_PAPER_TRADING` — runtime settings
+- `POLY_DASHBOARD_HOST`, `POLY_DASHBOARD_PORT`, `POLY_DB_PATH`, `POLY_PAPER_TRADING` — runtime settings
 - `POLY_RPC_URLS` — comma-separated Polygon RPC endpoints for Chainlink oracle queries
 
 Paper mode: `[paper] enabled = true` or `POLY_PAPER_TRADING=true`
+Docker deployment: Set `POLY_DASHBOARD_HOST=0.0.0.0` in `docker-compose.yml` to allow access from host machine.
 
 ## Adding a New Strategy
 

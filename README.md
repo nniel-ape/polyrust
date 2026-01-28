@@ -117,6 +117,7 @@ services:
 
 - **Secrets management**: Use Docker secrets or external secrets manager (not environment variables in production)
 - **Live trading**: Set `[paper] enabled = false` in `config.toml` and provide credentials
+- **Dashboard access**: For external access (outside container), set `POLY_DASHBOARD_HOST=0.0.0.0` in `docker-compose.yml`
 - **Monitoring**: `docker-compose logs -f polyrust` for real-time logs
 - **Health checks**: Dashboard health endpoint (implementation pending)
 
@@ -131,8 +132,10 @@ Configuration is loaded from `config.example.toml` (copy to `config.toml`) with 
 | Builder API key | `POLY_BUILDER_API_KEY` | — |
 | Builder API secret | `POLY_BUILDER_API_SECRET` | — |
 | Builder API passphrase | `POLY_BUILDER_API_PASSPHRASE` | — |
+| Dashboard host | `POLY_DASHBOARD_HOST` | 127.0.0.1 |
 | Dashboard port | `POLY_DASHBOARD_PORT` | 3000 |
 | Database path | `POLY_DB_PATH` | polyrust.db |
+| RPC endpoints | `POLY_RPC_URLS` | ["https://polygon-rpc.com"] |
 | Paper trading | `POLY_PAPER_TRADING` | true |
 | Log level | `RUST_LOG` | info,polyrust=debug |
 

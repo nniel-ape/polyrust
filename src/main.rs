@@ -111,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
                     side,
                     price,
                     size,
+                    strategy_name,
                 })) => {
                     // Calculate realized P&L for closing trades (Sell orders)
                     let realized_pnl = if side == OrderSide::Sell {
@@ -134,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
                         price,
                         size,
                         realized_pnl,
-                        strategy_name: "engine".to_string(), // Default strategy name
+                        strategy_name: strategy_name.clone(),
                         timestamp: Utc::now(),
                     };
 

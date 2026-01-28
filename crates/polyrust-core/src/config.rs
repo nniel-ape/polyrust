@@ -238,6 +238,10 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .collect();
         }
+        // POLY_DASHBOARD_HOST — dashboard bind address
+        if let Ok(v) = std::env::var("POLY_DASHBOARD_HOST") {
+            self.dashboard.host = v;
+        }
         self
     }
 }

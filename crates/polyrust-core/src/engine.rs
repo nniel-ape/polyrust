@@ -386,6 +386,7 @@ async fn execute_action(
                                     side: result.side,
                                     price: result.price,
                                     size: result.size,
+                                    strategy_name: strategy_name.to_string(),
                                 }));
                             } else {
                                 warn!(
