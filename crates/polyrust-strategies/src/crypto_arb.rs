@@ -964,12 +964,30 @@ impl CryptoArbitrageStrategy {
                 && (total_positions + total_pending + total_limits + opps.len())
                     <= self.config.max_positions
             {
-                // Skip if a limit order is already open for this market
-                if self
-                    .open_limit_orders
-                    .values()
-                    .any(|lo| lo.market_id == market_id)
-                {
+                // Skip if a limit order is already open for this market.
+                // For TwoSided mode, only skip if BOTH token IDs have open orders.
+                let has_open_limit = if !opps.is_empty() && opps[0].mode == ArbitrageMode::TwoSided {
+                    // TwoSided: check if both outcomes have limit orders
+                    if opps.len() == 2 {
+                        let token_ids: std::collections::HashSet<_> =
+                            opps.iter().map(|o| &o.token_id).collect();
+                        let open_tokens: std::collections::HashSet<_> = self
+                            .open_limit_orders
+                            .values()
+                            .filter(|lo| lo.market_id == market_id)
+                            .map(|lo| &lo.token_id)
+                            .collect();
+                        token_ids.is_subset(&open_tokens)
+                    } else {
+                        false
+                    }
+                } else {
+                    // Other modes: skip if any limit order exists for this market
+                    self.open_limit_orders
+                        .values()
+                        .any(|lo| lo.market_id == market_id)
+                };
+                if has_open_limit {
                     continue;
                 }
 
@@ -1317,11 +1335,12 @@ impl CryptoArbitrageStrategy {
             return Ok(actions);
         }
 
-        // Check if CrossCorrelated mode is auto-disabled for this leader
+        // Check if CrossCorrelated mode is auto-disabled
+        // Use canonical mode (empty leader string) since perf tracking strips leader
         let cross_mode = ArbitrageMode::CrossCorrelated {
             leader: leader_coin.to_string(),
         };
-        if self.is_mode_disabled(&cross_mode) {
+        if self.is_mode_disabled(&cross_mode.canonical()) {
             return Ok(actions);
         }
 
