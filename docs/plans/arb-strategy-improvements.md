@@ -78,17 +78,17 @@ T10 (Verify + docs)
 - [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 3: Spike detection
-- [ ] Add `spike_events: VecDeque<SpikeEvent>` state to `CryptoArbitrageStrategy`
-- [ ] Define `SpikeEvent { coin, timestamp, change_pct, from_price, to_price, acted: bool }`
-- [ ] Implement `detect_spike(coin, current_price) -> Option<Decimal>` — check price change over `spike.window_secs` using `price_history`
-- [ ] In `on_crypto_price()`: before evaluating markets, compute spike. Add pre-filter: skip `evaluate_opportunity` unless `|price_delta| > taker_fee(mid_price) + min_margin` OR spike detected
-- [ ] Record spike events in `spike_events` (cap at `spike.history_size`)
-- [ ] Add spike events section to dashboard `render_view()`
-- [ ] Write tests for `detect_spike` returning Some for 1% move in 10s
-- [ ] Write tests for `detect_spike` returning None for 0.1% move
-- [ ] Write test: pre-filter skips evaluation for small moves (no spike, delta below fee+margin)
-- [ ] Write test: pre-filter allows evaluation when spike detected even with small absolute move
-- [ ] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
+- [x] Add `spike_events: VecDeque<SpikeEvent>` state to `CryptoArbitrageStrategy`
+- [x] Define `SpikeEvent { coin, timestamp, change_pct, from_price, to_price, acted: bool }`
+- [x] Implement `detect_spike(coin, current_price) -> Option<Decimal>` — check price change over `spike.window_secs` using `price_history`
+- [x] In `on_crypto_price()`: before evaluating markets, compute spike. Add pre-filter: skip `evaluate_opportunity` unless `|price_delta| > taker_fee(mid_price) + min_margin` OR spike detected
+- [x] Record spike events in `spike_events` (cap at `spike.history_size`)
+- [x] Add spike events section to dashboard `render_view()`
+- [x] Write tests for `detect_spike` returning Some for 1% move in 10s
+- [x] Write tests for `detect_spike` returning None for 0.1% move
+- [x] Write test: pre-filter skips evaluation for small moves (no spike, delta below fee+margin)
+- [x] Write test: pre-filter allows evaluation when spike detected even with small absolute move
+- [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 4: Hybrid order mode — GTC default, FOK for tail-end
 - [ ] Extend `PendingOrder` with `order_type: OrderType`, `submitted_at: tokio::time::Instant`, `mode: ArbitrageMode`

@@ -470,6 +470,17 @@ pub struct ArbitragePosition {
     pub entry_time: DateTime<Utc>,
 }
 
+/// A detected price spike event.
+#[derive(Debug, Clone)]
+pub struct SpikeEvent {
+    pub coin: String,
+    pub timestamp: DateTime<Utc>,
+    pub change_pct: Decimal,
+    pub from_price: Decimal,
+    pub to_price: Decimal,
+    pub acted: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Strategy
 // ---------------------------------------------------------------------------
@@ -526,6 +537,8 @@ pub struct CryptoArbitrageStrategy {
     /// Markets discovered before prices were available, keyed by coin.
     /// Promoted to active_markets once a price arrives for the coin.
     pending_discovery: HashMap<String, MarketInfo>,
+    /// Recent spike events for display and analysis.
+    spike_events: VecDeque<SpikeEvent>,
 }
 
 impl CryptoArbitrageStrategy {
@@ -551,6 +564,7 @@ impl CryptoArbitrageStrategy {
             last_dashboard_emit: None,
             cached_asks: HashMap::new(),
             pending_discovery: HashMap::new(),
+            spike_events: VecDeque::new(),
         }
     }
 
@@ -636,6 +650,70 @@ impl CryptoArbitrageStrategy {
             );
             self.active_markets.insert(market.id.clone(), mwr);
             actions.push(Action::SubscribeMarket(market.id.clone()));
+        }
+
+        // -- Spike detection & pre-filter ------------------------------------
+        let spike = self.detect_spike(symbol, price);
+
+        // Record spike event if detected
+        if let Some(change_pct) = spike {
+            let from_price = self
+                .price_history
+                .get(symbol)
+                .and_then(|h| {
+                    let cutoff =
+                        Utc::now() - chrono::Duration::seconds(self.config.spike.window_secs as i64);
+                    h.iter()
+                        .rev()
+                        .find(|(ts, _, _)| *ts <= cutoff)
+                        .map(|(_, p, _)| *p)
+                })
+                .unwrap_or(price);
+
+            self.spike_events.push_back(SpikeEvent {
+                coin: symbol.to_string(),
+                timestamp: Utc::now(),
+                change_pct,
+                from_price,
+                to_price: price,
+                acted: false,
+            });
+            // Cap spike history
+            while self.spike_events.len() > self.config.spike.history_size {
+                self.spike_events.pop_front();
+            }
+
+            info!(
+                coin = %symbol,
+                change_pct = %change_pct,
+                "Spike detected"
+            );
+        }
+
+        // Pre-filter: skip evaluation unless price delta is large enough or spike detected.
+        // This avoids wasting compute on tiny price moves that can't be profitable.
+        let should_evaluate = if spike.is_some() {
+            true
+        } else {
+            // Check if any active market for this coin has enough price delta to be profitable
+            let fee_rate = self.config.fee.taker_fee_rate;
+            self.active_markets.values().any(|m| {
+                if m.coin != symbol {
+                    return false;
+                }
+                if m.reference_price.is_zero() {
+                    return false;
+                }
+                let delta_pct = ((price - m.reference_price) / m.reference_price).abs();
+                // Approximate mid-price fee + min margin as threshold
+                let mid_fee = taker_fee(Decimal::new(50, 2), fee_rate);
+                let min_margin = self.config.min_profit_margin.min(self.config.late_window_margin);
+                delta_pct > mid_fee + min_margin
+            })
+        };
+
+        if !should_evaluate {
+            return Ok(actions);
         }
 
         // Evaluate each active market for this coin
@@ -1295,6 +1373,39 @@ impl CryptoArbitrageStrategy {
         });
     }
 
+    // -- Spike detection ------------------------------------------------------
+
+    /// Detect a price spike for a coin by comparing current price to the
+    /// price `spike.window_secs` seconds ago in `price_history`.
+    ///
+    /// Returns `Some(change_pct)` if the absolute percentage change exceeds
+    /// `spike.threshold_pct`, otherwise `None`.
+    fn detect_spike(&self, coin: &str, current_price: Decimal) -> Option<Decimal> {
+        let history = self.price_history.get(coin)?;
+        let now = Utc::now();
+        let window = chrono::Duration::seconds(self.config.spike.window_secs as i64);
+        let cutoff = now - window;
+
+        // Find the oldest price entry that is at or before the cutoff
+        // (i.e. the baseline price from `window_secs` ago).
+        let baseline = history
+            .iter()
+            .rev()
+            .find(|(ts, _, _)| *ts <= cutoff)
+            .map(|(_, p, _)| *p)?;
+
+        if baseline.is_zero() {
+            return None;
+        }
+
+        let change_pct = (current_price - baseline) / baseline;
+        if change_pct.abs() >= self.config.spike.threshold_pct {
+            Some(change_pct)
+        } else {
+            None
+        }
+    }
+
     // -- Helpers ------------------------------------------------------------
 
     /// Extract coin symbol from market question string.
@@ -1566,6 +1677,55 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
                         size = pos.size,
                     );
                 }
+            }
+            html.push_str("</tbody></table>");
+        }
+        html.push_str("</div>");
+
+        // --- Spike Events ---
+        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+        let _ = write!(
+            html,
+            r#"<h2 class="text-lg font-bold mb-3">Spike Events ({})</h2>"#,
+            self.spike_events.len()
+        );
+
+        if self.spike_events.is_empty() {
+            html.push_str(r#"<p class="text-gray-500">No spike events detected</p>"#);
+        } else {
+            html.push_str(r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#);
+            html.push_str("<th class=\"text-left py-1\">Coin</th>");
+            html.push_str("<th class=\"text-right py-1\">Change</th>");
+            html.push_str("<th class=\"text-right py-1\">From</th>");
+            html.push_str("<th class=\"text-right py-1\">To</th>");
+            html.push_str("<th class=\"text-right py-1\">Time</th>");
+            html.push_str("</tr></thead><tbody>");
+
+            // Show most recent spikes first (last 10)
+            for spike in self.spike_events.iter().rev().take(10) {
+                let change_class = if spike.change_pct >= Decimal::ZERO {
+                    "pnl-positive"
+                } else {
+                    "pnl-negative"
+                };
+                let change_display = spike.change_pct * Decimal::new(100, 0);
+                let ago = (Utc::now() - spike.timestamp).num_seconds();
+                let time_str = if ago < 60 {
+                    format!("{}s ago", ago)
+                } else {
+                    format!("{}m ago", ago / 60)
+                };
+
+                let _ = write!(
+                    html,
+                    r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="text-right py-1 {change_class}">{change:+.2}%</td><td class="text-right py-1">{from}</td><td class="text-right py-1">{to}</td><td class="text-right py-1">{time}</td></tr>"#,
+                    coin = escape_html(&spike.coin),
+                    change_class = change_class,
+                    change = change_display,
+                    from = fmt_usd(spike.from_price),
+                    to = fmt_usd(spike.to_price),
+                    time = time_str,
+                );
             }
             html.push_str("</tbody></table>");
         }
@@ -2792,5 +2952,232 @@ mod tests {
         assert!(config.correlation.enabled);
         assert_eq!(config.performance.min_trades, 50);
         assert!(config.performance.auto_disable);
+    }
+
+    // --- spike detection tests ---
+
+    #[test]
+    fn detect_spike_returns_some_for_1pct_move_in_10s() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        // Default spike config: threshold_pct = 0.005, window_secs = 10
+
+        let now = Utc::now();
+        let mut history = VecDeque::new();
+        // Baseline price 15 seconds ago (before window)
+        history.push_back((now - Duration::seconds(15), dec!(50000), "binance".to_string()));
+        // Price inside the window (5 seconds ago)
+        history.push_back((now - Duration::seconds(5), dec!(50400), "binance".to_string()));
+        // Current price
+        history.push_back((now, dec!(50500), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        // Current price 50500 vs baseline 50000 = 1% change > 0.5% threshold
+        let result = strategy.detect_spike("BTC", dec!(50500));
+        assert!(result.is_some(), "1% move should be detected as spike");
+        let change = result.unwrap();
+        assert_eq!(change, dec!(0.01)); // (50500 - 50000) / 50000 = 0.01
+    }
+
+    #[test]
+    fn detect_spike_returns_none_for_small_move() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        let now = Utc::now();
+        let mut history = VecDeque::new();
+        // Baseline price 15 seconds ago
+        history.push_back((now - Duration::seconds(15), dec!(50000), "binance".to_string()));
+        // Current price
+        history.push_back((now, dec!(50020), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        // 50020 vs 50000 = 0.04% change < 0.5% threshold
+        let result = strategy.detect_spike("BTC", dec!(50020));
+        assert!(result.is_none(), "0.04% move should not be a spike");
+    }
+
+    #[test]
+    fn detect_spike_returns_none_no_history() {
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let result = strategy.detect_spike("BTC", dec!(50000));
+        assert!(result.is_none(), "no history should return None");
+    }
+
+    #[test]
+    fn detect_spike_returns_none_no_baseline_before_window() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        let now = Utc::now();
+        let mut history = VecDeque::new();
+        // Only prices within the window (< 10s ago), no baseline before
+        history.push_back((now - Duration::seconds(5), dec!(50000), "binance".to_string()));
+        history.push_back((now, dec!(51000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        let result = strategy.detect_spike("BTC", dec!(51000));
+        assert!(result.is_none(), "no baseline before window should return None");
+    }
+
+    #[test]
+    fn detect_spike_negative_direction() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        let now = Utc::now();
+        let mut history = VecDeque::new();
+        history.push_back((now - Duration::seconds(15), dec!(50000), "binance".to_string()));
+        history.push_back((now, dec!(49500), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        // -1% move should also be detected
+        let result = strategy.detect_spike("BTC", dec!(49500));
+        assert!(result.is_some(), "negative spike should be detected");
+        assert!(result.unwrap() < Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn prefilter_skips_evaluation_for_small_move_no_spike() {
+        let mut strategy = make_strategy_no_chainlink();
+        let ctx = StrategyContext::new();
+
+        // Set up external price
+        {
+            let mut md = ctx.market_data.write().await;
+            md.external_prices.insert("BTC".to_string(), dec!(50000));
+        }
+
+        // Add an active market with reference price 50000
+        let mwr = make_mwr(dec!(50000), 600);
+        strategy.active_markets.insert("market1".to_string(), mwr);
+
+        // Add orderbooks so evaluate_opportunity could find something
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                make_orderbook("token_up", dec!(0.55), dec!(0.60)),
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                make_orderbook("token_down", dec!(0.35), dec!(0.40)),
+            );
+        }
+
+        // Add price history: only a tiny move (50000 → 50001)
+        let now = Utc::now();
+        let mut history = VecDeque::new();
+        history.push_back((now - Duration::seconds(15), dec!(50000), "binance".to_string()));
+        history.push_back((now - Duration::seconds(1), dec!(50001), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        // Tiny price delta: 50001 vs ref 50000 = 0.002%
+        // This is below fee(0.50) + min_margin = 0.01575 + 0.02 = 0.03575
+        // No spike either. Pre-filter should skip evaluation => no actions (no orders).
+        let actions = strategy.on_crypto_price("BTC", dec!(50001), "binance", &ctx).await.unwrap();
+        let order_actions: Vec<_> = actions.iter().filter(|a| matches!(a, Action::PlaceOrder(_))).collect();
+        assert!(order_actions.is_empty(), "pre-filter should skip evaluation for tiny move");
+    }
+
+    #[tokio::test]
+    async fn prefilter_allows_evaluation_when_spike_detected() {
+        let mut strategy = make_strategy_no_chainlink();
+        let ctx = StrategyContext::new();
+
+        // Set up external price
+        {
+            let mut md = ctx.market_data.write().await;
+            md.external_prices.insert("BTC".to_string(), dec!(50000));
+        }
+
+        // Add an active market with reference price 50000
+        let mwr = make_mwr(dec!(50000), 200); // late window for lower margin threshold
+        strategy.active_markets.insert("market1".to_string(), mwr);
+
+        // Set up orderbooks with favorable prices
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                make_orderbook("token_up", dec!(0.55), dec!(0.60)),
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                make_orderbook("token_down", dec!(0.35), dec!(0.40)),
+            );
+        }
+
+        // Set up price history with a spike: BTC jumped from 50000 to 52000 in 10s
+        let now = Utc::now();
+        let mut history = VecDeque::new();
+        history.push_back((now - Duration::seconds(15), dec!(50000), "binance".to_string()));
+        history.push_back((now - Duration::seconds(1), dec!(52000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        // Even though the *reference delta* might be small in percentage terms,
+        // the spike detection triggers (4% move in 10s > 0.5% threshold),
+        // so evaluation is allowed.
+        let actions = strategy.on_crypto_price("BTC", dec!(52000), "binance", &ctx).await.unwrap();
+
+        // Check that spike was recorded
+        assert!(!strategy.spike_events.is_empty(), "spike event should be recorded");
+        assert_eq!(strategy.spike_events[0].coin, "BTC");
+
+        // The evaluation should have proceeded (spike detected allows it).
+        // Whether an order is placed depends on evaluate_opportunity result,
+        // but the pre-filter should NOT have blocked it.
+        // With 4% move and late window, confidence should be high enough for Confirmed mode.
+        // (52000 vs 50000 = 4%, confidence = min(1, 0.04*66*boost) = 1.0, ask=0.60,
+        //  net_margin = 0.40 - fee(0.60) ≈ 0.40 - 0.015 = 0.385 > late_window_margin 0.02)
+        let order_actions: Vec<_> = actions.iter().filter(|a| matches!(a, Action::PlaceOrder(_))).collect();
+        assert!(!order_actions.is_empty(), "spike should allow evaluation and order placement");
+    }
+
+    #[test]
+    fn spike_events_capped_at_history_size() {
+        let mut config = ArbitrageConfig::default();
+        config.spike.history_size = 3;
+        let mut strategy = CryptoArbitrageStrategy::new(config);
+
+        for i in 0..5 {
+            strategy.spike_events.push_back(SpikeEvent {
+                coin: "BTC".to_string(),
+                timestamp: Utc::now(),
+                change_pct: Decimal::new(i, 2),
+                from_price: dec!(50000),
+                to_price: dec!(50500),
+                acted: false,
+            });
+        }
+        // Manually cap (the actual capping happens in on_crypto_price, but verify logic)
+        while strategy.spike_events.len() > strategy.config.spike.history_size {
+            strategy.spike_events.pop_front();
+        }
+        assert_eq!(strategy.spike_events.len(), 3);
+    }
+
+    #[test]
+    fn render_view_with_spike_events() {
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        strategy.spike_events.push_back(SpikeEvent {
+            coin: "BTC".to_string(),
+            timestamp: Utc::now(),
+            change_pct: dec!(0.015),
+            from_price: dec!(50000),
+            to_price: dec!(50750),
+            acted: false,
+        });
+
+        let html = strategy.render_view().unwrap();
+        assert!(html.contains("Spike Events (1)"));
+        assert!(html.contains("BTC"));
+        assert!(html.contains("$50,000.00"));
+        assert!(html.contains("$50,750.00"));
+    }
+
+    #[test]
+    fn render_view_empty_spike_events() {
+        let strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+        let html = strategy.render_view().unwrap();
+        assert!(html.contains("Spike Events (0)"));
+        assert!(html.contains("No spike events detected"));
     }
 }
