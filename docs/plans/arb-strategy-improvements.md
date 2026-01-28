@@ -155,17 +155,17 @@ T10 (Verify + docs)
 - [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 8: Trailing stop-loss
-- [ ] Add `peak_bid: Decimal` field to `ArbitragePosition`, initialize to `entry_price`
-- [ ] On `OrderbookUpdate` events: update `peak_bid = max(peak_bid, current_bid)` for matching positions
-- [ ] In `check_stop_loss()`: add trailing stop check after existing dual-trigger logic
+- [x] Add `peak_bid: Decimal` field to `ArbitragePosition`, initialize to `entry_price`
+- [x] On `OrderbookUpdate` events: update `peak_bid = max(peak_bid, current_bid)` for matching positions
+- [x] In `check_stop_loss()`: add trailing stop check after existing dual-trigger logic
   - If `peak_bid > entry_price` and `peak_bid - current_bid > trailing_distance`, trigger sell
   - Time decay: `effective_distance = trailing_distance * (time_remaining / 900)` when `time_decay` enabled
-- [ ] Keep existing dual-trigger logic unchanged (trailing is additive)
-- [ ] Write test: trailing stop triggers when bid drops 3¢ from peak (peak=0.70, bid=0.67)
-- [ ] Write test: trailing stop does NOT trigger when position is underwater (peak == entry)
-- [ ] Write test: time decay tightens distance near expiry (30s remaining → tiny distance)
-- [ ] Write test: `trailing_enabled=false` preserves existing behavior only
-- [ ] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
+- [x] Keep existing dual-trigger logic unchanged (trailing is additive)
+- [x] Write test: trailing stop triggers when bid drops 3¢ from peak (peak=0.70, bid=0.67)
+- [x] Write test: trailing stop does NOT trigger when position is underwater (peak == entry)
+- [x] Write test: time decay tightens distance near expiry (30s remaining → tiny distance)
+- [x] Write test: `trailing_enabled=false` preserves existing behavior only
+- [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 9: Performance tracking
 - [ ] Define `ModeStats { entered: u64, won: u64, lost: u64, total_pnl: Decimal, recent_pnl: VecDeque<Decimal> }` with `win_rate()` and `avg_pnl()` methods

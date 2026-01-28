@@ -502,6 +502,8 @@ pub struct ArbitragePosition {
     pub entry_time: DateTime<Utc>,
     /// Kelly fraction used for sizing (None if fixed sizing was used).
     pub kelly_fraction: Option<Decimal>,
+    /// Highest bid price observed since position entry (for trailing stop-loss).
+    pub peak_bid: Decimal,
 }
 
 /// A detected price spike event.
@@ -1338,6 +1340,17 @@ impl CryptoArbitrageStrategy {
                 .insert(snapshot.token_id.clone(), best_ask.price);
         }
 
+        // Update peak_bid for trailing stop-loss tracking
+        if let Some(current_bid) = snapshot.best_bid() {
+            for positions in self.positions.values_mut() {
+                for pos in positions.iter_mut() {
+                    if pos.token_id == snapshot.token_id && current_bid > pos.peak_bid {
+                        pos.peak_bid = current_bid;
+                    }
+                }
+            }
+        }
+
         // Check stop-losses on open positions
         let mut actions = Vec::new();
         let position_ids: Vec<MarketId> = self.positions.keys().cloned().collect();
@@ -1428,7 +1441,34 @@ impl CryptoArbitrageStrategy {
         let price_drop = pos.entry_price - current_bid;
         let market_dropped = price_drop >= self.config.stop_loss.min_drop;
 
-        if crypto_reversed && market_dropped {
+        // Trailing stop: triggers when position was profitable and bid dropped from peak
+        let trailing_triggered = if self.config.stop_loss.trailing_enabled
+            && pos.peak_bid > pos.entry_price
+        {
+            let base_distance = self.config.stop_loss.trailing_distance;
+            let effective_distance = if self.config.stop_loss.time_decay {
+                // Tighten trailing distance as expiry approaches (900s = 15min market)
+                let decay_factor =
+                    Decimal::from(time_remaining) / Decimal::from(900i64);
+                // Clamp to [0, 1] — don't widen beyond base distance
+                let clamped = if decay_factor > Decimal::ONE {
+                    Decimal::ONE
+                } else if decay_factor < Decimal::ZERO {
+                    Decimal::ZERO
+                } else {
+                    decay_factor
+                };
+                base_distance * clamped
+            } else {
+                base_distance
+            };
+            let drop_from_peak = pos.peak_bid - current_bid;
+            drop_from_peak > effective_distance
+        } else {
+            false
+        };
+
+        if (crypto_reversed && market_dropped) || trailing_triggered {
             let order = OrderRequest {
                 token_id: pos.token_id.clone(),
                 price: current_bid,
@@ -1621,6 +1661,7 @@ impl CryptoArbitrageStrategy {
             order_id: result.order_id.clone(),
             entry_time: Utc::now(),
             kelly_fraction: pending.kelly_fraction,
+            peak_bid: pending.price,
         };
 
         info!(
@@ -1667,6 +1708,7 @@ impl CryptoArbitrageStrategy {
                 order_id: Some(order_id.to_string()),
                 entry_time: Utc::now(),
                 kelly_fraction: lo.kelly_fraction,
+                peak_bid: price,
             };
             self.positions
                 .entry(lo.market_id)
@@ -2735,6 +2777,7 @@ mod tests {
             order_id: None,
             entry_time: Utc::now(),
             kelly_fraction: None,
+            peak_bid: dec!(0.60),
         };
 
         // Price reversed: BTC dropped from 50000 to 49500 = -1% > 0.5%
@@ -2768,6 +2811,7 @@ mod tests {
             order_id: None,
             entry_time: Utc::now(),
             kelly_fraction: None,
+            peak_bid: dec!(0.60),
         };
 
         let mut history = VecDeque::new();
@@ -2797,6 +2841,7 @@ mod tests {
             order_id: None,
             entry_time: Utc::now(),
             kelly_fraction: None,
+            peak_bid: dec!(0.60),
         };
 
         // Crypto reversed, but market price only dropped 3¢ < 5¢
@@ -2807,6 +2852,147 @@ mod tests {
         let snapshot = make_orderbook("token_up", dec!(0.57), dec!(0.60));
         let action = strategy.check_stop_loss(&pos, &snapshot).unwrap();
         assert!(action.is_none());
+    }
+
+    // --- trailing stop-loss tests ---
+
+    #[test]
+    fn trailing_stop_triggers_when_bid_drops_from_peak() {
+        // peak=0.70, current_bid=0.67 → drop=0.03 >= trailing_distance=0.03
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        let mwr = make_mwr(dec!(50000), 300);
+        strategy.active_markets.insert("market1".to_string(), mwr);
+
+        let pos = ArbitragePosition {
+            market_id: "market1".to_string(),
+            token_id: "token_up".to_string(),
+            side: OutcomeSide::Up,
+            entry_price: dec!(0.60),
+            size: dec!(10),
+            reference_price: dec!(50000),
+            coin: "BTC".to_string(),
+            order_id: None,
+            entry_time: Utc::now(),
+            kelly_fraction: None,
+            peak_bid: dec!(0.70), // Position was profitable, bid reached 0.70
+        };
+
+        // No crypto reversal needed for trailing stop — price history irrelevant
+        let mut history = VecDeque::new();
+        history.push_back((Utc::now(), dec!(50000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        // Current bid = 0.67, drop from peak = 0.70 - 0.67 = 0.03 > trailing_distance (0.03)
+        // Note: condition is strictly greater than, so 0.031 drop needed
+        let snapshot = make_orderbook("token_up", dec!(0.669), dec!(0.70));
+        let action = strategy.check_stop_loss(&pos, &snapshot).unwrap();
+        assert!(action.is_some(), "Trailing stop should trigger when bid drops > trailing_distance from peak");
+    }
+
+    #[test]
+    fn trailing_stop_does_not_trigger_when_position_underwater() {
+        // peak == entry (position never went up) → trailing should NOT trigger
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        let mwr = make_mwr(dec!(50000), 300);
+        strategy.active_markets.insert("market1".to_string(), mwr);
+
+        let pos = ArbitragePosition {
+            market_id: "market1".to_string(),
+            token_id: "token_up".to_string(),
+            side: OutcomeSide::Up,
+            entry_price: dec!(0.60),
+            size: dec!(10),
+            reference_price: dec!(50000),
+            coin: "BTC".to_string(),
+            order_id: None,
+            entry_time: Utc::now(),
+            kelly_fraction: None,
+            peak_bid: dec!(0.60), // Never went above entry
+        };
+
+        // No crypto reversal
+        let mut history = VecDeque::new();
+        history.push_back((Utc::now(), dec!(50000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        // Bid dropped to 0.50 — large drop, but peak == entry so trailing shouldn't fire
+        let snapshot = make_orderbook("token_up", dec!(0.50), dec!(0.55));
+        let action = strategy.check_stop_loss(&pos, &snapshot).unwrap();
+        assert!(action.is_none(), "Trailing stop should NOT trigger when peak_bid == entry_price (position was never profitable)");
+    }
+
+    #[test]
+    fn trailing_stop_time_decay_tightens_near_expiry() {
+        // 30s remaining out of 900s → decay_factor = 30/900 = 0.0333
+        // effective_distance = 0.03 * 0.0333 ≈ 0.001
+        // So even a tiny 0.002 drop from peak should trigger
+        let mut strategy = CryptoArbitrageStrategy::new(ArbitrageConfig::default());
+
+        let mwr = make_mwr(dec!(50000), 90); // 90 seconds remaining (past the 60s cutoff)
+        strategy.active_markets.insert("market1".to_string(), mwr);
+
+        let pos = ArbitragePosition {
+            market_id: "market1".to_string(),
+            token_id: "token_up".to_string(),
+            side: OutcomeSide::Up,
+            entry_price: dec!(0.60),
+            size: dec!(10),
+            reference_price: dec!(50000),
+            coin: "BTC".to_string(),
+            order_id: None,
+            entry_time: Utc::now(),
+            kelly_fraction: None,
+            peak_bid: dec!(0.65), // Position was profitable
+        };
+
+        // No crypto reversal
+        let mut history = VecDeque::new();
+        history.push_back((Utc::now(), dec!(50000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        // At 90s remaining: effective_distance = 0.03 * (90/900) = 0.03 * 0.1 = 0.003
+        // Drop from peak: 0.65 - 0.645 = 0.005 > 0.003 → should trigger
+        let snapshot = make_orderbook("token_up", dec!(0.645), dec!(0.66));
+        let action = strategy.check_stop_loss(&pos, &snapshot).unwrap();
+        assert!(action.is_some(), "Time decay should tighten trailing distance near expiry");
+    }
+
+    #[test]
+    fn trailing_stop_disabled_preserves_existing_behavior() {
+        // With trailing_enabled=false, only dual-trigger logic should work
+        let mut config = ArbitrageConfig::default();
+        config.stop_loss.trailing_enabled = false;
+        let mut strategy = CryptoArbitrageStrategy::new(config);
+
+        let mwr = make_mwr(dec!(50000), 300);
+        strategy.active_markets.insert("market1".to_string(), mwr);
+
+        let pos = ArbitragePosition {
+            market_id: "market1".to_string(),
+            token_id: "token_up".to_string(),
+            side: OutcomeSide::Up,
+            entry_price: dec!(0.60),
+            size: dec!(10),
+            reference_price: dec!(50000),
+            coin: "BTC".to_string(),
+            order_id: None,
+            entry_time: Utc::now(),
+            kelly_fraction: None,
+            peak_bid: dec!(0.70), // Position was profitable, peak at 0.70
+        };
+
+        // No crypto reversal (price stable)
+        let mut history = VecDeque::new();
+        history.push_back((Utc::now(), dec!(50000), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        // Bid dropped 0.04 from peak (> trailing_distance=0.03) but trailing is disabled
+        // Dual-trigger: no crypto reversal → should NOT trigger
+        let snapshot = make_orderbook("token_up", dec!(0.66), dec!(0.70));
+        let action = strategy.check_stop_loss(&pos, &snapshot).unwrap();
+        assert!(action.is_none(), "With trailing_enabled=false, trailing stop should not trigger even with large drop from peak");
     }
 
     // --- market discovery/expiry tests ---
@@ -2950,6 +3136,7 @@ mod tests {
             order_id: None,
             entry_time: Utc::now(),
             kelly_fraction: None,
+            peak_bid: dec!(0.60),
         };
         strategy
             .positions
