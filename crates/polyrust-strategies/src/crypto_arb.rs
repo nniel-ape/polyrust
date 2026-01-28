@@ -811,6 +811,9 @@ impl CryptoArbitrageStrategy {
                     None
                 };
 
+                let is_two_sided = two_sided_size.is_some();
+                let mut batch_orders: Vec<OrderRequest> = Vec::new();
+
                 for opp in &opps {
                     if opp.buy_price.is_zero() {
                         warn!(market = %market_id, "skipping opportunity with zero buy_price");
@@ -892,7 +895,17 @@ impl CryptoArbitrageStrategy {
                             kelly_fraction: kelly_frac,
                         },
                     );
-                    actions.push(Action::PlaceOrder(order));
+
+                    if is_two_sided {
+                        batch_orders.push(order);
+                    } else {
+                        actions.push(Action::PlaceOrder(order));
+                    }
+                }
+
+                // TwoSided mode: emit a single batch order for both legs
+                if is_two_sided && !batch_orders.is_empty() {
+                    actions.push(Action::PlaceBatchOrder(batch_orders));
                 }
             }
         }
@@ -3839,16 +3852,18 @@ mod tests {
             .await
             .unwrap();
 
-        let orders: Vec<_> = actions
+        // TwoSided now emits PlaceBatchOrder instead of individual PlaceOrder actions
+        let batch_orders: Vec<_> = actions
             .iter()
             .filter_map(|a| match a {
-                Action::PlaceOrder(req) => Some(req),
+                Action::PlaceBatchOrder(reqs) => Some(reqs),
                 _ => None,
             })
             .collect();
 
-        // If two-sided triggered, verify that PendingOrders used fixed sizing (no kelly_fraction)
-        if orders.len() == 2 {
+        // If two-sided triggered, verify batch contains 2 orders and PendingOrders used fixed sizing
+        if !batch_orders.is_empty() {
+            assert_eq!(batch_orders[0].len(), 2, "TwoSided batch should have 2 orders");
             for (_, pending) in &strategy.pending_orders {
                 assert!(
                     pending.kelly_fraction.is_none(),
@@ -3856,5 +3871,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn two_sided_emits_place_batch_order() {
+        let mut strategy = make_strategy_no_chainlink();
+        let ctx = StrategyContext::new();
+
+        let mwr = make_mwr(dec!(50000), 300);
+        strategy.active_markets.insert("market1".to_string(), mwr);
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.external_prices
+                .insert("BTC".to_string(), dec!(50100));
+            // Two-sided: both outcomes cheap so combined < 1.0
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                make_orderbook("token_up", dec!(0.44), dec!(0.48)),
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                make_orderbook("token_down", dec!(0.44), dec!(0.48)),
+            );
+        }
+
+        // Set up price history with a large move so the pre-filter passes via spike detection.
+        // Baseline at 15s ago (before the 10s spike window), current price shows 4.2% jump.
+        let now = Utc::now();
+        let mut history = VecDeque::new();
+        history.push_back((now - Duration::seconds(15), dec!(48100), "binance".to_string()));
+        history.push_back((now - Duration::seconds(1), dec!(50100), "binance".to_string()));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        let actions = strategy
+            .on_crypto_price("BTC", dec!(50100), "binance", &ctx)
+            .await
+            .unwrap();
+
+        // TwoSided should emit a single PlaceBatchOrder with 2 OrderRequests
+        let batch_actions: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::PlaceBatchOrder(reqs) => Some(reqs),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(batch_actions.len(), 1, "should emit exactly one PlaceBatchOrder");
+        assert_eq!(batch_actions[0].len(), 2, "batch should contain 2 orders (both outcomes)");
+
+        // Verify the two orders have different token IDs (up and down outcomes)
+        let token_ids: Vec<_> = batch_actions[0].iter().map(|r| &r.token_id).collect();
+        assert_ne!(token_ids[0], token_ids[1], "batch orders should target different tokens");
+
+        // No individual PlaceOrder actions should be present
+        let individual_orders: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, Action::PlaceOrder(_)))
+            .collect();
+        assert!(individual_orders.is_empty(), "TwoSided should not emit individual PlaceOrder");
     }
 }

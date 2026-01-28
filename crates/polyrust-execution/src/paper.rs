@@ -449,6 +449,18 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
         })
     }
 
+    async fn place_batch_orders(&self, orders: &[OrderRequest]) -> Result<Vec<OrderResult>> {
+        // Process all orders sequentially under the same logical flow.
+        // Each place_order call already acquires the lock atomically, and
+        // balance is deducted per-order, so earlier orders in the batch
+        // can affect whether later ones have sufficient balance.
+        let mut results = Vec::with_capacity(orders.len());
+        for order in orders {
+            results.push(self.place_order(order).await?);
+        }
+        Ok(results)
+    }
+
     async fn cancel_order(&self, order_id: &str) -> Result<()> {
         let mut state = self.state.write().await;
 
@@ -934,5 +946,61 @@ mod tests {
         // Position restored to 20
         let positions2 = backend.get_positions().await.unwrap();
         assert_eq!(positions2[0].size, dec!(20));
+    }
+
+    // --- Batch order tests ---
+
+    #[tokio::test]
+    async fn batch_with_two_orders_produces_two_results() {
+        let backend = PaperBackend::new(dec!(1000), FillMode::Immediate);
+
+        let orders = vec![
+            buy_order("token1", dec!(0.50), dec!(10)),
+            buy_order("token2", dec!(0.40), dec!(10)),
+        ];
+        let results = backend.place_batch_orders(&orders).await.unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].success);
+        assert!(results[1].success);
+        assert_eq!(results[0].token_id, "token1");
+        assert_eq!(results[1].token_id, "token2");
+    }
+
+    #[tokio::test]
+    async fn batch_deducts_balance_correctly() {
+        let backend = PaperBackend::new(dec!(100), FillMode::Immediate);
+
+        let orders = vec![
+            buy_order("token1", dec!(0.50), dec!(10)), // cost = 5.00
+            buy_order("token2", dec!(0.40), dec!(10)), // cost = 4.00
+        ];
+        let results = backend.place_batch_orders(&orders).await.unwrap();
+
+        assert!(results[0].success);
+        assert!(results[1].success);
+
+        // Balance should be 100 - 5.00 - 4.00 = 91.00
+        let balance = backend.get_balance().await.unwrap();
+        assert_eq!(balance, dec!(91));
+
+        // Both positions should exist
+        let positions = backend.get_positions().await.unwrap();
+        assert_eq!(positions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn batch_second_order_fails_on_insufficient_balance() {
+        let backend = PaperBackend::new(dec!(6), FillMode::Immediate);
+
+        let orders = vec![
+            buy_order("token1", dec!(0.50), dec!(10)), // cost = 5.00 (succeeds)
+            buy_order("token2", dec!(0.50), dec!(10)), // cost = 5.00 (fails: only 1.00 left)
+        ];
+        let results = backend.place_batch_orders(&orders).await.unwrap();
+
+        assert!(results[0].success);
+        assert!(!results[1].success);
+        assert!(results[1].message.contains("Insufficient balance"));
     }
 }

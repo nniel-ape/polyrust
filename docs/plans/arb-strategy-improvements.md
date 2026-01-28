@@ -129,18 +129,18 @@ T10 (Verify + docs)
 - [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 6: Batch order API
-- [ ] Add `PlaceBatchOrder(Vec<OrderRequest>)` variant to `Action` enum in `actions.rs`
-- [ ] Add `place_batch_orders(&self, orders: &[OrderRequest]) -> Result<Vec<OrderResult>>` to `ExecutionBackend` trait with default sequential impl
-- [ ] Update `Box<dyn ExecutionBackend>` impl to delegate `place_batch_orders`
-- [ ] Handle `PlaceBatchOrder` in engine's `execute_action` — call `place_batch_orders`, publish individual `OrderEvent::Placed` per result
-- [ ] Override `place_batch_orders` in `PaperBackend` — sequential processing with atomic balance updates
-- [ ] Override `place_batch_orders` in `LiveBackend` — check if SDK has batch endpoint, otherwise sequential fallback
-- [ ] Update TwoSided mode in strategy: emit single `PlaceBatchOrder(vec![up_order, down_order])` instead of two `PlaceOrder`
-- [ ] Write test: batch with 2 orders produces 2 OrderResults
-- [ ] Write test: paper backend processes batch with correct balance deduction
-- [ ] Write test: engine routes PlaceBatchOrder and publishes correct events
-- [ ] Write test: TwoSided mode emits PlaceBatchOrder
-- [ ] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
+- [x] Add `PlaceBatchOrder(Vec<OrderRequest>)` variant to `Action` enum in `actions.rs`
+- [x] Add `place_batch_orders(&self, orders: &[OrderRequest]) -> Result<Vec<OrderResult>>` to `ExecutionBackend` trait with default sequential impl
+- [x] Update `Box<dyn ExecutionBackend>` impl to delegate `place_batch_orders`
+- [x] Handle `PlaceBatchOrder` in engine's `execute_action` — call `place_batch_orders`, publish individual `OrderEvent::Placed` per result
+- [x] Override `place_batch_orders` in `PaperBackend` — sequential processing with atomic balance updates
+- [x] Override `place_batch_orders` in `LiveBackend` — check if SDK has batch endpoint, otherwise sequential fallback
+- [x] Update TwoSided mode in strategy: emit single `PlaceBatchOrder(vec![up_order, down_order])` instead of two `PlaceOrder`
+- [x] Write test: batch with 2 orders produces 2 OrderResults
+- [x] Write test: paper backend processes batch with correct balance deduction
+- [x] Write test: engine routes PlaceBatchOrder and publishes correct events
+- [x] Write test: TwoSided mode emits PlaceBatchOrder
+- [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 7: Cross-market correlation
 - [ ] Add `CrossCorrelated { leader: String }` variant to `ArbitrageMode` enum

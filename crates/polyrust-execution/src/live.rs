@@ -117,6 +117,15 @@ impl polyrust_core::execution::ExecutionBackend for LiveBackend {
     async fn get_balance(&self) -> Result<Decimal> {
         self.inner.get_balance().await
     }
+
+    async fn place_batch_orders(&self, orders: &[OrderRequest]) -> Result<Vec<OrderResult>> {
+        // SDK does not expose a batch endpoint; fall back to sequential placement.
+        let mut results = Vec::with_capacity(orders.len());
+        for order in orders {
+            results.push(self.inner.place_order(order).await?);
+        }
+        Ok(results)
+    }
 }
 
 #[async_trait]

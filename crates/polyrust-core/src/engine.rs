@@ -384,6 +384,49 @@ async fn execute_action(
                 }
             }
         }
+        Action::PlaceBatchOrder(requests) => {
+            match execution.place_batch_orders(requests).await {
+                Ok(results) => {
+                    // Sync balance once after the whole batch
+                    if let Ok(balance) = execution.get_balance().await {
+                        let mut bal = context.balance.write().await;
+                        bal.available_usdc = balance;
+                    }
+                    for result in results {
+                        if result.success {
+                            event_bus.publish(Event::OrderUpdate(OrderEvent::Placed(result)));
+                        } else {
+                            warn!(
+                                token_id = %result.token_id,
+                                message = %result.message,
+                                "Batch order rejected by backend"
+                            );
+                            event_bus.publish(Event::OrderUpdate(OrderEvent::Rejected {
+                                order_id: result.order_id,
+                                reason: result.message,
+                                token_id: Some(result.token_id),
+                            }));
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        count = requests.len(),
+                        error = %e,
+                        "Batch order placement failed"
+                    );
+                    // Publish rejection for each request in the batch
+                    for req in requests {
+                        event_bus.publish(Event::OrderUpdate(OrderEvent::Rejected {
+                            order_id: None,
+                            reason: e.to_string(),
+                            token_id: Some(req.token_id.clone()),
+                        }));
+                    }
+                    return Err(e);
+                }
+            }
+        }
         Action::CancelOrder(id) => {
             execution.cancel_order(id).await?;
             if let Ok(balance) = execution.get_balance().await {

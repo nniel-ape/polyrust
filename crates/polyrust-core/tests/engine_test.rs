@@ -9,7 +9,9 @@ use polyrust_core::execution::ExecutionBackend;
 use polyrust_core::strategy::Strategy;
 use polyrust_core::types::*;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use std::io::Write;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::NamedTempFile;
 
 // --- Mock execution backend ---
@@ -251,4 +253,90 @@ fn config_from_minimal_toml() {
     assert_eq!(config.engine.event_bus_capacity, 4096);
     assert!(config.dashboard.enabled);
     assert!(config.paper.enabled);
+}
+
+// --- Batch order tests ---
+
+struct BatchTrackingBackend {
+    balance: Decimal,
+    place_order_count: AtomicUsize,
+}
+
+impl BatchTrackingBackend {
+    fn new(balance: Decimal) -> Self {
+        Self {
+            balance,
+            place_order_count: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl ExecutionBackend for BatchTrackingBackend {
+    async fn place_order(&self, order: &OrderRequest) -> Result<OrderResult> {
+        self.place_order_count.fetch_add(1, Ordering::Relaxed);
+        Ok(OrderResult {
+            success: true,
+            order_id: Some(format!(
+                "batch-order-{}",
+                self.place_order_count.load(Ordering::Relaxed)
+            )),
+            token_id: order.token_id.clone(),
+            price: order.price,
+            size: order.size,
+            side: order.side,
+            status: Some("placed".to_string()),
+            message: "ok".to_string(),
+        })
+    }
+
+    async fn cancel_order(&self, _order_id: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn cancel_all_orders(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn get_open_orders(&self) -> Result<Vec<Order>> {
+        Ok(vec![])
+    }
+    async fn get_positions(&self) -> Result<Vec<Position>> {
+        Ok(vec![])
+    }
+    async fn get_balance(&self) -> Result<Decimal> {
+        Ok(self.balance)
+    }
+}
+
+#[tokio::test]
+async fn default_place_batch_orders_calls_place_order_per_item() {
+    let backend = BatchTrackingBackend::new(dec!(1000));
+
+    let orders = vec![
+        OrderRequest {
+            token_id: "token1".to_string(),
+            price: dec!(0.50),
+            size: dec!(10),
+            side: OrderSide::Buy,
+            order_type: OrderType::Gtc,
+            neg_risk: false,
+        },
+        OrderRequest {
+            token_id: "token2".to_string(),
+            price: dec!(0.40),
+            size: dec!(10),
+            side: OrderSide::Buy,
+            order_type: OrderType::Gtc,
+            neg_risk: false,
+        },
+    ];
+
+    let results = backend.place_batch_orders(&orders).await.unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert!(results[0].success);
+    assert!(results[1].success);
+    assert_eq!(results[0].token_id, "token1");
+    assert_eq!(results[1].token_id, "token2");
+    // Default impl calls place_order for each item
+    assert_eq!(backend.place_order_count.load(Ordering::Relaxed), 2);
 }

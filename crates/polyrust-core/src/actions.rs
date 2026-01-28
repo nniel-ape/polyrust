@@ -4,6 +4,7 @@ use crate::types::*;
 #[derive(Debug, Clone)]
 pub enum Action {
     PlaceOrder(OrderRequest),
+    PlaceBatchOrder(Vec<OrderRequest>),
     CancelOrder(OrderId),
     CancelAllOrders,
     Log {

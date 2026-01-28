@@ -26,6 +26,15 @@ pub trait ExecutionBackend: Send + Sync {
 
     /// Get available USDC balance.
     async fn get_balance(&self) -> Result<Decimal>;
+
+    /// Place multiple orders as a batch. Default implementation processes sequentially.
+    async fn place_batch_orders(&self, orders: &[OrderRequest]) -> Result<Vec<OrderResult>> {
+        let mut results = Vec::with_capacity(orders.len());
+        for order in orders {
+            results.push(self.place_order(order).await?);
+        }
+        Ok(results)
+    }
 }
 
 #[async_trait]
@@ -47,5 +56,8 @@ impl ExecutionBackend for Box<dyn ExecutionBackend> {
     }
     async fn get_balance(&self) -> Result<Decimal> {
         (**self).get_balance().await
+    }
+    async fn place_batch_orders(&self, orders: &[OrderRequest]) -> Result<Vec<OrderResult>> {
+        (**self).place_batch_orders(orders).await
     }
 }
