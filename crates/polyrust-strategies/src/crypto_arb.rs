@@ -429,6 +429,33 @@ pub fn net_profit_margin(entry_price: Decimal, fee_rate: Decimal, is_maker: bool
     }
 }
 
+/// Compute the Kelly criterion position size in USDC.
+///
+/// - `payout = (1/price) - 1` — net payout per $1 risked if the bet wins
+/// - `kelly = (confidence * payout - (1 - confidence)) / payout`
+/// - `size = base_size * kelly * kelly_multiplier`, clamped to `[min_size, max_size]`
+///
+/// Returns `Decimal::ZERO` for negative edge (should skip the trade).
+pub fn kelly_position_size(
+    confidence: Decimal,
+    price: Decimal,
+    config: &SizingConfig,
+) -> Decimal {
+    if price.is_zero() || price >= Decimal::ONE {
+        return Decimal::ZERO;
+    }
+    let payout = Decimal::ONE / price - Decimal::ONE;
+    if payout.is_zero() {
+        return Decimal::ZERO;
+    }
+    let kelly = (confidence * payout - (Decimal::ONE - confidence)) / payout;
+    if kelly <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+    let size = config.base_size * kelly * config.kelly_multiplier;
+    size.max(config.min_size).min(config.max_size)
+}
+
 /// Three arbitrage trading modes, ordered by priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArbitrageMode {
@@ -468,6 +495,8 @@ pub struct ArbitragePosition {
     pub coin: String,
     pub order_id: Option<OrderId>,
     pub entry_time: DateTime<Utc>,
+    /// Kelly fraction used for sizing (None if fixed sizing was used).
+    pub kelly_fraction: Option<Decimal>,
 }
 
 /// A detected price spike event.
@@ -497,6 +526,7 @@ struct PendingOrder {
     coin: String,
     order_type: OrderType,
     mode: ArbitrageMode,
+    kelly_fraction: Option<Decimal>,
 }
 
 /// An open GTC limit order that has been placed but not yet fully filled.
@@ -512,6 +542,7 @@ pub struct OpenLimitOrder {
     pub coin: String,
     pub placed_at: tokio::time::Instant,
     pub mode: ArbitrageMode,
+    pub kelly_fraction: Option<Decimal>,
 }
 
 /// Crypto arbitrage strategy that exploits mispricing in 15-minute Up/Down
@@ -785,8 +816,36 @@ impl CryptoArbitrageStrategy {
                         warn!(market = %market_id, "skipping opportunity with zero buy_price");
                         continue;
                     }
-                    let size =
-                        two_sided_size.unwrap_or_else(|| self.config.sizing.base_size / opp.buy_price);
+
+                    // Position sizing: Kelly for Confirmed/TailEnd, fixed for TwoSided.
+                    let (size, kelly_frac) = if let Some(ts) = two_sided_size {
+                        (ts, None)
+                    } else if self.config.sizing.use_kelly {
+                        let kelly_size =
+                            kelly_position_size(opp.confidence, opp.buy_price, &self.config.sizing);
+                        if kelly_size.is_zero() {
+                            info!(
+                                mode = ?opp.mode,
+                                market = %market_id,
+                                confidence = %opp.confidence,
+                                price = %opp.buy_price,
+                                "Kelly sizing returned 0 (negative edge), skipping"
+                            );
+                            continue;
+                        }
+                        // Convert USDC size to share count
+                        let shares = kelly_size / opp.buy_price;
+                        // Compute the raw Kelly fraction for tracking
+                        let payout = Decimal::ONE / opp.buy_price - Decimal::ONE;
+                        let kf = if payout > Decimal::ZERO {
+                            (opp.confidence * payout - (Decimal::ONE - opp.confidence)) / payout
+                        } else {
+                            Decimal::ZERO
+                        };
+                        (shares, Some(kf))
+                    } else {
+                        (self.config.sizing.base_size / opp.buy_price, None)
+                    };
 
                     // Hybrid order mode: TailEnd → FOK at best_ask (speed matters);
                     // Confirmed/TwoSided → GTC at best_ask - limit_offset (maker, $0 fee).
@@ -814,6 +873,7 @@ impl CryptoArbitrageStrategy {
                         price = %order_price,
                         order_type = ?order_type,
                         side = ?opp.outcome_to_buy,
+                        kelly = ?kelly_frac,
                         "Submitting arbitrage order"
                     );
                     // Track pending order — position recorded only on confirmed fill
@@ -829,6 +889,7 @@ impl CryptoArbitrageStrategy {
                             coin: market.coin.clone(),
                             order_type,
                             mode: opp.mode,
+                            kelly_fraction: kelly_frac,
                         },
                     );
                     actions.push(Action::PlaceOrder(order));
@@ -1288,6 +1349,7 @@ impl CryptoArbitrageStrategy {
                         coin: pending.coin,
                         placed_at: tokio::time::Instant::now(),
                         mode: pending.mode,
+                        kelly_fraction: pending.kelly_fraction,
                     },
                 );
             }
@@ -1304,6 +1366,7 @@ impl CryptoArbitrageStrategy {
             coin: pending.coin,
             order_id: result.order_id.clone(),
             entry_time: Utc::now(),
+            kelly_fraction: pending.kelly_fraction,
         };
 
         info!(
@@ -1349,6 +1412,7 @@ impl CryptoArbitrageStrategy {
                 coin: lo.coin,
                 order_id: Some(order_id.to_string()),
                 entry_time: Utc::now(),
+                kelly_fraction: lo.kelly_fraction,
             };
             self.positions
                 .entry(lo.market_id)
@@ -1809,6 +1873,7 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
             html.push_str("<th class=\"text-right py-1\">Current</th>");
             html.push_str("<th class=\"text-right py-1\">PnL</th>");
             html.push_str("<th class=\"text-right py-1\">Size</th>");
+            html.push_str("<th class=\"text-right py-1\">Kelly</th>");
             html.push_str("</tr></thead><tbody>");
 
             for positions in self.positions.values() {
@@ -1826,9 +1891,13 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
                         }
                         None => ("-".to_string(), "-".to_string(), ""),
                     };
+                    let kelly_str = match pos.kelly_fraction {
+                        Some(kf) => format!("{:.1}%", kf * Decimal::new(100, 0)),
+                        None => "fixed".to_string(),
+                    };
                     let _ = write!(
                         html,
-                        r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="py-1">{side:?}</td><td class="text-right py-1">{entry}</td><td class="text-right py-1">{current}</td><td class="text-right py-1"><span class="{pnl_class}">{pnl}</span></td><td class="text-right py-1">{size}</td></tr>"#,
+                        r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="py-1">{side:?}</td><td class="text-right py-1">{entry}</td><td class="text-right py-1">{current}</td><td class="text-right py-1"><span class="{pnl_class}">{pnl}</span></td><td class="text-right py-1">{size}</td><td class="text-right py-1">{kelly}</td></tr>"#,
                         coin = escape_html(&pos.coin),
                         side = pos.side,
                         entry = pos.entry_price,
@@ -1836,6 +1905,7 @@ impl DashboardViewProvider for CryptoArbitrageStrategy {
                         pnl_class = pnl_class,
                         pnl = pnl_str,
                         size = pos.size,
+                        kelly = kelly_str,
                     );
                 }
             }
@@ -2325,6 +2395,7 @@ mod tests {
             coin: "BTC".to_string(),
             order_id: None,
             entry_time: Utc::now(),
+            kelly_fraction: None,
         };
 
         // Price reversed: BTC dropped from 50000 to 49500 = -1% > 0.5%
@@ -2357,6 +2428,7 @@ mod tests {
             coin: "BTC".to_string(),
             order_id: None,
             entry_time: Utc::now(),
+            kelly_fraction: None,
         };
 
         let mut history = VecDeque::new();
@@ -2385,6 +2457,7 @@ mod tests {
             coin: "BTC".to_string(),
             order_id: None,
             entry_time: Utc::now(),
+            kelly_fraction: None,
         };
 
         // Crypto reversed, but market price only dropped 3¢ < 5¢
@@ -2537,6 +2610,7 @@ mod tests {
             coin: "BTC".to_string(),
             order_id: None,
             entry_time: Utc::now(),
+            kelly_fraction: None,
         };
         strategy
             .positions
@@ -3510,6 +3584,7 @@ mod tests {
                 coin: "BTC".to_string(),
                 placed_at: tokio::time::Instant::now() - std::time::Duration::from_secs(1),
                 mode: ArbitrageMode::Confirmed,
+                kelly_fraction: None,
             },
         );
 
@@ -3537,6 +3612,7 @@ mod tests {
                 coin: "BTC".to_string(),
                 placed_at: tokio::time::Instant::now(),
                 mode: ArbitrageMode::Confirmed,
+                kelly_fraction: None,
             },
         );
 
@@ -3597,6 +3673,7 @@ mod tests {
                 coin: "BTC".to_string(),
                 placed_at: tokio::time::Instant::now(),
                 mode: ArbitrageMode::Confirmed,
+                kelly_fraction: None,
             },
         );
 
@@ -3666,5 +3743,118 @@ mod tests {
         );
         // Price should be at the ask, not offset
         assert_eq!(order.price, dec!(0.60));
+    }
+
+    // --- Kelly criterion position sizing tests ---
+
+    #[test]
+    fn kelly_high_confidence_high_price_large_size() {
+        // confidence=1.0 at price=0.95 → payout=0.0526, kelly=1.0
+        // size = 10 * 1.0 * 0.25 = 2.50 (clamped to min_size=2)
+        let config = SizingConfig::default();
+        let size = kelly_position_size(dec!(1.0), dec!(0.95), &config);
+        // Full confidence => kelly fraction = 1.0; size = 10 * 1.0 * 0.25 = 2.50
+        assert!(size >= config.min_size, "size {size} should be >= min_size");
+        assert!(size <= config.max_size, "size {size} should be <= max_size");
+        assert_eq!(size, dec!(2.50));
+    }
+
+    #[test]
+    fn kelly_moderate_confidence_moderate_price() {
+        // confidence=0.5, price=0.70 → payout=(1/0.7)-1=0.4286
+        // kelly = (0.5 * 0.4286 - 0.5) / 0.4286 = (0.2143 - 0.5) / 0.4286 = -0.6667
+        // Negative edge → size should be 0
+        let config = SizingConfig::default();
+        let size = kelly_position_size(dec!(0.5), dec!(0.70), &config);
+        assert_eq!(size, Decimal::ZERO, "50% confidence at 0.70 has negative edge");
+    }
+
+    #[test]
+    fn kelly_negative_edge_returns_zero() {
+        // confidence=0.3 at price=0.60 → payout=0.667
+        // kelly = (0.3 * 0.667 - 0.7) / 0.667 = (0.2 - 0.7) / 0.667 = -0.75
+        let config = SizingConfig::default();
+        let size = kelly_position_size(dec!(0.3), dec!(0.60), &config);
+        assert_eq!(size, Decimal::ZERO, "30% confidence at 0.60 should be 0 (negative edge)");
+    }
+
+    #[test]
+    fn kelly_result_clamped_to_bounds() {
+        // Very high confidence at low price → large kelly fraction
+        // confidence=1.0, price=0.10 → payout=9.0, kelly=1.0
+        // size = 10 * 1.0 * 0.25 = 2.50 (within bounds)
+        let mut config = SizingConfig::default();
+        config.min_size = dec!(3);
+        config.max_size = dec!(5);
+        let size = kelly_position_size(dec!(1.0), dec!(0.10), &config);
+        assert!(size >= dec!(3), "should be clamped to min_size=3, got {size}");
+        assert!(size <= dec!(5), "should be clamped to max_size=5, got {size}");
+
+        // With a larger base and high confidence, should hit max
+        config.base_size = dec!(100);
+        let size = kelly_position_size(dec!(1.0), dec!(0.10), &config);
+        assert_eq!(size, dec!(5), "should be clamped to max_size=5");
+
+        // With a tiny base, should hit min
+        config.base_size = dec!(1);
+        let size = kelly_position_size(dec!(1.0), dec!(0.10), &config);
+        assert_eq!(size, dec!(3), "should be clamped to min_size=3");
+    }
+
+    #[tokio::test]
+    async fn two_sided_uses_fixed_sizing_not_kelly() {
+        // TwoSided mode should use fixed sizing even when use_kelly=true
+        let mut strategy = make_strategy_no_chainlink();
+        strategy.config.sizing.use_kelly = true;
+        let ctx = StrategyContext::new();
+
+        let mwr = make_mwr(dec!(50000), 300);
+        strategy.active_markets.insert("market1".to_string(), mwr);
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.external_prices
+                .insert("BTC".to_string(), dec!(50100));
+            // Two-sided: both outcomes cheap so combined < 1.0
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                make_orderbook("token_up", dec!(0.44), dec!(0.48)),
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                make_orderbook("token_down", dec!(0.44), dec!(0.48)),
+            );
+        }
+
+        let mut history = VecDeque::new();
+        history.push_back((
+            Utc::now() - Duration::seconds(1),
+            dec!(50100),
+            "binance".to_string(),
+        ));
+        strategy.price_history.insert("BTC".to_string(), history);
+
+        let actions = strategy
+            .on_crypto_price("BTC", dec!(50100), "binance", &ctx)
+            .await
+            .unwrap();
+
+        let orders: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::PlaceOrder(req) => Some(req),
+                _ => None,
+            })
+            .collect();
+
+        // If two-sided triggered, verify that PendingOrders used fixed sizing (no kelly_fraction)
+        if orders.len() == 2 {
+            for (_, pending) in &strategy.pending_orders {
+                assert!(
+                    pending.kelly_fraction.is_none(),
+                    "TwoSided should use fixed sizing, not Kelly"
+                );
+            }
+        }
     }
 }

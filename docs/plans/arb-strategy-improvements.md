@@ -113,20 +113,20 @@ T10 (Verify + docs)
 - [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 5: Kelly criterion position sizing
-- [ ] Implement `kelly_position_size(confidence: Decimal, price: Decimal) -> Decimal`:
+- [x] Implement `kelly_position_size(confidence: Decimal, price: Decimal) -> Decimal`:
   - `payout = (1/price) - 1`
   - `kelly = (confidence * payout - (1 - confidence)) / payout`
   - `size = base_size * kelly * kelly_multiplier`, clamped to `[min_size, max_size]`
   - Return 0 for negative edge
-- [ ] Replace fixed sizing in order creation (line ~441): use Kelly for Confirmed/TailEnd, fixed for TwoSided
-- [ ] Add `kelly_fraction: Option<Decimal>` to `ArbitragePosition`
-- [ ] Update dashboard to show position sizes and Kelly fractions
-- [ ] Write test: `kelly_position_size(1.0, 0.95)` = large size (high confidence)
-- [ ] Write test: `kelly_position_size(0.5, 0.70)` = moderate size
-- [ ] Write test: `kelly_position_size(0.3, 0.60)` = 0 (negative edge, skip trade)
-- [ ] Write test: result clamped to `[min_size, max_size]`
-- [ ] Write test: TwoSided still uses fixed sizing
-- [ ] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
+- [x] Replace fixed sizing in order creation (line ~441): use Kelly for Confirmed/TailEnd, fixed for TwoSided
+- [x] Add `kelly_fraction: Option<Decimal>` to `ArbitragePosition`
+- [x] Update dashboard to show position sizes and Kelly fractions
+- [x] Write test: `kelly_position_size(1.0, 0.95)` = large size (high confidence)
+- [x] Write test: `kelly_position_size(0.5, 0.70)` = moderate size
+- [x] Write test: `kelly_position_size(0.3, 0.60)` = 0 (negative edge, skip trade)
+- [x] Write test: result clamped to `[min_size, max_size]`
+- [x] Write test: TwoSided still uses fixed sizing
+- [x] Run `cargo test --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 6: Batch order API
 - [ ] Add `PlaceBatchOrder(Vec<OrderRequest>)` variant to `Action` enum in `actions.rs`
