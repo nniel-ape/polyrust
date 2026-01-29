@@ -44,7 +44,11 @@ COPY src/ ./src/
 COPY crates/ ./crates/
 COPY examples/ ./examples/
 
-# ── Layer 7: Build application (fast, only your code recompiles) ─────────────
+# ── Layer 7: Invalidate cargo cache for workspace crates ────────────────────
+# Touch all lib.rs files to force recompilation (dummy artifacts are stale)
+RUN find crates -name "lib.rs" -exec touch {} \;
+
+# ── Layer 8: Build application (workspace crates recompile, deps cached) ─────
 RUN cargo build --release --locked --bin polyrust
 
 # Verify binary exists (fail fast if build config is wrong)
