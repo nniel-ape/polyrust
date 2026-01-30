@@ -210,7 +210,7 @@ async fn test_full_backtest_pipeline() {
 
     // Verify backtest ran
     assert_eq!(report.start_balance, dec!(1000.00));
-    assert!(report.total_trades >= 0); // Strategy may or may not trade depending on logic
+    // Note: total_trades is usize, always >= 0, so no comparison needed
     assert_eq!(
         report.duration,
         chrono::Duration::minutes(15) // full market duration

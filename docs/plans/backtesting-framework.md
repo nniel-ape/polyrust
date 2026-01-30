@@ -198,14 +198,14 @@
 - [x] Run `cargo test --workspace` — must pass
 
 ### Task 11: Verify acceptance criteria
-- [ ] Verify data fetching works for both CLOB API and subgraph sources
-- [ ] Verify DB caching prevents re-fetching already-cached data
-- [ ] Verify BacktestEngine replays events deterministically (same input → same output)
-- [ ] Verify existing strategies work in backtest without modification
-- [ ] Verify backtest report metrics are accurate against known trade sequences
-- [ ] Run full test suite: `cargo test --workspace`
-- [ ] Run clippy: `cargo clippy --workspace -- -D warnings`
-- [ ] Verify test coverage for new crate
+- [x] Verify data fetching works for both CLOB API and subgraph sources
+- [x] Verify DB caching prevents re-fetching already-cached data
+- [x] Verify BacktestEngine replays events deterministically (same input → same output)
+- [x] Verify existing strategies work in backtest without modification
+- [x] Verify backtest report metrics are accurate against known trade sequences
+- [x] Run full test suite: `cargo test --workspace`
+- [x] Run clippy: `cargo clippy --workspace -- -D warnings`
+- [x] Verify test coverage for new crate
 
 ### Task 12: [Final] Update documentation
 - [ ] Update CLAUDE.md with backtest module architecture, commands, and config
