@@ -31,8 +31,8 @@ services:
       # RPC endpoints (optional, comma-separated)
       # - POLY_RPC_URLS=https://polygon-rpc.com,https://rpc.ankr.com/polygon
 
-      # Logging
-      - RUST_LOG=${RUST_LOG:-info}
+      # Logging — polyrust=debug enables pipeline skip-reason diagnostics
+      - RUST_LOG=${RUST_LOG:-info,polyrust=debug}
     restart: unless-stopped
     networks:
       - polyrust-net

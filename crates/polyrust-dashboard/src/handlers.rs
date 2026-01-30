@@ -289,7 +289,7 @@ pub async fn strategy_view(
         AppError(format!("Strategy '{}' has no dashboard view", name))
     })?;
 
-    let content_html = provider.render_view().map_err(|e| AppError(e.to_string()))?;
+    let content_html = provider.render_view().await.map_err(|e| AppError(e.to_string()))?;
     // Drop the read lock before acquiring another for strategy_names
     drop(strategy);
     drop(views);

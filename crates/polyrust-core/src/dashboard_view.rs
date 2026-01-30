@@ -1,4 +1,6 @@
 use crate::error::Result;
+use std::future::Future;
+use std::pin::Pin;
 
 /// Trait for strategies that provide a custom dashboard view.
 ///
@@ -10,5 +12,5 @@ pub trait DashboardViewProvider: Send + Sync {
 
     /// Render the strategy's dashboard view as an HTML fragment.
     /// The fragment is inserted into the strategy_view template.
-    fn render_view(&self) -> Result<String>;
+    fn render_view(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>;
 }

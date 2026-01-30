@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -45,8 +47,10 @@ impl DashboardViewProvider for MockViewStrategy {
         "mock-view"
     }
 
-    fn render_view(&self) -> polyrust_core::error::Result<String> {
-        Ok("<div class=\"mock-content\">Mock strategy dashboard</div>".to_string())
+    fn render_view(&self) -> Pin<Box<dyn Future<Output = polyrust_core::error::Result<String>> + Send + '_>> {
+        Box::pin(async {
+            Ok("<div class=\"mock-content\">Mock strategy dashboard</div>".to_string())
+        })
     }
 }
 

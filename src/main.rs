@@ -6,7 +6,19 @@ use polyrust_dashboard::Dashboard;
 use polyrust_execution::{FillMode, LiveBackend, PaperBackend};
 use polyrust_market::{ClobFeed, DiscoveryConfig, DiscoveryFeed, MarketDataFeed, PriceFeed};
 use polyrust_store::Store;
-use polyrust_strategies::CryptoArbitrageStrategy;
+use polyrust_strategies::{
+    ArbitrageConfig, ConfirmedDashboard, ConfirmedStrategy, CrossCorrDashboard, CrossCorrStrategy,
+    CryptoArbBase, CryptoArbDashboard, TailEndDashboard, TailEndStrategy, TwoSidedDashboard,
+    TwoSidedStrategy,
+};
+use serde::Deserialize;
+
+/// Wrapper to extract arbitrage config from TOML file.
+#[derive(Debug, Deserialize, Default)]
+struct ConfigWithArbitrage {
+    #[serde(default)]
+    arbitrage: ArbitrageConfig,
+}
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -24,14 +36,22 @@ async fn main() -> anyhow::Result<()> {
     info!("polyrust starting");
 
     // Load configuration
-    let config = match Config::from_file("config.toml") {
-        Ok(c) => c,
+    let (config, arb_config) = match std::fs::read_to_string("config.toml") {
+        Ok(contents) => {
+            let config: Config = toml::from_str(&contents)
+                .map_err(|e| info!("failed to parse config: {e}"))
+                .unwrap_or_default();
+            let arb_wrapper: ConfigWithArbitrage = toml::from_str(&contents)
+                .map_err(|e| info!("failed to parse arbitrage config: {e}"))
+                .unwrap_or_default();
+            (config, arb_wrapper.arbitrage)
+        }
         Err(e) => {
             info!("no config file loaded ({e}), using defaults");
-            Config::default()
+            (Config::default(), ArbitrageConfig::default())
         }
-    }
-    .with_env_overrides();
+    };
+    let config = config.with_env_overrides();
 
     // Initialize persistence store
     let store = Store::new(&config.store.db_path).await?;
@@ -55,16 +75,77 @@ async fn main() -> anyhow::Result<()> {
     // Create feed command channel for engine → ClobFeed communication
     let (feed_cmd_tx, feed_cmd_rx) = feed_command_channel();
 
-    // Build engine with crypto arbitrage strategy
-    let strategy =
-        CryptoArbitrageStrategy::new(Default::default(), config.polymarket.rpc_urls.clone());
-    let mut engine = Engine::builder()
+    // Create shared base for all crypto arbitrage strategies
+    info!(
+        tailend_enabled = arb_config.tailend.enabled,
+        twosided_enabled = arb_config.twosided.enabled,
+        confirmed_enabled = arb_config.confirmed.enabled,
+        crosscorr_enabled = arb_config.correlation.enabled,
+        "Loaded arbitrage config"
+    );
+    let base = Arc::new(CryptoArbBase::new(
+        arb_config.clone(),
+        config.polymarket.rpc_urls.clone(),
+    ));
+
+    // Build engine with conditionally registered strategies based on config
+    let mut builder = Engine::builder()
         .config(config.clone())
-        .strategy(strategy)
         .execution(execution_backend)
-        .feed_commands(feed_cmd_tx)
-        .build()
-        .await?;
+        .feed_commands(feed_cmd_tx);
+
+    // Always register the overview dashboard (shows what's enabled/disabled)
+    let overview_dashboard = CryptoArbDashboard::new(Arc::clone(&base));
+    builder = builder.strategy(DashboardStrategyWrapper::new(
+        "crypto-arb-overview",
+        Box::new(overview_dashboard),
+    ));
+
+    // Conditionally register trading strategies based on config
+    if arb_config.tailend.enabled {
+        info!("TailEnd mode enabled");
+        builder = builder.strategy(TailEndStrategy::new(Arc::clone(&base)));
+    }
+
+    if arb_config.twosided.enabled {
+        info!("TwoSided mode enabled");
+        builder = builder.strategy(TwoSidedStrategy::new(Arc::clone(&base)));
+    }
+
+    if arb_config.confirmed.enabled {
+        info!("Confirmed mode enabled");
+        builder = builder.strategy(ConfirmedStrategy::new(Arc::clone(&base)));
+    }
+
+    if arb_config.correlation.enabled {
+        info!("CrossCorr mode enabled");
+        builder = builder.strategy(CrossCorrStrategy::new(Arc::clone(&base)));
+    }
+
+    // Always register per-mode dashboards so overview links don't 404.
+    // Each dashboard already renders its enabled/disabled status.
+    builder = builder.strategy(DashboardStrategyWrapper::new(
+        "crypto-arb-tailend-dashboard",
+        Box::new(TailEndDashboard::new(Arc::clone(&base))),
+    ));
+    builder = builder.strategy(DashboardStrategyWrapper::new(
+        "crypto-arb-twosided-dashboard",
+        Box::new(TwoSidedDashboard::new(Arc::clone(&base))),
+    ));
+    builder = builder.strategy(DashboardStrategyWrapper::new(
+        "crypto-arb-confirmed-dashboard",
+        Box::new(ConfirmedDashboard::new(Arc::clone(&base))),
+    ));
+    builder = builder.strategy(DashboardStrategyWrapper::new(
+        "crypto-arb-crosscorr-dashboard",
+        Box::new(CrossCorrDashboard::new(Arc::clone(&base))),
+    ));
+
+    if !arb_config.any_mode_enabled() {
+        info!("No trading modes enabled — running in dashboard-only mode");
+    }
+
+    let mut engine = builder.build().await?;
 
     // Start market data feeds
     let event_bus = engine.event_bus().clone();
@@ -175,4 +256,45 @@ async fn main() -> anyhow::Result<()> {
 
     info!("polyrust shutdown complete");
     Ok(())
+}
+
+/// Wrapper strategy that provides a dashboard view without processing events.
+/// Used to register dashboard view providers that aren't tied to a single strategy.
+struct DashboardStrategyWrapper {
+    name: &'static str,
+    provider: Box<dyn DashboardViewProvider + Send + Sync>,
+}
+
+impl DashboardStrategyWrapper {
+    fn new(name: &'static str, provider: Box<dyn DashboardViewProvider + Send + Sync>) -> Self {
+        Self { name, provider }
+    }
+}
+
+#[async_trait::async_trait]
+impl Strategy for DashboardStrategyWrapper {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn description(&self) -> &str {
+        "Dashboard provider for crypto arbitrage strategies"
+    }
+
+    async fn on_start(&mut self, _ctx: &StrategyContext) -> Result<()> {
+        Ok(())
+    }
+
+    async fn on_event(&mut self, _event: &Event, _ctx: &StrategyContext) -> Result<Vec<Action>> {
+        // Dashboard wrapper doesn't process events
+        Ok(vec![])
+    }
+
+    async fn on_stop(&mut self, _ctx: &StrategyContext) -> Result<Vec<Action>> {
+        Ok(vec![])
+    }
+
+    fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> {
+        Some(self.provider.as_ref())
+    }
 }

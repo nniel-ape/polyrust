@@ -55,18 +55,18 @@ enabled = true           # Set false + credentials for live trading
 initial_balance = 10000  # Starting USDC balance
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CRYPTO ARBITRAGE STRATEGY (Reference)
+# CRYPTO ARBITRAGE STRATEGY
 # ═══════════════════════════════════════════════════════════════════════════════
-# The strategy currently uses code defaults (not loaded from TOML).
-# These sections document available options for future externalization.
-#
 # Exploits mispricing in 15-minute Up/Down crypto markets with four modes:
 #   1. Tail-End    — <2 min remaining, market >= 90% (highest confidence)
 #   2. Two-Sided   — both outcomes < $1 combined (guaranteed profit)
 #   3. Confirmed   — dynamic confidence model (standard directional)
 #   4. Cross-Correlated — follower coin triggered by leader spike
+#
+# IMPORTANT: All trading modes are DISABLED by default. Enable each mode
+# explicitly with `enabled = true` in its config section.
 
-# [strategy.crypto_arb]
+# [arbitrage]
 # coins = ["BTC", "ETH", "SOL", "XRP"]  # Coins to track
 # max_positions = 5                      # Maximum concurrent positions
 # min_profit_margin = 0.03               # 3% net profit for Confirmed mode
@@ -75,11 +75,40 @@ initial_balance = 10000  # Starting USDC balance
 # use_chainlink = true                   # On-chain Chainlink vs RTDS boundary snapshots
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TailEnd Mode
+# ─────────────────────────────────────────────────────────────────────────────
+# High-confidence trades near market expiration
+
+# [arbitrage.tailend]
+# enabled = true                 # Enable TailEnd mode
+# time_threshold_secs = 120      # Max time remaining to enter (default 120s)
+# ask_threshold = 0.90           # Minimum ask price to enter (default 0.90)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TwoSided Mode
+# ─────────────────────────────────────────────────────────────────────────────
+# Risk-free arbitrage when both outcomes are mispriced
+
+# [arbitrage.twosided]
+# enabled = true                 # Enable TwoSided mode
+# combined_threshold = 0.98      # Max combined ask price (default 0.98)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Confirmed Mode
+# ─────────────────────────────────────────────────────────────────────────────
+# Directional trades with dynamic confidence model
+
+# [arbitrage.confirmed]
+# enabled = true                 # Enable Confirmed mode
+# min_confidence = 0.50          # Minimum confidence to enter (default 0.50)
+# min_margin = 0.02              # Minimum net profit margin (default 2%)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Fee Model
 # ─────────────────────────────────────────────────────────────────────────────
 # Polymarket's dynamic taker fee: ~3.15% at 50/50, ~0% near 0/1
 
-# [strategy.crypto_arb.fee]
+# [arbitrage.fee]
 # taker_fee_rate = 0.0315  # 3.15% at 50/50 probability
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,7 +116,7 @@ initial_balance = 10000  # Starting USDC balance
 # ─────────────────────────────────────────────────────────────────────────────
 # Pre-filter small price moves; trigger evaluation only on significant changes
 
-# [strategy.crypto_arb.spike]
+# [arbitrage.spike]
 # threshold_pct = 0.005   # 0.5% minimum price change to count as spike
 # window_secs = 10        # Lookback window for spike detection
 # history_size = 50       # Maximum spike events to retain
@@ -97,7 +126,7 @@ initial_balance = 10000  # Starting USDC balance
 # ─────────────────────────────────────────────────────────────────────────────
 # GTC maker orders (0% fee) for most trades, FOK taker only for tail-end urgency
 
-# [strategy.crypto_arb.order]
+# [arbitrage.order]
 # hybrid_mode = true      # Enable GTC maker + FOK taker strategy
 # limit_offset = 0.01     # 1¢ below best ask for GTC limit orders
 # max_age_secs = 30       # Cancel stale GTC orders after this duration
@@ -107,7 +136,7 @@ initial_balance = 10000  # Starting USDC balance
 # ─────────────────────────────────────────────────────────────────────────────
 # Scale position size with confidence and edge; clamp to [min_size, max_size]
 
-# [strategy.crypto_arb.sizing]
+# [arbitrage.sizing]
 # base_size = 10          # Base USDC position size
 # kelly_multiplier = 0.25 # 25% fractional Kelly (conservative)
 # min_size = 2            # Minimum position size
@@ -119,7 +148,7 @@ initial_balance = 10000  # Starting USDC balance
 # ─────────────────────────────────────────────────────────────────────────────
 # Dual-trigger: crypto reversal AND market drop required to exit
 
-# [strategy.crypto_arb.stop_loss]
+# [arbitrage.stop_loss]
 # reversal_pct = 0.005        # 0.5% crypto price reversal threshold
 # min_drop = 0.05             # $0.05 minimum market price drop
 # trailing_enabled = true     # Enable trailing stop-loss
@@ -127,14 +156,15 @@ initial_balance = 10000  # Starting USDC balance
 # time_decay = true           # Tighten stops near expiration
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cross-Market Correlation
+# Cross-Market Correlation (CrossCorr) Mode
 # ─────────────────────────────────────────────────────────────────────────────
 # Leader coin spikes (BTC) generate signals for follower coins (ETH, SOL)
 # Confidence discounted by 0.7x for follower signals
 
-# [strategy.crypto_arb.correlation]
-# enabled = false             # Disabled by default (experimental)
+# [arbitrage.correlation]
+# enabled = false             # Enable CrossCorr mode (experimental, requires more capital)
 # min_spike_pct = 0.01        # 1% leader spike threshold
+# discount_factor = 0.7       # Confidence discount for follower signals
 # pairs = [
 #     ["BTC", ["ETH", "SOL"]],
 #     ["ETH", ["SOL"]]
@@ -145,7 +175,7 @@ initial_balance = 10000  # Starting USDC balance
 # ─────────────────────────────────────────────────────────────────────────────
 # Track win rate / P&L per mode; optionally auto-disable underperformers
 
-# [strategy.crypto_arb.performance]
+# [arbitrage.performance]
 # min_trades = 20         # Minimum trades before auto-disable can trigger
 # min_win_rate = 0.40     # 40% win rate threshold
 # window_size = 50        # Rolling window for recent P&L tracking

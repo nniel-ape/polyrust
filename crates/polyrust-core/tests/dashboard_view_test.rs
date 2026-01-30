@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use async_trait::async_trait;
 use polyrust_core::context::StrategyContext;
 use polyrust_core::dashboard_view::DashboardViewProvider;
@@ -41,8 +44,8 @@ impl DashboardViewProvider for ViewStrategy {
         "my-view"
     }
 
-    fn render_view(&self) -> Result<String> {
-        Ok("<div>Hello from ViewStrategy</div>".to_string())
+    fn render_view(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+        Box::pin(async { Ok("<div>Hello from ViewStrategy</div>".to_string()) })
     }
 }
 
@@ -85,11 +88,11 @@ fn strategy_with_view_returns_some() {
     assert_eq!(provider.view_name(), "my-view");
 }
 
-#[test]
-fn render_view_returns_html_fragment() {
+#[tokio::test]
+async fn render_view_returns_html_fragment() {
     let strategy = ViewStrategy;
     let provider = strategy.dashboard_view().unwrap();
-    let html = provider.render_view().unwrap();
+    let html = provider.render_view().await.unwrap();
     assert!(html.contains("<div>"));
     assert!(html.contains("Hello from ViewStrategy"));
 }
@@ -137,8 +140,8 @@ impl DashboardViewProvider for AnotherViewStrategy {
     fn view_name(&self) -> &str {
         "another-view"
     }
-    fn render_view(&self) -> Result<String> {
-        Ok("<div>Another view</div>".to_string())
+    fn render_view(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+        Box::pin(async { Ok("<div>Another view</div>".to_string()) })
     }
 }
 
@@ -224,7 +227,7 @@ async fn strategy_views_render_through_context() {
     let strategy_arc = views.get("my-view").unwrap();
     let strategy = strategy_arc.read().await;
     let provider = strategy.dashboard_view().unwrap();
-    let html = provider.render_view().unwrap();
+    let html = provider.render_view().await.unwrap();
     assert!(html.contains("Hello from ViewStrategy"));
 }
 

@@ -111,11 +111,11 @@ impl EngineBuilder {
                 if let Some(provider) = s.dashboard_view() {
                     let view_name = provider.view_name().to_string();
                     if views.contains_key(&view_name) {
-                        tracing::warn!(
-                            view_name = %view_name,
-                            strategy = %s.name(),
-                            "Duplicate dashboard view name — overwriting previous registration"
-                        );
+                        return Err(PolyError::Config(format!(
+                            "Dashboard view collision: '{}' already registered by another strategy (current: {})",
+                            view_name,
+                            s.name()
+                        )));
                     }
                     views.insert(view_name, Arc::clone(strategy));
                 }
@@ -209,8 +209,16 @@ impl Engine {
                         }
                         Event::MarketData(MarketDataEvent::MarketExpired(id)) => {
                             let mut md = context.market_data.write().await;
-                            md.markets.remove(id);
-                            debug!(market_id = %id, "Removed expired market from context");
+                            if let Some(info) = md.markets.remove(id) {
+                                md.orderbooks.remove(&info.token_ids.outcome_a);
+                                md.orderbooks.remove(&info.token_ids.outcome_b);
+                                debug!(market_id = %id, "Removed expired market and orderbooks from context");
+                            }
+                        }
+                        Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot)) => {
+                            let mut md = context.market_data.write().await;
+                            md.orderbooks
+                                .insert(snapshot.token_id.clone(), snapshot.clone());
                         }
                         _ => {}
                     }

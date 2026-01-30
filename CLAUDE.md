@@ -51,7 +51,7 @@ src/main.rs → wires all crates into a single binary
 - **`Strategy`** — `on_event(&mut self, event: &Event, ctx: &StrategyContext) -> Result<Vec<Action>>` — receives events, returns actions (place/cancel orders, emit signals)
 - **`ExecutionBackend`** — abstracts order execution: `LiveBackend` (real CLOB API) vs `PaperBackend` (simulated fills)
 - **`MarketDataFeed`** — market data producers: `ClobFeed` (WebSocket orderbooks) and `PriceFeed` (RTDS crypto prices)
-- **`DashboardViewProvider`** — `view_name(&self) -> &str` + `render_view(&self) -> Result<String>` — optional trait for strategies to expose custom dashboard pages at `/strategy/<name>`
+- **`DashboardViewProvider`** — `view_name(&self) -> &str` + `render_view(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>` — optional async trait for strategies to expose custom dashboard pages at `/strategy/<name>`. Dashboard view names must be unique; the engine returns `PolyError::Config` on collision.
 
 ### Event Flow
 
@@ -68,15 +68,15 @@ src/main.rs → wires all crates into a single binary
 
 `StrategyContext` provides thread-safe access via `Arc<RwLock<...>>`:
 - `PositionState` — open positions and orders
-- `MarketDataState` — orderbooks, market info, external prices
+- `MarketDataState` — orderbooks (auto-populated by engine on OrderbookUpdate events), market info, external prices
 - `BalanceState` — available and locked USDC
 - `strategy_views` — registered `DashboardViewProvider` implementations (keyed by strategy name)
 
 ### Strategy Dashboard Views
 
-Strategies can expose custom dashboard pages via the `DashboardViewProvider` trait (`crates/polyrust-core/src/dashboard_view.rs`). Each strategy optionally returns a view provider from `dashboard_view()`, which renders an HTML fragment for `/strategy/:name`. The dashboard auto-generates nav links for all registered strategy views.
+Strategies can expose custom dashboard pages via the `DashboardViewProvider` trait (`crates/polyrust-core/src/dashboard_view.rs`). Each strategy optionally returns a view provider from `dashboard_view()`, which asynchronously renders an HTML fragment for `/strategy/:name`. The dashboard auto-generates nav links for all registered strategy views.
 
-Real-time updates use SSE: strategies emit `"dashboard-update"` signals, the SSE handler re-renders the view, and HTMX swaps the content in the browser. See the crypto arbitrage strategy for a reference implementation.
+Real-time updates use SSE: strategies emit `"dashboard-update"` signals, the SSE handler re-renders the view, and HTMX swaps the content in the browser. For dashboard-only views (no event processing), use `DashboardStrategyWrapper` in `src/main.rs` to register a view provider as a no-op strategy. See the crypto arbitrage strategy's per-mode dashboards for a reference implementation.
 
 ## Domain Concepts
 
@@ -97,6 +97,8 @@ Copy `config.example.toml` → `config.toml` and customize. Environment variable
 Paper mode: `[paper] enabled = true` or `POLY_PAPER_TRADING=true`
 Docker deployment: Set `POLY_DASHBOARD_HOST=0.0.0.0` in `docker-compose.yml` to allow access from host machine.
 
+Strategy configuration: Add `[arbitrage]` section (and nested `[arbitrage.tailend]`, `[arbitrage.twosided]`, `[arbitrage.confirmed]`, `[arbitrage.correlation]`) to `config.toml`. All trading modes are disabled by default and must be explicitly enabled with `enabled = true`. See `config.example.toml` for the complete reference.
+
 ## Adding a New Strategy
 
 1. Add `polyrust-core` as a dependency in your crate
@@ -105,6 +107,8 @@ Docker deployment: Set `POLY_DASHBOARD_HOST=0.0.0.0` in `docker-compose.yml` to 
 4. (Optional) Implement `DashboardViewProvider` for a custom dashboard page
 
 ```rust
+use std::pin::Pin;
+use std::future::Future;
 use polyrust_core::prelude::*;
 
 struct MyStrategy;
@@ -132,8 +136,8 @@ impl Strategy for MyStrategy {
 
 impl DashboardViewProvider for MyStrategy {
     fn view_name(&self) -> &str { "my-strategy" }
-    fn render_view(&self) -> Result<String> {
-        Ok("<div>Strategy-specific HTML here</div>".to_string())
+    fn render_view(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+        Box::pin(async { Ok("<div>Strategy-specific HTML here</div>".to_string()) })
     }
 }
 ```
@@ -176,7 +180,14 @@ Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-min
 
 ### Strategy Configuration
 
-The crypto arbitrage strategy uses a modular configuration structure with sub-configs for different feature groups:
+The crypto arbitrage strategy is configured via the `[arbitrage]` section in `config.toml`. It uses a modular directory structure (`crates/polyrust-strategies/src/crypto_arb/`) with per-mode strategy structs sharing state through `Arc<CryptoArbBase>`:
+
+- `TailEndStrategy` — high-confidence trades near expiration
+- `TwoSidedStrategy` — risk-free arbitrage
+- `ConfirmedStrategy` — directional trades with confidence model
+- `CrossCorrStrategy` — correlation-based signals
+
+Each mode is conditionally registered with the engine based on its `enabled` flag.
 
 ```rust
 pub struct ArbitrageConfig {
@@ -188,19 +199,28 @@ pub struct ArbitrageConfig {
     pub scan_interval_secs: u64,
     pub use_chainlink: bool,
 
-    // Feature sub-configs (all with #[serde(default)])
+    // Per-mode configs (each mode disabled by default)
+    pub tailend: TailEndConfig,       // TailEnd mode (enabled, time_threshold_secs, ask_threshold)
+    pub twosided: TwoSidedConfig,     // TwoSided mode (enabled, combined_threshold)
+    pub confirmed: ConfirmedConfig,   // Confirmed mode (enabled, min_confidence, min_margin)
+    pub correlation: CorrelationConfig, // Cross-market correlation pairs
+
+    // Shared configs (all with #[serde(default)])
     pub fee: FeeConfig,           // Taker fee model (default 3.15% at 50/50)
     pub spike: SpikeConfig,       // Spike detection (threshold, window, history)
     pub order: OrderConfig,       // Hybrid GTC/FOK orders (maker vs taker)
     pub sizing: SizingConfig,     // Kelly criterion position sizing
     pub stop_loss: StopLossConfig, // Dual-trigger + trailing stops
-    pub correlation: CorrelationConfig, // Cross-market correlation pairs
     pub performance: PerformanceConfig, // Performance tracking & auto-disable
 }
 ```
 
 #### Sub-Config Breakdown
 
+- **TailEndConfig**: Per-mode toggle (`enabled`), `time_threshold_secs` (120), `ask_threshold` (0.90)
+- **TwoSidedConfig**: Per-mode toggle (`enabled`), `combined_threshold` (0.98)
+- **ConfirmedConfig**: Per-mode toggle (`enabled`), `min_confidence` (0.50), `min_margin` (0.02)
+- **CorrelationConfig**: Per-mode toggle (`enabled`), cross-market pairs, `discount_factor` (0.7)
 - **FeeConfig**: Taker fee rate for net profit margin calculation
 - **SpikeConfig**: Price spike detection (threshold_pct, window_secs, history_size)
 - **OrderConfig**: Hybrid order mode (hybrid_mode, limit_offset, max_age_secs)
@@ -214,9 +234,6 @@ pub struct ArbitrageConfig {
   - min_drop: minimum market price drop
   - trailing_enabled, trailing_distance: lock in profits as bid rises
   - time_decay: tighten stops near expiration
-- **CorrelationConfig**: Cross-market correlation (leader → follower coin pairs)
-  - BTC spike triggers ETH/SOL signals
-  - Confidence discounted by 0.7x for followers
 - **PerformanceConfig**: Per-mode tracking and auto-disable
   - Tracks win rate, P&L per mode (TailEnd, TwoSided, Confirmed, CrossCorrelated)
   - Auto-disable modes with low win rate after min_trades
