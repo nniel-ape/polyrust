@@ -178,6 +178,31 @@ impl Default for SizingConfig {
     }
 }
 
+impl SizingConfig {
+    /// Validate sizing configuration values.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.base_size <= Decimal::ZERO {
+            return Err(format!("base_size must be positive, got {}", self.base_size));
+        }
+        if self.min_size <= Decimal::ZERO {
+            return Err(format!("min_size must be positive, got {}", self.min_size));
+        }
+        if self.max_size < self.min_size {
+            return Err(format!(
+                "max_size ({}) must be >= min_size ({})",
+                self.max_size, self.min_size
+            ));
+        }
+        if self.kelly_multiplier <= Decimal::ZERO {
+            return Err(format!(
+                "kelly_multiplier must be positive, got {}",
+                self.kelly_multiplier
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Stop-loss configuration (dual-trigger + trailing).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

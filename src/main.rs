@@ -75,6 +75,23 @@ async fn main() -> anyhow::Result<()> {
     // Create feed command channel for engine → ClobFeed communication
     let (feed_cmd_tx, feed_cmd_rx) = feed_command_channel();
 
+    // Validate sizing configuration
+    if let Err(e) = arb_config.sizing.validate() {
+        return Err(anyhow::anyhow!("Invalid sizing config: {}", e));
+    }
+
+    // Validate configured coins are supported
+    const SUPPORTED_COINS: &[&str] = &["BTC", "ETH", "SOL", "XRP"];
+    for coin in &arb_config.coins {
+        if !SUPPORTED_COINS.contains(&coin.as_str()) {
+            warn!(
+                coin = %coin,
+                supported = ?SUPPORTED_COINS,
+                "Configured coin is not supported for market discovery - will be skipped"
+            );
+        }
+    }
+
     // Create shared base for all crypto arbitrage strategies
     info!(
         tailend_enabled = arb_config.tailend.enabled,

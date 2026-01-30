@@ -707,6 +707,7 @@ impl CryptoArbBase {
             ("BITCOIN", "BTC"),
             ("ETHEREUM", "ETH"),
             ("SOLANA", "SOL"),
+            ("RIPPLE", "XRP"),
         ];
 
         let upper = question.to_uppercase();
