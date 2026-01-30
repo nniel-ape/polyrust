@@ -246,6 +246,9 @@ mod tests {
         }
         let mut config = BacktestConfig::default();
         config.initial_balance = dec!(2000);
+        // Set valid date range (default has start_date = end_date = now)
+        config.start_date = Utc::now() - chrono::Duration::days(7);
+        config.end_date = Utc::now();
         config = config.with_env_overrides().unwrap();
         assert_eq!(config.strategy_name, "partial-env");
         assert_eq!(config.initial_balance, dec!(2000)); // Not overridden
