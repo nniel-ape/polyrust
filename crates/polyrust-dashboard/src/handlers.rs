@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
+use askama::filters::{escape, Html as HtmlEscaper};
 use askama::Template;
 use axum::extract::{Path, State};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -20,12 +21,11 @@ pub struct AppError(String);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let escaped = self
-            .0
-            .replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;");
+        // Use askama's battle-tested HTML escaping function
+        let escaped = match escape(&self.0, HtmlEscaper) {
+            Ok(s) => s.to_string(),
+            Err(_) => "Error message could not be displayed".to_string(),
+        };
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Html(format!("<h1>Error</h1><pre>{}</pre>", escaped)),

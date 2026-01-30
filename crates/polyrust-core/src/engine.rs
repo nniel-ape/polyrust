@@ -375,6 +375,8 @@ async fn execute_action(
                     if let Ok(balance) = execution.get_balance().await {
                         let mut bal = context.balance.write().await;
                         bal.available_usdc = balance;
+                    } else {
+                        warn!("Failed to sync balance after order placement - shared context may have stale data");
                     }
                     if result.success {
                         event_bus.publish(Event::OrderUpdate(OrderEvent::Placed(result.clone())));
@@ -397,9 +399,11 @@ async fn execute_action(
                                     strategy_name: strategy_name.to_string(),
                                 }));
                             } else {
-                                warn!(
+                                error!(
+                                    order_id = %order_id,
                                     token_id = %result.token_id,
-                                    "Cannot publish Filled event: market_id not found for token"
+                                    strategy = %strategy_name,
+                                    "CRITICAL: Cannot publish Filled event - market_id not found. Trade will not be persisted!"
                                 );
                             }
                         }
@@ -441,6 +445,8 @@ async fn execute_action(
                     if let Ok(balance) = execution.get_balance().await {
                         let mut bal = context.balance.write().await;
                         bal.available_usdc = balance;
+                    } else {
+                        warn!("Failed to sync balance after batch order placement - shared context may have stale data");
                     }
                     for result in results {
                         if result.success {
@@ -464,9 +470,11 @@ async fn execute_action(
                                         strategy_name: strategy_name.to_string(),
                                     }));
                                 } else {
-                                    warn!(
+                                    error!(
+                                        order_id = %order_id,
                                         token_id = %result.token_id,
-                                        "Cannot publish Filled event: market_id not found for token"
+                                        strategy = %strategy_name,
+                                        "CRITICAL: Cannot publish Filled event - market_id not found. Trade will not be persisted!"
                                     );
                                 }
                             }
@@ -507,6 +515,8 @@ async fn execute_action(
             if let Ok(balance) = execution.get_balance().await {
                 let mut bal = context.balance.write().await;
                 bal.available_usdc = balance;
+            } else {
+                warn!("Failed to sync balance after order cancellation - shared context may have stale data");
             }
             event_bus.publish(Event::OrderUpdate(OrderEvent::Cancelled(id.clone())));
         }
@@ -515,6 +525,8 @@ async fn execute_action(
             if let Ok(balance) = execution.get_balance().await {
                 let mut bal = context.balance.write().await;
                 bal.available_usdc = balance;
+            } else {
+                warn!("Failed to sync balance after cancel all orders - shared context may have stale data");
             }
         }
         Action::Log { level, message } => match level {

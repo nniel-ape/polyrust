@@ -78,7 +78,9 @@ pub fn kelly_position_size(confidence: Decimal, price: Decimal, config: &SizingC
         return Decimal::ZERO;
     }
     let payout = Decimal::ONE / price - Decimal::ONE;
-    if payout.is_zero() {
+    // Guard against very small payouts (prices very close to 1.0) that could cause
+    // numerical instability or extreme position sizes. Min threshold: 0.001 (0.1% payout)
+    if payout < Decimal::new(1, 3) {
         return Decimal::ZERO;
     }
     let kelly = (confidence * payout - (Decimal::ONE - confidence)) / payout;
