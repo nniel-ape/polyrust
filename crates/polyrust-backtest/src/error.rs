@@ -16,6 +16,12 @@ pub enum BacktestError {
 
     #[error("Strategy error: {0}")]
     Strategy(String),
+
+    #[error("Network error: {0}")]
+    Network(String),
+
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 pub type BacktestResult<T> = std::result::Result<T, BacktestError>;

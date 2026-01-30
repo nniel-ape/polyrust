@@ -73,18 +73,18 @@
 - [x] Run `cargo test --workspace` — must pass
 
 ### Task 3: CLOB API data fetcher (last ~7 days)
-- [ ] Create `data/clob_fetcher.rs` — HTTP client for CLOB REST API
-- [ ] Implement `fetch_price_history(token_id, start_ts, end_ts, fidelity_mins)` → `Vec<HistoricalPrice>`
+- [x] Create `data/clob_fetcher.rs` — HTTP client for CLOB REST API
+- [x] Implement `fetch_price_history(token_id, start_ts, end_ts, fidelity_mins)` → `Vec<HistoricalPrice>`
   - Endpoint: `GET https://clob.polymarket.com/prices-history?market={token_id}&startTs={}&endTs={}&fidelity={}`
   - Parse response: `{"history": [{"t": timestamp, "p": price}]}`
-- [ ] Implement `fetch_trades(market_id, limit, offset)` → `Vec<HistoricalTrade>`
+- [x] Implement `fetch_trades(market_id, limit, offset)` → `Vec<HistoricalTrade>`
   - Endpoint: `GET https://data-api.polymarket.com/trades?market={}&limit={}&offset={}`
   - Handle pagination (max 10k per request)
-- [ ] Add rate limiting / retry logic with exponential backoff
-- [ ] Implement cache-aware fetching: check `data_fetch_log` before fetching, skip already-cached ranges
-- [ ] Write tests with mock HTTP responses (use `wiremock` or similar)
-- [ ] Write `#[ignore]` live API test that fetches real price history for a known token
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Add rate limiting / retry logic with exponential backoff
+- [x] Implement cache-aware fetching: check `data_fetch_log` before fetching, skip already-cached ranges
+- [x] Write tests with mock HTTP responses (use `wiremock` or similar)
+- [x] Write `#[ignore]` live API test that fetches real price history for a known token
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 4: Gamma API market discovery fetcher
 - [ ] Create `data/gamma_fetcher.rs` — fetch market metadata for backtesting
