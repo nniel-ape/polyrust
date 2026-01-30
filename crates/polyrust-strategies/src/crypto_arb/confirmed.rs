@@ -47,9 +47,11 @@ impl ConfirmedStrategy {
             return None;
         }
 
-        // Skip if TailEnd should handle this (within tail-end window)
+        // Skip if TailEnd is enabled and should handle this (within tail-end window)
         // Confirmed takes over from the tail-end threshold onwards
-        if time_remaining < self.base.config.tailend.time_threshold_secs as i64 {
+        if self.base.config.tailend.enabled
+            && time_remaining < self.base.config.tailend.time_threshold_secs as i64
+        {
             return None;
         }
 

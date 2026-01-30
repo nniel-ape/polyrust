@@ -19,7 +19,7 @@ struct ConfigWithArbitrage {
     #[serde(default)]
     arbitrage: ArbitrageConfig,
 }
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -39,10 +39,10 @@ async fn main() -> anyhow::Result<()> {
     let (config, arb_config) = match std::fs::read_to_string("config.toml") {
         Ok(contents) => {
             let config: Config = toml::from_str(&contents)
-                .map_err(|e| info!("failed to parse config: {e}"))
+                .map_err(|e| warn!("failed to parse config: {e}"))
                 .unwrap_or_default();
             let arb_wrapper: ConfigWithArbitrage = toml::from_str(&contents)
-                .map_err(|e| info!("failed to parse arbitrage config: {e}"))
+                .map_err(|e| warn!("failed to parse arbitrage config: {e}"))
                 .unwrap_or_default();
             (config, arb_wrapper.arbitrage)
         }
