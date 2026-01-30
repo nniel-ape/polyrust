@@ -458,10 +458,9 @@ impl Strategy for TwoSidedStrategy {
 
             Event::OrderUpdate(OrderEvent::Cancelled(order_id)) => {
                 let mut limits = self.base.open_limit_orders.write().await;
-                if let Some(lo) = limits.get(order_id)
+                if let Some(lo) = limits.remove(order_id)
                     && lo.mode == ArbitrageMode::TwoSided
                 {
-                    let lo = limits.remove(order_id).unwrap();
                     info!(
                         order_id = %order_id,
                         market = %lo.market_id,

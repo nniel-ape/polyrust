@@ -718,18 +718,16 @@ impl CryptoArbBase {
             let mut found = false;
             for (idx, _) in upper.match_indices(coin.as_str()) {
                 let before_ok = idx == 0
-                    || !upper[..idx]
+                    || upper[..idx]
                         .chars()
                         .next_back()
-                        .unwrap()
-                        .is_ascii_alphanumeric();
+                        .is_none_or(|c| !c.is_ascii_alphanumeric());
                 let after_idx = idx + coin.len();
                 let after_ok = after_idx >= upper.len()
-                    || !upper[after_idx..]
+                    || upper[after_idx..]
                         .chars()
                         .next()
-                        .unwrap()
-                        .is_ascii_alphanumeric();
+                        .is_none_or(|c| !c.is_ascii_alphanumeric());
                 if before_ok && after_ok {
                     found = true;
                     break;

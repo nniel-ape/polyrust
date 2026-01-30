@@ -624,10 +624,9 @@ impl Strategy for CrossCorrStrategy {
 
             Event::OrderUpdate(OrderEvent::Cancelled(order_id)) => {
                 let mut limits = self.base.open_limit_orders.write().await;
-                if let Some(lo) = limits.get(order_id)
+                if let Some(lo) = limits.remove(order_id)
                     && matches!(lo.mode, ArbitrageMode::CrossCorrelated { .. })
                 {
-                    let lo = limits.remove(order_id).unwrap();
                     info!(
                         order_id = %order_id,
                         market = %lo.market_id,

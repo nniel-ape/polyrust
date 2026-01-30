@@ -356,6 +356,57 @@ impl Strategy for ConfirmedStrategy {
                         break;
                     }
 
+                    // Spike pre-filter: Only evaluate if price delta exceeds fee+margin threshold
+                    // This optimization skips evaluation when the price change is too small to be profitable
+                    let should_evaluate = {
+                        let markets = self.base.active_markets.read().await;
+                        if let Some(market) = markets.get(&market_id) {
+                            // Calculate mid price from orderbooks
+                            let md = ctx.market_data.read().await;
+                            let outcome_a_mid = md.orderbooks.get(&market.market.token_ids.outcome_a)
+                                .and_then(|ob| {
+                                    let best_ask = ob.best_ask()?;
+                                    let best_bid = ob.best_bid()?;
+                                    Some((best_ask + best_bid) / Decimal::new(2, 0))
+                                });
+                            let outcome_b_mid = md.orderbooks.get(&market.market.token_ids.outcome_b)
+                                .and_then(|ob| {
+                                    let best_ask = ob.best_ask()?;
+                                    let best_bid = ob.best_bid()?;
+                                    Some((best_ask + best_bid) / Decimal::new(2, 0))
+                                });
+
+                            // Use whichever outcome is predicted to win
+                            let predicted = market.predict_winner(*price);
+                            let mid_price = match predicted {
+                                Some(OutcomeSide::Up | OutcomeSide::Yes) => outcome_a_mid,
+                                Some(OutcomeSide::Down | OutcomeSide::No) => outcome_b_mid,
+                                None => None,
+                            };
+
+                            if let Some(mid) = mid_price {
+                                // Calculate minimum threshold: taker_fee + min_margin
+                                // (We use taker fee for conservative estimate even though we'll use GTC)
+                                let fee = taker_fee(mid, self.base.config.fee.taker_fee_rate);
+                                let min_margin = self.base.config.confirmed.min_margin;
+                                let threshold = fee + min_margin;
+
+                                // Calculate price delta from reference
+                                let delta = (mid - market.reference_price).abs() / market.reference_price;
+                                delta >= threshold
+                            } else {
+                                // Can't compute mid price, evaluate anyway
+                                true
+                            }
+                        } else {
+                            false
+                        }
+                    };
+
+                    if !should_evaluate {
+                        continue;
+                    }
+
                     if let Some(opp) = self.evaluate_opportunity(&market_id, *price, ctx).await {
                         if opp.buy_price.is_zero() {
                             warn!(market = %market_id, "skipping Confirmed opportunity with zero buy_price");
@@ -544,10 +595,9 @@ impl Strategy for ConfirmedStrategy {
 
             Event::OrderUpdate(OrderEvent::Cancelled(order_id)) => {
                 let mut limits = self.base.open_limit_orders.write().await;
-                if let Some(lo) = limits.get(order_id)
+                if let Some(lo) = limits.remove(order_id)
                     && lo.mode == ArbitrageMode::Confirmed
                 {
-                    let lo = limits.remove(order_id).unwrap();
                     info!(
                         order_id = %order_id,
                         market = %lo.market_id,
