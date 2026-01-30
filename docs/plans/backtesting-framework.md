@@ -99,17 +99,17 @@
 - [x] Run `cargo test --workspace` — must pass
 
 ### Task 5: Goldsky subgraph fetcher (unlimited history)
-- [ ] Create `data/subgraph_fetcher.rs` — GraphQL client for Goldsky subgraphs
-- [ ] Define GraphQL query structures for activity subgraph:
+- [x] Create `data/subgraph_fetcher.rs` — GraphQL client for Goldsky subgraphs
+- [x] Define GraphQL query structures for activity subgraph:
   - Endpoint: `https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/activity-subgraph/0.0.4/gn`
   - Query trade events by token/market/time range with pagination (`first`, `skip`, `where` filters)
-- [ ] Implement `fetch_subgraph_trades(token_id, start_ts, end_ts)` → `Vec<HistoricalTrade>`
+- [x] Implement `fetch_subgraph_trades(token_id, start_ts, end_ts)` → `Vec<HistoricalTrade>`
   - Handle GraphQL pagination (subgraphs limit to 1000 results per query, use `skip` or `id_gt` cursor)
-- [ ] Implement `fetch_subgraph_positions(market_id)` — optional, for volume/liquidity context
-- [ ] Add cache-aware logic: merge subgraph data with existing DB cache, avoid duplicates by tx_hash
-- [ ] Write tests with mock GraphQL responses
-- [ ] Write `#[ignore]` live test that fetches trades from activity subgraph
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Implement `fetch_subgraph_positions(market_id)` — optional, for volume/liquidity context
+- [x] Add cache-aware logic: merge subgraph data with existing DB cache, avoid duplicates by tx_hash
+- [x] Write tests with mock GraphQL responses
+- [x] Write `#[ignore]` live test that fetches trades from activity subgraph
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 6: Unified DataFetcher with smart caching
 - [ ] Create `data/fetcher.rs` — orchestrates CLOB, Gamma, and subgraph fetchers
