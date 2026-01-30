@@ -208,9 +208,9 @@
 - [x] Verify test coverage for new crate
 
 ### Task 12: [Final] Update documentation
-- [ ] Update CLAUDE.md with backtest module architecture, commands, and config
-- [ ] Update `config.example.toml` with complete `[backtest]` section and comments
-- [ ] Add backtest commands to Build & Test Commands section
+- [x] Update CLAUDE.md with backtest module architecture, commands, and config
+- [x] Update `config.example.toml` with complete `[backtest]` section and comments
+- [x] Add backtest commands to Build & Test Commands section
 
 ## Technical Details
 

@@ -21,6 +21,10 @@ cargo run                        # Run bot (paper mode by default)
 cargo run --example simple_strategy  # Run minimal example
 cargo build --release            # Optimized single binary → target/release/polyrust
 
+# Backtesting
+cargo run -- --backtest          # Run backtest with config.toml settings
+cargo run --example run_backtest # Minimal backtest example
+
 # Docker deployment
 docker-compose up -d             # Build and start bot in background
 docker-compose logs -f polyrust  # View real-time logs
@@ -41,7 +45,8 @@ polyrust-core (engine, event bus, traits, shared state)
   ├── polyrust-execution (live + paper backends)
   ├── polyrust-store (Turso persistence)
   ├── polyrust-strategies (reference: crypto arbitrage)
-  └── polyrust-dashboard (Axum + HTMX monitoring UI)
+  ├── polyrust-dashboard (Axum + HTMX monitoring UI)
+  └── polyrust-backtest (historical data + backtesting engine)
 
 src/main.rs → wires all crates into a single binary
 ```
@@ -98,6 +103,8 @@ Paper mode: `[paper] enabled = true` or `POLY_PAPER_TRADING=true`
 Docker deployment: Set `POLY_DASHBOARD_HOST=0.0.0.0` in `docker-compose.yml` to allow access from host machine.
 
 Strategy configuration: Add `[arbitrage]` section (and nested `[arbitrage.tailend]`, `[arbitrage.twosided]`, `[arbitrage.confirmed]`, `[arbitrage.correlation]`) to `config.toml`. All trading modes are disabled by default and must be explicitly enabled with `enabled = true`. See `config.example.toml` for the complete reference.
+
+Backtest configuration: Add `[backtest]` section to `config.toml` or use env overrides (`POLY_BACKTEST_START`, `POLY_BACKTEST_END`, etc.). Backtesting evaluates strategies on historical data without live/paper trading. See `config.example.toml` for the complete reference.
 
 ## Adding a New Strategy
 
@@ -256,11 +263,76 @@ pub struct ArbitrageConfig {
 - Data API: `https://data-api.polymarket.com` (positions, balances)
 - WebSocket: `wss://ws-subscriptions-clob.polymarket.com` (orderbook streams)
 
+## Backtesting Framework
+
+The backtesting system (`crates/polyrust-backtest`) allows strategy evaluation on historical data before live/paper trading. It consists of two subsystems:
+
+1. **Historical data pipeline** — fetch/cache market data from Polymarket APIs and Goldsky subgraphs
+2. **Backtest engine** — deterministic event replay through strategies with simulated fills
+
+### Architecture
+
+Two isolated databases:
+- **`backtest_data.db`** (persistent) — historical data cache (prices, trades, markets, fetch log). Reused across runs.
+- **`:memory:` Store** (ephemeral) — receives simulated trades using existing live schema. Disposed after run; report extracted first.
+
+### Data Sources
+
+- **CLOB API** (`/prices-history`, `/trades`) — last ~7 days, high-fidelity price timeseries
+- **Gamma API** (`/markets`) — market discovery and metadata
+- **Goldsky activity subgraph** — unlimited historical trade data via GraphQL
+
+Smart routing: recent data (last 7 days) uses CLOB API, older data uses Goldsky subgraph. DataFetcher checks `data_fetch_log` before fetching to avoid duplicate API calls.
+
+### Backtest Engine
+
+Synchronous deterministic event replay:
+1. Load cached historical data from `backtest_data.db` for configured market_ids and date range
+2. Sort all events chronologically (prices + trades)
+3. For each event: advance simulated clock, update market data, call `strategy.on_event()`, execute actions with immediate fills at current market price
+4. After replay: finalize results, generate `BacktestReport` with P&L metrics
+
+Fill mode: Immediate only (historical orderbook depth not available from Polymarket APIs). Fills simulate at historical trade price with configurable fee model.
+
+### Configuration
+
+Add `[backtest]` section to `config.toml`:
+
+```toml
+[backtest]
+strategy_name = "crypto-arb"            # Which strategy to backtest
+market_ids = []                         # Empty = auto-discover via Gamma API
+start_date = "2025-01-01T00:00:00Z"     # Backtest window start (RFC3339)
+end_date = "2025-01-31T23:59:59Z"       # Backtest window end (RFC3339)
+initial_balance = 1000.00               # Starting USDC balance
+data_fidelity_mins = 1                  # Price history granularity (minutes)
+data_db_path = "backtest_data.db"       # Persistent historical data cache
+
+[backtest.fees]
+taker_fee_rate = 0.0315  # 3.15% at 50/50 probability
+```
+
+Environment variable overrides: `POLY_BACKTEST_START`, `POLY_BACKTEST_END`, `POLY_BACKTEST_INITIAL_BALANCE`, `POLY_BACKTEST_DATA_DB_PATH`, etc.
+
+### Running Backtests
+
+```fish
+cargo run -- --backtest          # Use config.toml settings
+cargo run --example run_backtest # Minimal example
+```
+
+Backtest report includes: total P&L, realized/unrealized P&L, win rate, max drawdown, Sharpe ratio, trade count, start/end balance, duration.
+
+### Strategy Compatibility
+
+Any `impl Strategy` works in backtest without modification — strategies receive the same `Event` stream and return `Vec<Action>` as in live/paper mode. The engine handles the rest.
+
 ## Design Documents
 
 - `docs/brainstorms/polyrust-trading-framework.md` — goals, architecture, traits
 - `docs/plans/polyrust-framework-implementation.md` — detailed implementation guide (2400 lines)
 - `docs/plans/polyrust-checklist.md` — 14-milestone task checklist with validation commands
 - `docs/plans/strategy-dashboard-views.md` — strategy dashboard views design and implementation plan
+- `docs/plans/backtesting-framework.md` — backtesting framework design and implementation plan
 - `docs/research/polymarket-price-discovery.md` — how Polymarket discovers reference prices (CLOB midpoint, RTDS feeds, Chainlink/Binance oracles, confidence model)
 - `docs/research/crypto-arb-reference-price.md` — crypto arb strategy reference price mechanics for 15-min markets (capture flow, confidence model, three trading modes, fee impact)

@@ -186,6 +186,24 @@ initial_balance = 10000  # Starting USDC balance
 # ═══════════════════════════════════════════════════════════════════════════════
 # Historical data backtesting framework for strategy evaluation
 #
+# Backtesting evaluates strategies on historical market data without live/paper
+# trading. The framework fetches/caches data from Polymarket APIs and Goldsky
+# subgraphs, then replays events deterministically through your strategy.
+#
+# Two databases:
+#   1. backtest_data.db (persistent) — historical prices/trades cache, reused
+#   2. :memory: Store (ephemeral) — simulated trades/orders using existing schema
+#
+# Data sources (smart routing):
+#   - CLOB API (/prices-history, /trades) — last ~7 days, high-fidelity
+#   - Goldsky activity subgraph — unlimited history, lower-fidelity
+#   - Gamma API (/markets) — market discovery and metadata
+#
+# Fill mode: Immediate only (historical orderbook depth not available from
+# Polymarket APIs). Fills simulate at historical trade price with fee model.
+#
+# Run: cargo run -- --backtest
+#
 # Environment variable overrides:
 #   POLY_BACKTEST_STRATEGY         — strategy name to backtest
 #   POLY_BACKTEST_START            — start date (RFC3339 format)
@@ -196,14 +214,14 @@ initial_balance = 10000  # Starting USDC balance
 #   POLY_BACKTEST_MARKET_IDS       — comma-separated market IDs to backtest
 
 # [backtest]
-# strategy_name = "crypto-arb"            # Strategy to backtest
-# market_ids = []                         # Markets to include (empty = auto-discover)
-# start_date = "2025-01-01T00:00:00Z"     # Backtest window start (RFC3339)
-# end_date = "2025-01-31T23:59:59Z"       # Backtest window end (RFC3339)
-# initial_balance = 1000.00               # Starting USDC balance
-# data_fidelity_mins = 1                  # Price history granularity (default: 1 min)
-# data_db_path = "backtest_data.db"       # Persistent historical data cache
+# strategy_name = "crypto-arb"            # Strategy to backtest (must be registered)
+# market_ids = []                         # Markets to include (empty = auto-discover via Gamma API)
+# start_date = "2025-01-01T00:00:00Z"     # Backtest window start (RFC3339 format)
+# end_date = "2025-01-31T23:59:59Z"       # Backtest window end (RFC3339 format)
+# initial_balance = 1000.00               # Starting USDC balance for backtest
+# data_fidelity_mins = 1                  # Price history granularity in minutes (default: 1)
+# data_db_path = "backtest_data.db"       # Persistent historical data cache (reused across runs)
 
-# Fee model (reused from strategy config)
+# Fee model (matches strategy config for realistic P&L)
 # [backtest.fees]
-# taker_fee_rate = 0.0315  # 3.15% at 50/50 probability
+# taker_fee_rate = 0.0315  # 3.15% at 50/50 probability (Polymarket dynamic fee model)
