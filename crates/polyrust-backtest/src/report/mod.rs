@@ -80,7 +80,7 @@ impl BacktestReport {
 
         let total_pnl = realized_pnl + unrealized_pnl;
 
-        // Compute win/loss statistics
+        // Compute win/loss statistics (only for closing trades with realized P&L)
         let winning_trades = trades
             .iter()
             .filter(|t| t.realized_pnl.unwrap_or(Decimal::ZERO) > Decimal::ZERO)
@@ -92,9 +92,10 @@ impl BacktestReport {
             .count();
 
         let total_trades = trades.len();
+        let closing_trades = winning_trades + losing_trades;
 
-        let win_rate = if total_trades > 0 {
-            Decimal::from(winning_trades as u64) / Decimal::from(total_trades as u64)
+        let win_rate = if closing_trades > 0 {
+            Decimal::from(winning_trades as u64) / Decimal::from(closing_trades as u64)
         } else {
             Decimal::ZERO
         };
@@ -214,9 +215,15 @@ impl BacktestReport {
         s.push_str("--- Balance ---\n");
         s.push_str(&format!("Start balance: ${}\n", self.start_balance));
         s.push_str(&format!("End balance:   ${}\n", self.end_balance));
-        s.push_str(&format!("Total P&L:     ${} ({:.2}%)\n",
+
+        let pnl_pct = if self.start_balance > Decimal::ZERO {
+            format!("{:.2}%", self.total_pnl / self.start_balance * Decimal::from(100))
+        } else {
+            "N/A".to_string()
+        };
+        s.push_str(&format!("Total P&L:     ${} ({})\n",
             self.total_pnl,
-            self.total_pnl / self.start_balance * Decimal::from(100)));
+            pnl_pct));
         s.push_str(&format!("Realized P&L:  ${}\n", self.realized_pnl));
         s.push_str(&format!("Unrealized P&L: ${}\n", self.unrealized_pnl));
         s.push('\n');

@@ -340,7 +340,7 @@ async fn run_backtest() -> anyhow::Result<()> {
             let backtest_config = wrapper
                 .backtest
                 .ok_or_else(|| anyhow::anyhow!("Missing [backtest] section in config.toml"))?
-                .with_env_overrides();
+                .with_env_overrides()?;
             (backtest_config, wrapper.arbitrage)
         }
         Err(e) => {

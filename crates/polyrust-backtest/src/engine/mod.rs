@@ -159,6 +159,19 @@ impl BacktestEngine {
             }
         }
 
+        // Emit MarketExpired events for all markets at end_date
+        self.current_time = self.config.end_date;
+        let market_ids = self.config.market_ids.clone();
+        for market_id in market_ids {
+            let expiration_event = Event::MarketData(MarketDataEvent::MarketExpired(market_id));
+            let actions = self.strategy.on_event(&expiration_event, &self.ctx).await?;
+            for action in actions {
+                if let Some(trade) = self.execute_action(action).await? {
+                    trades.push(trade);
+                }
+            }
+        }
+
         // Call strategy.on_stop
         let final_actions = self.strategy.on_stop(&self.ctx).await?;
         for action in final_actions {
@@ -367,6 +380,9 @@ impl BacktestEngine {
                 balance.available_usdc -= total_cost;
 
                 // Update position entry tracking
+                // Include fees in the effective entry price for accurate P&L calculation
+                let effective_buy_price = current_price * (Decimal::ONE + self.config.fees.taker_fee_rate);
+
                 let (cur_size, cur_entry) = self
                     .position_entries
                     .get(&order.token_id)
@@ -374,9 +390,9 @@ impl BacktestEngine {
                     .unwrap_or((Decimal::ZERO, Decimal::ZERO));
                 let new_size = cur_size + order.size;
                 let new_entry = if new_size > Decimal::ZERO {
-                    (cur_entry * cur_size + current_price * order.size) / new_size
+                    (cur_entry * cur_size + effective_buy_price * order.size) / new_size
                 } else {
-                    current_price
+                    effective_buy_price
                 };
                 self.position_entries
                     .insert(order.token_id.clone(), (new_size, new_entry));

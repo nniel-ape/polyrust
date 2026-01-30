@@ -67,7 +67,7 @@ impl Default for BacktestConfig {
 
 impl BacktestConfig {
     /// Apply POLY_BACKTEST_* environment variable overrides.
-    pub fn with_env_overrides(mut self) -> Self {
+    pub fn with_env_overrides(mut self) -> Result<Self, polyrust_core::error::PolyError> {
         if let Ok(v) = std::env::var("POLY_BACKTEST_START")
             && let Ok(dt) = DateTime::parse_from_rfc3339(&v)
         {
@@ -101,7 +101,18 @@ impl BacktestConfig {
                 .filter(|s| !s.is_empty())
                 .collect();
         }
-        self
+
+        // Validate date range
+        if self.start_date >= self.end_date {
+            return Err(polyrust_core::error::PolyError::Config(
+                format!(
+                    "Invalid backtest date range: start_date ({}) must be before end_date ({})",
+                    self.start_date, self.end_date
+                )
+            ));
+        }
+
+        Ok(self)
     }
 }
 
@@ -187,7 +198,7 @@ mod tests {
             std::env::set_var("POLY_BACKTEST_END", "2025-02-01T00:00:00Z");
         }
 
-        let config = BacktestConfig::default().with_env_overrides();
+        let config = BacktestConfig::default().with_env_overrides().unwrap();
         assert_eq!(config.strategy_name, "env-strategy");
         assert_eq!(config.initial_balance, dec!(5000));
         assert_eq!(config.data_db_path, "env_backtest.db");
@@ -235,7 +246,7 @@ mod tests {
         }
         let mut config = BacktestConfig::default();
         config.initial_balance = dec!(2000);
-        config = config.with_env_overrides();
+        config = config.with_env_overrides().unwrap();
         assert_eq!(config.strategy_name, "partial-env");
         assert_eq!(config.initial_balance, dec!(2000)); // Not overridden
         unsafe {
