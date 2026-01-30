@@ -391,8 +391,8 @@ impl Strategy for ConfirmedStrategy {
                                 let min_margin = self.base.config.confirmed.min_margin;
                                 let threshold = fee + min_margin;
 
-                                // Calculate price delta from reference
-                                let delta = (mid - market.reference_price).abs() / market.reference_price;
+                                // Calculate crypto price change from reference
+                                let delta = (*price - market.reference_price).abs() / market.reference_price;
                                 delta >= threshold
                             } else {
                                 // Can't compute mid price, evaluate anyway

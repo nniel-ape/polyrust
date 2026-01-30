@@ -475,6 +475,11 @@ impl CryptoArbBase {
         }
 
         // 3. Current price (existing behavior)
+        info!(
+            coin = %coin,
+            price = %current_price,
+            "No boundary/historical reference found, using current price"
+        );
         (current_price, ReferenceQuality::Current)
     }
 

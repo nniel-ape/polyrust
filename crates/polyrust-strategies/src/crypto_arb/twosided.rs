@@ -334,6 +334,15 @@ impl Strategy for TwoSidedStrategy {
                             continue;
                         }
                         let share_count = self.base.config.sizing.base_size / combined_price;
+                        if share_count.is_zero() {
+                            warn!(
+                                market_id = %market_id,
+                                combined_price = %combined_price,
+                                base_size = %self.base.config.sizing.base_size,
+                                "Skipping TwoSided: share_count rounds to zero"
+                            );
+                            continue;
+                        }
 
                         // Determine order type and price
                         let (order_type, up_price, down_price) =
