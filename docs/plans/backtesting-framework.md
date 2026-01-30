@@ -87,16 +87,16 @@
 - [x] Run `cargo test --workspace` — must pass
 
 ### Task 4: Gamma API market discovery fetcher
-- [ ] Create `data/gamma_fetcher.rs` — fetch market metadata for backtesting
-- [ ] Implement `fetch_markets_by_slug(slug_pattern)` → `Vec<HistoricalMarket>`
+- [x] Create `data/gamma_fetcher.rs` — fetch market metadata for backtesting
+- [x] Implement `fetch_markets_by_slug(slug_pattern)` → `Vec<HistoricalMarket>`
   - Endpoint: `GET https://gamma-api.polymarket.com/markets?slug_contains={}`
   - Extract: market_id, slug, question, start_date, end_date, token_ids, neg_risk
-- [ ] Implement `fetch_market_by_id(condition_id)` → `Option<HistoricalMarket>`
-- [ ] Implement `fetch_expired_markets(coin, date_range)` — discover historical 15-min crypto markets
-- [ ] Cache results in `historical_markets` table
-- [ ] Write tests with mock HTTP responses
-- [ ] Write `#[ignore]` live test that discovers BTC 15-min markets
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Implement `fetch_market_by_id(condition_id)` → `Option<HistoricalMarket>`
+- [x] Implement `fetch_expired_markets(coin, date_range)` — discover historical 15-min crypto markets
+- [x] Cache results in `historical_markets` table
+- [x] Write tests with mock HTTP responses
+- [x] Write `#[ignore]` live test that discovers BTC 15-min markets
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 5: Goldsky subgraph fetcher (unlimited history)
 - [ ] Create `data/subgraph_fetcher.rs` — GraphQL client for Goldsky subgraphs
