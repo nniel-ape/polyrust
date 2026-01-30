@@ -166,6 +166,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_backtest_config_env_overrides() {
         // Clear any existing env vars from other tests
         unsafe {
@@ -218,6 +219,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_backtest_config_partial_env_overrides() {
         // Clear all env vars first
         unsafe {

@@ -29,3 +29,4 @@ libsql = "0.9"
 rust_decimal_macros = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 toml = { workspace = true }
+serial_test = "3"

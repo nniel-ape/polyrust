@@ -190,12 +190,12 @@
 - [x] Run `cargo test --workspace` — must pass
 
 ### Task 10: Integration — wire backtest into main binary
-- [ ] Add `backtest` subcommand or `--backtest` flag to `src/main.rs`
-- [ ] When backtest mode: load `[backtest]` config, open `HistoricalDataStore` (persistent), create fresh `:memory:` `Store`, instantiate `DataFetcher`, check/fetch data, run `BacktestEngine`, print report
-- [ ] Add `polyrust-backtest` dependency to root `Cargo.toml`
-- [ ] Create `examples/run_backtest.rs` — minimal example running crypto arb strategy on historical data
-- [ ] Write integration test: full pipeline from config → data fetch (mocked) → engine run → report
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Add `backtest` subcommand or `--backtest` flag to `src/main.rs`
+- [x] When backtest mode: load `[backtest]` config, open `HistoricalDataStore` (persistent), create fresh `:memory:` `Store`, instantiate `DataFetcher`, check/fetch data, run `BacktestEngine`, print report
+- [x] Add `polyrust-backtest` dependency to root `Cargo.toml`
+- [x] Create `examples/run_backtest.rs` — minimal example running crypto arb strategy on historical data
+- [x] Write integration test: full pipeline from config → data fetch (mocked) → engine run → report
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 11: Verify acceptance criteria
 - [ ] Verify data fetching works for both CLOB API and subgraph sources

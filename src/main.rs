@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use polyrust_backtest::{BacktestConfig, BacktestEngine, DataFetcher, HistoricalDataStore};
 use polyrust_core::prelude::*;
 use polyrust_dashboard::Dashboard;
 use polyrust_execution::{FillMode, LiveBackend, PaperBackend};
@@ -13,11 +14,13 @@ use polyrust_strategies::{
 };
 use serde::Deserialize;
 
-/// Wrapper to extract arbitrage config from TOML file.
+/// Wrapper to extract backtest and arbitrage configs from TOML file.
 #[derive(Debug, Deserialize, Default)]
-struct ConfigWithArbitrage {
+struct ConfigWrapper {
     #[serde(default)]
     arbitrage: ArbitrageConfig,
+    #[serde(default)]
+    backtest: Option<BacktestConfig>,
 }
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -33,6 +36,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // Check for --backtest flag
+    let args: Vec<String> = std::env::args().collect();
+    let backtest_mode = args.contains(&"--backtest".to_string());
+
+    if backtest_mode {
+        info!("Starting in backtest mode");
+        return run_backtest().await;
+    }
+
     info!("polyrust starting");
 
     // Load configuration
@@ -41,10 +53,10 @@ async fn main() -> anyhow::Result<()> {
             let config: Config = toml::from_str(&contents)
                 .map_err(|e| warn!("failed to parse config: {e}"))
                 .unwrap_or_default();
-            let arb_wrapper: ConfigWithArbitrage = toml::from_str(&contents)
-                .map_err(|e| warn!("failed to parse arbitrage config: {e}"))
+            let wrapper: ConfigWrapper = toml::from_str(&contents)
+                .map_err(|e| warn!("failed to parse config wrapper: {e}"))
                 .unwrap_or_default();
-            (config, arb_wrapper.arbitrage)
+            (config, wrapper.arbitrage)
         }
         Err(e) => {
             info!("no config file loaded ({e}), using defaults");
@@ -314,4 +326,124 @@ impl Strategy for DashboardStrategyWrapper {
     fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> {
         Some(self.provider.as_ref())
     }
+}
+
+async fn run_backtest() -> anyhow::Result<()> {
+    use polyrust_backtest::DataFetchConfig;
+
+    // Load backtest configuration
+    let (backtest_config, arb_config) = match std::fs::read_to_string("config.toml") {
+        Ok(contents) => {
+            let wrapper: ConfigWrapper = toml::from_str(&contents)
+                .map_err(|e| warn!("failed to parse config: {e}"))
+                .unwrap_or_default();
+            let backtest_config = wrapper
+                .backtest
+                .ok_or_else(|| anyhow::anyhow!("Missing [backtest] section in config.toml"))?
+                .with_env_overrides();
+            (backtest_config, wrapper.arbitrage)
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Cannot run backtest without config.toml: {}",
+                e
+            ));
+        }
+    };
+
+    info!(
+        strategy = %backtest_config.strategy_name,
+        start = %backtest_config.start_date,
+        end = %backtest_config.end_date,
+        initial_balance = %backtest_config.initial_balance,
+        "Starting backtest"
+    );
+
+    // Open persistent historical data store
+    let data_store = Arc::new(HistoricalDataStore::new(&backtest_config.data_db_path).await?);
+    info!(
+        db_path = %backtest_config.data_db_path,
+        "Opened historical data store"
+    );
+
+    // Create in-memory store for backtest results (uses existing schema)
+    let results_store = Arc::new(Store::new(":memory:").await?);
+
+    // Initialize DataFetcher
+    let fetch_config = DataFetchConfig {
+        fidelity_mins: backtest_config.data_fidelity_mins,
+        clob_recent_days: 7,
+    };
+    let data_fetcher = DataFetcher::new(Arc::clone(&data_store), fetch_config)?;
+
+    // Fetch or verify cached data for the backtest period
+    if !backtest_config.market_ids.is_empty() {
+        info!(
+            market_count = backtest_config.market_ids.len(),
+            "Checking cached data for configured markets"
+        );
+        for market_id in &backtest_config.market_ids {
+            data_fetcher
+                .fetch_market_data(
+                    market_id,
+                    backtest_config.start_date,
+                    backtest_config.end_date,
+                )
+                .await?;
+        }
+    } else {
+        info!("No market_ids configured - will discover markets from strategy");
+    }
+
+    // Instantiate strategy based on strategy_name
+    let strategy: Box<dyn Strategy> = match backtest_config.strategy_name.as_str() {
+        "crypto-arb-tailend" => {
+            let base = Arc::new(CryptoArbBase::new(arb_config.clone(), vec![]));
+            Box::new(TailEndStrategy::new(base))
+        }
+        "crypto-arb-twosided" => {
+            let base = Arc::new(CryptoArbBase::new(arb_config.clone(), vec![]));
+            Box::new(TwoSidedStrategy::new(base))
+        }
+        "crypto-arb-confirmed" => {
+            let base = Arc::new(CryptoArbBase::new(arb_config.clone(), vec![]));
+            Box::new(ConfirmedStrategy::new(base))
+        }
+        "crypto-arb-crosscorr" => {
+            let base = Arc::new(CryptoArbBase::new(arb_config.clone(), vec![]));
+            Box::new(CrossCorrStrategy::new(base))
+        }
+        other => {
+            return Err(anyhow::anyhow!("Unknown strategy name: {}", other));
+        }
+    };
+
+    // Create and run backtest engine
+    info!("Initializing backtest engine");
+    let start_time = backtest_config.start_date;
+    let end_time = backtest_config.end_date;
+    let initial_balance = backtest_config.initial_balance;
+
+    let mut engine = BacktestEngine::new(
+        backtest_config.clone(),
+        strategy,
+        Arc::clone(&data_store),
+        Arc::clone(&results_store),
+    )
+    .await;
+
+    info!("Running backtest simulation");
+    let _trades = engine.run().await?;
+
+    // Generate report from stored results
+    use polyrust_backtest::BacktestReport;
+    let report =
+        BacktestReport::from_engine_results(results_store, initial_balance, start_time, end_time)
+            .await?;
+
+    // Print report summary
+    println!("\n{}", report.summary());
+
+    info!("Backtest complete");
+    Ok(())
 }
