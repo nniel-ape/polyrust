@@ -142,13 +142,13 @@
 - [x] Run `cargo test --workspace` — must pass
 
 ### Task 8: BacktestEngine — deterministic event replay
-- [ ] Create `engine/mod.rs` with `BacktestEngine` struct
-- [ ] Implement `BacktestEngine::new(config, strategy, data_store, store)` — initializes:
+- [x] Create `engine/mod.rs` with `BacktestEngine` struct
+- [x] Implement `BacktestEngine::new(config, strategy, data_store, store)` — initializes:
   - `data_store`: `HistoricalDataStore` — reads cached historical data
   - `store`: fresh `Store` instance (`:memory:`) using existing live schema — receives simulated trades/orders
   - `StrategyContext` with initial balance and empty positions
   - Simulated clock starting at `config.start_date`
-- [ ] Implement `run(&mut self)` — main synchronous event loop:
+- [x] Implement `run(&mut self)` — main synchronous event loop:
   1. Load cached data from DB for configured market_ids and date range
   2. Sort all events chronologically (prices + trades → unified timeline)
   3. For each event in order:
@@ -160,16 +160,16 @@
      f. Update positions, balance, emit fill events back to strategy
      g. Record trade in backtest results
   4. After all events: call `strategy.on_stop()`, finalize results
-- [ ] Implement immediate fill logic:
+- [x] Implement immediate fill logic:
   - Fill at current market price (latest price from historical data)
   - Fee calculation using configured fee model
   - No orderbook depth simulation (historical orderbooks not available from Polymarket APIs)
-- [ ] Handle market expiration events (MarketExpired at end_date)
-- [ ] Write tests with synthetic event data:
+- [x] Handle market expiration events (MarketExpired at end_date)
+- [x] Write tests with synthetic event data:
   - Test single buy order fills correctly
   - Test strategy receives events in chronological order
   - Test position tracking through multiple fills
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 9: Backtest results and reporting
 - [ ] Create `report/mod.rs` with `BacktestReport` struct:
