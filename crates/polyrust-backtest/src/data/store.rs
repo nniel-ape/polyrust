@@ -233,6 +233,41 @@ impl HistoricalDataStore {
 
     // Query methods
 
+    /// Get a historical market by market_id.
+    pub async fn get_historical_market(&self, market_id: &str) -> BacktestResult<Option<HistoricalMarket>> {
+        let conn = self.conn();
+        let mut rows = conn
+            .query(
+                "SELECT market_id, slug, question, start_date, end_date, token_a, token_b, neg_risk FROM historical_markets WHERE market_id = ?1",
+                params![market_id],
+            )
+            .await
+            .map_err(|e| BacktestError::Database(e.to_string()))?;
+
+        if let Some(row) = rows.next().await.map_err(|e| BacktestError::Database(e.to_string()))? {
+            let start_str: String = row.get(3).map_err(|e| BacktestError::Database(e.to_string()))?;
+            let end_str: String = row.get(4).map_err(|e| BacktestError::Database(e.to_string()))?;
+            let neg_risk_int: i64 = row.get(7).map_err(|e| BacktestError::Database(e.to_string()))?;
+
+            Ok(Some(HistoricalMarket {
+                market_id: row.get(0).map_err(|e| BacktestError::Database(e.to_string()))?,
+                slug: row.get(1).map_err(|e| BacktestError::Database(e.to_string()))?,
+                question: row.get(2).map_err(|e| BacktestError::Database(e.to_string()))?,
+                start_date: DateTime::parse_from_rfc3339(&start_str)
+                    .map_err(|e| BacktestError::Database(format!("Invalid start_date: {}", e)))?
+                    .with_timezone(&Utc),
+                end_date: DateTime::parse_from_rfc3339(&end_str)
+                    .map_err(|e| BacktestError::Database(format!("Invalid end_date: {}", e)))?
+                    .with_timezone(&Utc),
+                token_a: row.get(5).map_err(|e| BacktestError::Database(e.to_string()))?,
+                token_b: row.get(6).map_err(|e| BacktestError::Database(e.to_string()))?,
+                neg_risk: neg_risk_int != 0,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Get historical prices for a token within a time range.
     pub async fn get_historical_prices(
         &self,

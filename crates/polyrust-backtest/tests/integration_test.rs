@@ -239,9 +239,6 @@ async fn test_backtest_with_no_data() {
     };
 
     let strategy = Box::new(SimpleTestStrategy::new());
-    let start_time = config.start_date;
-    let end_time = config.end_date;
-    let initial_balance = config.initial_balance;
 
     let mut engine = BacktestEngine::new(
         config,
@@ -251,18 +248,15 @@ async fn test_backtest_with_no_data() {
     )
     .await;
 
-    let _trades = engine.run().await.expect("Backtest should succeed with no data");
-
-    // Generate report
-    use polyrust_backtest::BacktestReport;
-    let report =
-        BacktestReport::from_engine_results(results_store, initial_balance, start_time, end_time)
-            .await
-            .expect("Failed to generate report");
-
-    // Verify backtest ran but produced no trades
-    assert_eq!(report.total_trades, 0);
-    assert_eq!(report.start_balance, report.end_balance);
+    // Backtest should fail with no data (validation catches empty events)
+    let result = engine.run().await;
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("No historical events found"),
+        "Expected error about no events, got: {}",
+        err_msg
+    );
 }
 
 #[tokio::test]

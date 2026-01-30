@@ -116,6 +116,15 @@ impl BacktestEngine {
         let events = self.load_events().await?;
         info!(event_count = events.len(), "Loaded historical events");
 
+        // Validate that we have events to replay
+        if events.is_empty() {
+            return Err(polyrust_core::error::PolyError::Config(
+                "No historical events found for configured market_ids and date range. \
+                Check that data has been fetched and cached in the backtest database."
+                    .to_string(),
+            ));
+        }
+
         let mut trades = Vec::new();
 
         // Replay events in chronological order
@@ -171,62 +180,75 @@ impl BacktestEngine {
     async fn load_events(&self) -> Result<Vec<HistoricalEvent>> {
         let mut events = Vec::new();
 
-        // For each market_id, load prices and trades
+        // For each market_id, load prices and trades for both tokens
         for market_id in &self.config.market_ids {
-            // Fetch token_ids for this market from the historical_markets table
-            // For now, we'll assume market_id IS a token_id (simplified)
-            // In a real implementation, you'd query the historical_markets table
-            let token_id = market_id.clone();
-
-            // Load price history
-            let prices = self
+            // Query the historical_markets table to get both token IDs
+            let market = self
                 .data_store
-                .get_historical_prices(
-                    &token_id,
-                    self.config.start_date,
-                    self.config.end_date,
-                )
+                .get_historical_market(market_id)
                 .await
                 .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
 
-            for price in prices {
-                events.push(HistoricalEvent {
-                    timestamp: price.timestamp,
-                    token_id: price.token_id.clone(),
-                    event: Event::MarketData(MarketDataEvent::PriceChange {
-                        token_id: price.token_id,
-                        price: price.price,
-                        side: OrderSide::Buy, // Simplified: not tracking side in cache
+            let token_ids = if let Some(m) = market {
+                vec![m.token_a, m.token_b]
+            } else {
+                // Market not found in cache - assume market_id IS a token_id for backwards compatibility
+                warn!(market_id, "Market not found in cache, treating as token_id");
+                vec![market_id.clone()]
+            };
+
+            // Load data for each token in the market
+            for token_id in token_ids {
+                // Load price history
+                let prices = self
+                    .data_store
+                    .get_historical_prices(
+                        &token_id,
+                        self.config.start_date,
+                        self.config.end_date,
+                    )
+                    .await
+                    .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
+
+                for price in prices {
+                    events.push(HistoricalEvent {
+                        timestamp: price.timestamp,
+                        token_id: price.token_id.clone(),
+                        event: Event::MarketData(MarketDataEvent::PriceChange {
+                            token_id: price.token_id,
+                            price: price.price,
+                            side: OrderSide::Buy, // Simplified: not tracking side in cache
                         best_bid: price.price,
                         best_ask: price.price,
                     }),
                 });
-            }
+                }
 
-            // Load trade history
-            let trades = self
-                .data_store
-                .get_historical_trades(
-                    &token_id,
-                    self.config.start_date,
-                    self.config.end_date,
-                )
-                .await
-                .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
+                // Load trade history for this token
+                let trades = self
+                    .data_store
+                    .get_historical_trades(
+                        &token_id,
+                        self.config.start_date,
+                        self.config.end_date,
+                    )
+                    .await
+                    .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
 
-            for trade in trades {
-                events.push(HistoricalEvent {
-                    timestamp: trade.timestamp,
-                    token_id: trade.token_id.clone(),
-                    event: Event::MarketData(MarketDataEvent::Trade {
-                        token_id: trade.token_id,
-                        price: trade.price,
-                        size: trade.size,
+                for trade in trades {
+                    events.push(HistoricalEvent {
                         timestamp: trade.timestamp,
-                    }),
-                });
-            }
-        }
+                        token_id: trade.token_id.clone(),
+                        event: Event::MarketData(MarketDataEvent::Trade {
+                            token_id: trade.token_id,
+                            price: trade.price,
+                            size: trade.size,
+                            timestamp: trade.timestamp,
+                        }),
+                    });
+                }
+            } // end token_ids loop
+        } // end market_ids loop
 
         // Sort events chronologically
         events.sort_by_key(|e| e.timestamp);
@@ -262,13 +284,15 @@ impl BacktestEngine {
             Action::PlaceOrder(order_req) => self.execute_order(order_req).await,
             Action::PlaceBatchOrder(orders) => {
                 // Execute each order in the batch
+                // NOTE: All trades are persisted to Store and included in the final report.
+                // This return value only affects the in-memory trades list used for logging.
                 let mut batch_trades = Vec::new();
                 for order in orders {
                     if let Some(trade) = self.execute_order(order).await? {
                         batch_trades.push(trade);
                     }
                 }
-                // Return the first trade (batch reporting could be improved)
+                // Return the first trade for simplicity (all trades are in Store)
                 Ok(batch_trades.into_iter().next())
             }
             Action::Log { level, message } => {
@@ -358,22 +382,40 @@ impl BacktestEngine {
                     .insert(order.token_id.clone(), (new_size, new_entry));
 
                 // Update PositionState
-                // Find or create position
-                let position_id = Uuid::new_v4();
-                positions.open_positions.insert(
-                    position_id,
-                    Position {
-                        id: position_id,
-                        market_id: String::new(), // Not tracked in backtest
-                        token_id: order.token_id.clone(),
-                        side: OutcomeSide::Yes, // Simplified
-                        entry_price: new_entry,
-                        size: new_size,
-                        current_price,
-                        entry_time: self.current_time,
-                        strategy_name: self.strategy.name().to_string(),
-                    },
-                );
+                // Find existing position or create new one
+                let existing_pos = positions
+                    .open_positions
+                    .iter()
+                    .find(|(_, p)| {
+                        p.token_id == order.token_id && p.strategy_name == self.strategy.name()
+                    })
+                    .map(|(id, _)| *id);
+
+                if let Some(pos_id) = existing_pos {
+                    // Update existing position
+                    if let Some(pos) = positions.open_positions.get_mut(&pos_id) {
+                        pos.size = new_size;
+                        pos.entry_price = new_entry;
+                        pos.current_price = current_price;
+                    }
+                } else {
+                    // Create new position
+                    let position_id = Uuid::new_v4();
+                    positions.open_positions.insert(
+                        position_id,
+                        Position {
+                            id: position_id,
+                            market_id: String::new(), // Not tracked in backtest
+                            token_id: order.token_id.clone(),
+                            side: OutcomeSide::Yes, // Simplified
+                            entry_price: new_entry,
+                            size: new_size,
+                            current_price,
+                            entry_time: self.current_time,
+                            strategy_name: self.strategy.name().to_string(),
+                        },
+                    );
+                }
 
                 // Record trade in Store
                 let trade = Trade {

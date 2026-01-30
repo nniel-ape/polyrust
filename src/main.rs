@@ -332,7 +332,7 @@ async fn run_backtest() -> anyhow::Result<()> {
     use polyrust_backtest::DataFetchConfig;
 
     // Load backtest configuration
-    let (backtest_config, arb_config) = match std::fs::read_to_string("config.toml") {
+    let (mut backtest_config, arb_config) = match std::fs::read_to_string("config.toml") {
         Ok(contents) => {
             let wrapper: ConfigWrapper = toml::from_str(&contents)
                 .map_err(|e| warn!("failed to parse config: {e}"))
@@ -377,23 +377,67 @@ async fn run_backtest() -> anyhow::Result<()> {
     let data_fetcher = DataFetcher::new(Arc::clone(&data_store), fetch_config)?;
 
     // Fetch or verify cached data for the backtest period
-    if !backtest_config.market_ids.is_empty() {
+    let mut market_ids = backtest_config.market_ids.clone();
+
+    if !market_ids.is_empty() {
         info!(
-            market_count = backtest_config.market_ids.len(),
+            market_count = market_ids.len(),
             "Checking cached data for configured markets"
         );
-        for market_id in &backtest_config.market_ids {
-            data_fetcher
-                .fetch_market_data(
-                    market_id,
+    } else {
+        info!("No market_ids configured - discovering markets for configured coins");
+
+        // Discover markets for each coin in the arbitrage config
+        for coin in &arb_config.coins {
+            info!(coin, "Discovering markets for coin");
+            let markets = data_fetcher
+                .discover_expired_markets(
+                    coin,
                     backtest_config.start_date,
                     backtest_config.end_date,
                 )
                 .await?;
+
+            info!(
+                coin,
+                market_count = markets.len(),
+                "Discovered {} markets for coin", markets.len()
+            );
+
+            // Add market IDs to our list
+            for market in markets {
+                market_ids.push(market.market_id.clone());
+
+                // Cache the market metadata
+                data_store.insert_historical_market(market).await?;
+            }
         }
-    } else {
-        info!("No market_ids configured - will discover markets from strategy");
+
+        if market_ids.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No markets found for configured coins in the specified date range"
+            ));
+        }
+
+        info!(
+            total_markets = market_ids.len(),
+            "Discovered {} total markets", market_ids.len()
+        );
     }
+
+    // Fetch market data for all markets (discovered or configured)
+    for market_id in &market_ids {
+        data_fetcher
+            .fetch_market_data(
+                market_id,
+                backtest_config.start_date,
+                backtest_config.end_date,
+            )
+            .await?;
+    }
+
+    // Update backtest config with discovered/configured market_ids
+    backtest_config.market_ids = market_ids;
 
     // Instantiate strategy based on strategy_name
     let strategy: Box<dyn Strategy> = match backtest_config.strategy_name.as_str() {

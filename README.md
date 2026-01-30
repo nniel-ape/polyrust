@@ -57,8 +57,14 @@ cargo build --workspace
 # Run in paper mode (default)
 cargo run
 
+# Run in backtest mode
+cargo run -- --backtest
+
 # Run the example strategy
 cargo run --example simple_strategy
+
+# Run the backtest example
+cargo run --example run_backtest
 
 # Run tests
 cargo test --workspace
@@ -191,6 +197,7 @@ engine.run().await?;
 - `polyrust-execution` — live + paper execution backends
 - `polyrust-store` — Turso (embedded SQLite) persistence
 - `polyrust-strategies` — reference strategy implementations
+- `polyrust-backtest` — historical data pipeline + backtesting engine
 - `polyrust-dashboard` — Axum + HTMX monitoring UI
 
 ## Reference Strategy: Crypto Arbitrage
@@ -233,6 +240,72 @@ Strategy-specific dashboard available at `http://127.0.0.1:3000/strategy/crypto-
 - Active markets with reference prices and spreads
 - Recent spike events for cross-correlation
 - Per-mode performance statistics (win rate, total P&L, recent trades)
+
+## Backtesting
+
+Test your strategies on historical data before deploying to paper or live trading.
+
+### Quick Start
+
+```fish
+# Configure backtest settings in config.toml
+# Edit [backtest] section: set strategy_name, date range, markets
+
+# Run backtest
+cargo run -- --backtest
+
+# Or use the minimal example
+cargo run --example run_backtest
+```
+
+### Configuration
+
+Add a `[backtest]` section to your `config.toml`:
+
+```toml
+[backtest]
+strategy_name = "crypto-arb-tailend"      # Strategy to test
+market_ids = []                            # Empty = auto-discover from coins
+start_date = "2025-01-01T00:00:00Z"       # Backtest period start (RFC3339)
+end_date = "2025-01-31T23:59:59Z"         # Backtest period end (RFC3339)
+initial_balance = 1000.00                  # Starting USDC balance
+data_fidelity_mins = 1                     # Price data granularity
+data_db_path = "backtest_data.db"         # Historical data cache (persistent)
+
+[backtest.fees]
+taker_fee_rate = 0.0315  # Match live fee model (3.15% at 50/50)
+```
+
+Environment variable overrides: `POLY_BACKTEST_START`, `POLY_BACKTEST_END`, `POLY_BACKTEST_INITIAL_BALANCE`, `POLY_BACKTEST_DATA_DB_PATH`, etc.
+
+### How It Works
+
+1. **Data Pipeline**: Fetches and caches historical market data from Polymarket APIs and Goldsky subgraphs
+   - CLOB API: Last ~7 days (high-fidelity price timeseries)
+   - Goldsky subgraph: Unlimited history (on-chain trade data)
+   - Smart caching prevents duplicate API calls
+2. **Event Replay**: Deterministically replays historical events through your strategy
+3. **Simulated Fills**: Immediate fills at historical trade prices with configurable fee model
+4. **Performance Report**: Comprehensive metrics including P&L, win rate, max drawdown, Sharpe ratio
+
+### Report Metrics
+
+- Total/realized/unrealized P&L
+- Win rate and trade count
+- Maximum drawdown percentage
+- Sharpe ratio (annualized risk-adjusted returns)
+- Start/end balance
+- Backtest duration
+
+### Supported Strategies
+
+Currently supported crypto arbitrage strategies:
+- `crypto-arb-tailend` - High-confidence tail-end trades (<2 min remaining)
+- `crypto-arb-twosided` - Risk-free arbitrage (both outcomes < $1)
+- `crypto-arb-confirmed` - Directional trades with confidence model
+- `crypto-arb-crosscorr` - Cross-market correlation signals
+
+Any strategy implementing the `Strategy` trait works without modification. See `examples/run_backtest.rs` for custom strategy usage.
 
 ## License
 
