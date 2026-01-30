@@ -112,19 +112,19 @@
 - [x] Run `cargo test --workspace` — must pass
 
 ### Task 6: Unified DataFetcher with smart caching
-- [ ] Create `data/fetcher.rs` — orchestrates CLOB, Gamma, and subgraph fetchers
-- [ ] Implement `DataFetcher::new(store: Arc<Store>, config: DataFetchConfig)`
-- [ ] Implement `fetch_market_data(market_id, start, end)` — smart routing:
+- [x] Create `data/fetcher.rs` — orchestrates CLOB, Gamma, and subgraph fetchers
+- [x] Implement `DataFetcher::new(store: Arc<Store>, config: DataFetchConfig)`
+- [x] Implement `fetch_market_data(market_id, start, end)` — smart routing:
   - If date range within last 7 days → use CLOB API (higher resolution)
   - If date range older than 7 days → use Goldsky subgraph
   - Check `data_fetch_log` first, only fetch missing ranges
   - Merge overlapping data, deduplicate by timestamp
-- [ ] Implement `fetch_and_cache(token_ids, date_range)` — bulk fetch for backtest preparation
-- [ ] Implement `get_cached_data(token_id, start, end)` → `CachedMarketData` (prices + trades from DB)
-- [ ] Add progress reporting via `tracing` (log fetching progress for long historical pulls)
-- [ ] Write tests for smart routing logic (mock both API sources)
-- [ ] Write test for cache hit/miss behavior
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Implement `fetch_and_cache(token_ids, date_range)` — bulk fetch for backtest preparation
+- [x] Implement `get_cached_data(token_id, start, end)` → `CachedMarketData` (prices + trades from DB)
+- [x] Add progress reporting via `tracing` (log fetching progress for long historical pulls)
+- [x] Write tests for smart routing logic (mock both API sources)
+- [x] Write test for cache hit/miss behavior
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 7: BacktestConfig and CLI integration
 - [ ] Define `BacktestConfig` in `config.rs`:
