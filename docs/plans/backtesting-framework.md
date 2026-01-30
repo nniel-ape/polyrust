@@ -47,14 +47,14 @@
 ## Implementation Steps
 
 ### Task 1: Scaffold polyrust-backtest crate
-- [ ] Create `crates/polyrust-backtest/` with `Cargo.toml` depending on `polyrust-core`, `polyrust-store`, `polyrust-execution`
-- [ ] Add workspace dependencies: `reqwest` (HTTP client), `serde_json`, `chrono`, `rust_decimal`, `tokio`, `tracing`
-- [ ] Add `polyrust-backtest` to workspace `Cargo.toml` members
-- [ ] Create module structure: `lib.rs`, `config.rs`, `data/mod.rs`, `engine/mod.rs`, `report/mod.rs`
-- [ ] Add placeholder public API: `BacktestConfig`, `BacktestEngine`, `DataFetcher`
-- [ ] Verify `cargo build --workspace` compiles cleanly
-- [ ] Write basic smoke test that instantiates BacktestConfig with defaults
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Create `crates/polyrust-backtest/` with `Cargo.toml` depending on `polyrust-core`, `polyrust-store`, `polyrust-execution`
+- [x] Add workspace dependencies: `reqwest` (HTTP client), `serde_json`, `chrono`, `rust_decimal`, `tokio`, `tracing`
+- [x] Add `polyrust-backtest` to workspace `Cargo.toml` members
+- [x] Create module structure: `lib.rs`, `config.rs`, `data/mod.rs`, `engine/mod.rs`, `report/mod.rs`
+- [x] Add placeholder public API: `BacktestConfig`, `BacktestEngine`, `DataFetcher`
+- [x] Verify `cargo build --workspace` compiles cleanly
+- [x] Write basic smoke test that instantiates BacktestConfig with defaults
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 2: Define historical data cache DB schema
 - [ ] Create `HistoricalDataStore` struct in `polyrust-backtest` (separate from live `Store`)
