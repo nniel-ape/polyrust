@@ -26,3 +26,4 @@ libsql = "0.9"
 [dev-dependencies]
 rust_decimal_macros = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+toml = { workspace = true }

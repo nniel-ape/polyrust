@@ -127,7 +127,7 @@
 - [x] Run `cargo test --workspace` — must pass
 
 ### Task 7: BacktestConfig and CLI integration
-- [ ] Define `BacktestConfig` in `config.rs`:
+- [x] Define `BacktestConfig` in `config.rs`:
   - `strategy_name: String` — which strategy to backtest
   - `market_ids: Vec<String>` — markets to include (or discover by pattern)
   - `start_date: DateTime<Utc>`, `end_date: DateTime<Utc>` — backtest window
@@ -135,11 +135,11 @@
   - `data_fidelity_mins: u64` — price history granularity in minutes (default 1 min)
   - `data_db_path: String` — path to persistent historical data cache (default `backtest_data.db`)
   - `fee_model: FeeConfig` — reuse existing fee config
-- [ ] Add `[backtest]` section to `config.example.toml`
-- [ ] Parse from TOML with `#[derive(Deserialize)]` and `#[serde(default)]` for optional fields
-- [ ] Support env overrides: `POLY_BACKTEST_START`, `POLY_BACKTEST_END`, etc.
-- [ ] Write tests for config parsing (valid, defaults, env overrides)
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Add `[backtest]` section to `config.example.toml`
+- [x] Parse from TOML with `#[derive(Deserialize)]` and `#[serde(default)]` for optional fields
+- [x] Support env overrides: `POLY_BACKTEST_START`, `POLY_BACKTEST_END`, etc.
+- [x] Write tests for config parsing (valid, defaults, env overrides)
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 8: BacktestEngine — deterministic event replay
 - [ ] Create `engine/mod.rs` with `BacktestEngine` struct

@@ -180,3 +180,30 @@ initial_balance = 10000  # Starting USDC balance
 # min_win_rate = 0.40     # 40% win rate threshold
 # window_size = 50        # Rolling window for recent P&L tracking
 # auto_disable = false    # Auto-disable modes with low win rate
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BACKTESTING
+# ═══════════════════════════════════════════════════════════════════════════════
+# Historical data backtesting framework for strategy evaluation
+#
+# Environment variable overrides:
+#   POLY_BACKTEST_STRATEGY         — strategy name to backtest
+#   POLY_BACKTEST_START            — start date (RFC3339 format)
+#   POLY_BACKTEST_END              — end date (RFC3339 format)
+#   POLY_BACKTEST_INITIAL_BALANCE  — starting USDC balance
+#   POLY_BACKTEST_DATA_DB_PATH     — path to historical data cache DB
+#   POLY_BACKTEST_FIDELITY_MINS    — price data granularity in minutes
+#   POLY_BACKTEST_MARKET_IDS       — comma-separated market IDs to backtest
+
+# [backtest]
+# strategy_name = "crypto-arb"            # Strategy to backtest
+# market_ids = []                         # Markets to include (empty = auto-discover)
+# start_date = "2025-01-01T00:00:00Z"     # Backtest window start (RFC3339)
+# end_date = "2025-01-31T23:59:59Z"       # Backtest window end (RFC3339)
+# initial_balance = 1000.00               # Starting USDC balance
+# data_fidelity_mins = 1                  # Price history granularity (default: 1 min)
+# data_db_path = "backtest_data.db"       # Persistent historical data cache
+
+# Fee model (reused from strategy config)
+# [backtest.fees]
+# taker_fee_rate = 0.0315  # 3.15% at 50/50 probability

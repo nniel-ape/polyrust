@@ -4,7 +4,7 @@ pub mod engine;
 pub mod error;
 pub mod report;
 
-pub use config::BacktestConfig;
+pub use config::{BacktestConfig, FeeConfig};
 pub use data::{DataFetcher, HistoricalDataStore, HistoricalMarket, HistoricalPrice, HistoricalTrade};
 pub use engine::BacktestEngine;
 pub use error::{BacktestError, BacktestResult};
