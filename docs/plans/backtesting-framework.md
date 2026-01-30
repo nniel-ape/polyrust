@@ -172,7 +172,7 @@
 - [x] Run `cargo test --workspace` — must pass
 
 ### Task 9: Backtest results and reporting
-- [ ] Create `report/mod.rs` with `BacktestReport` struct:
+- [x] Create `report/mod.rs` with `BacktestReport` struct:
   - `trades: Vec<BacktestTrade>` — all simulated trades with timestamps, prices, P&L
   - `total_pnl: Decimal`, `realized_pnl: Decimal`, `unrealized_pnl: Decimal`
   - `win_rate: Decimal` — winning trades / total trades
@@ -181,13 +181,13 @@
   - `total_trades: usize`, `winning_trades: usize`, `losing_trades: usize`
   - `start_balance: Decimal`, `end_balance: Decimal`
   - `duration: chrono::Duration`
-- [ ] Implement `BacktestReport::from_engine_results()` — compute all metrics from trade history
-- [ ] Implement `report.summary()` → formatted String for terminal output
-- [ ] Implement `report.to_json()` → serde_json::Value for programmatic use
-- [ ] Extract report from in-memory `Store` (query trades, orders, pnl_snapshots using existing Store API)
-- [ ] Optionally persist report summary to `backtest_runs` table in `backtest_data.db` (for comparing runs across sessions)
-- [ ] Write tests for metric calculations (known trade sequences → expected metrics)
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Implement `BacktestReport::from_engine_results()` — compute all metrics from trade history
+- [x] Implement `report.summary()` → formatted String for terminal output
+- [x] Implement `report.to_json()` → serde_json::Value for programmatic use
+- [x] Extract report from in-memory `Store` (query trades, orders, pnl_snapshots using existing Store API)
+- [x] Optionally persist report summary to `backtest_runs` table in `backtest_data.db` (for comparing runs across sessions)
+- [x] Write tests for metric calculations (known trade sequences → expected metrics)
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 10: Integration — wire backtest into main binary
 - [ ] Add `backtest` subcommand or `--backtest` flag to `src/main.rs`
