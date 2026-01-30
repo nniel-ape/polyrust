@@ -57,20 +57,20 @@
 - [x] Run `cargo test --workspace` — must pass
 
 ### Task 2: Define historical data cache DB schema
-- [ ] Create `HistoricalDataStore` struct in `polyrust-backtest` (separate from live `Store`)
+- [x] Create `HistoricalDataStore` struct in `polyrust-backtest` (separate from live `Store`)
   - Opens/creates `backtest_data.db` file (configurable path via `[backtest] data_db_path`)
   - This DB is persistent and reused across backtest runs
-- [ ] Create migration tables in `backtest_data.db`:
+- [x] Create migration tables in `backtest_data.db`:
   - `historical_prices` — token_id, timestamp, price (TEXT/Decimal), source (clob/subgraph)
   - `historical_trades` — token_id, timestamp, price, size, side, tx_hash, source
   - `historical_markets` — market_id, slug, question, start_date, end_date, token_a, token_b, neg_risk
   - `data_fetch_log` — source, token_id, start_ts, end_ts, fetched_at, row_count (track what's cached)
-- [ ] Add indexes: (token_id, timestamp) on prices/trades, market_id on markets
-- [ ] Implement insert methods: `insert_historical_prices()`, `insert_historical_trades()`, `insert_historical_market()`
-- [ ] Implement query methods: `get_historical_prices(token_id, start, end)`, `get_historical_trades(token_id, start, end)`
-- [ ] Implement `get_fetch_log(source, token_id)` — check what date ranges are already cached
-- [ ] Write tests for all insert/query methods using in-memory Turso (`:memory:`)
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Add indexes: (token_id, timestamp) on prices/trades, market_id on markets
+- [x] Implement insert methods: `insert_historical_prices()`, `insert_historical_trades()`, `insert_historical_market()`
+- [x] Implement query methods: `get_historical_prices(token_id, start, end)`, `get_historical_trades(token_id, start, end)`
+- [x] Implement `get_fetch_log(source, token_id)` — check what date ranges are already cached
+- [x] Write tests for all insert/query methods using in-memory Turso (`:memory:`)
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 3: CLOB API data fetcher (last ~7 days)
 - [ ] Create `data/clob_fetcher.rs` — HTTP client for CLOB REST API

@@ -3551,6 +3551,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "libsql",
  "polyrust-core",
  "polyrust-execution",
  "polyrust-store",
