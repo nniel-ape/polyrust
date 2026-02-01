@@ -760,6 +760,34 @@ impl CryptoArbBase {
         total < self.config.max_positions
     }
 
+    /// Validate that the calculated share size meets the market's minimum order size.
+    ///
+    /// Returns `true` if the size is valid (>= min_order_size), `false` otherwise.
+    /// Logs a warning if the size is below minimum to help diagnose config issues.
+    pub async fn validate_min_order_size(
+        &self,
+        market_id: &MarketId,
+        size: Decimal,
+    ) -> bool {
+        let markets = self.active_markets.read().await;
+        let market = match markets.get(market_id) {
+            Some(m) => &m.market,
+            None => return false, // Can't validate without market info
+        };
+
+        if size < market.min_order_size {
+            warn!(
+                market = %market_id,
+                size = %size,
+                min_order_size = %market.min_order_size,
+                "Order size below market minimum - skipping"
+            );
+            false
+        } else {
+            true
+        }
+    }
+
     /// Check if market already has a position, pending order, or open limit order.
     pub async fn has_market_exposure(&self, market_id: &MarketId) -> bool {
         let positions = self.positions.read().await;

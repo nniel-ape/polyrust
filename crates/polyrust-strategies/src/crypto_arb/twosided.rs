@@ -344,6 +344,11 @@ impl Strategy for TwoSidedStrategy {
                             continue;
                         }
 
+                        // Validate minimum order size for both legs
+                        if !self.base.validate_min_order_size(&market_id, share_count).await {
+                            continue;
+                        }
+
                         // Determine order type and price
                         let (order_type, up_price, down_price) =
                             if self.base.config.order.hybrid_mode {

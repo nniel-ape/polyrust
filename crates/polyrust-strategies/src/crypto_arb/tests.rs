@@ -40,6 +40,7 @@ fn make_market_info(id: &str, end_date: DateTime<Utc>) -> MarketInfo {
         },
         accepting_orders: true,
         neg_risk: false,
+        min_order_size: dec!(5.0), // 5.0 shares default
     }
 }
 

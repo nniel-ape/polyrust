@@ -211,6 +211,11 @@ impl CrossCorrStrategy {
                     (self.base.config.sizing.base_size / opp.buy_price, None)
                 };
 
+                // Validate minimum order size
+                if !self.base.validate_min_order_size(&market_id, size).await {
+                    continue;
+                }
+
                 opportunities.push((opp, size, kelly_frac));
             }
         }

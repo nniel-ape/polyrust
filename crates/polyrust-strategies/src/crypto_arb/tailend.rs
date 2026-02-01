@@ -312,6 +312,11 @@ impl Strategy for TailEndStrategy {
                         // TailEnd uses fixed sizing (no Kelly - confidence is always 1.0)
                         let size = self.base.config.sizing.base_size / opp.buy_price;
 
+                        // Validate minimum order size
+                        if !self.base.validate_min_order_size(&market_id, size).await {
+                            continue;
+                        }
+
                         // TailEnd always uses FOK orders (speed matters)
                         let order = OrderRequest {
                             token_id: opp.token_id.clone(),

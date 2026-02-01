@@ -142,6 +142,9 @@ pub fn parse_slug_timestamp(slug: &str) -> Option<DateTime<Utc>> {
     }
 }
 
+/// Default minimum order size in shares (5.0 shares).
+const DEFAULT_MIN_ORDER_SIZE: rust_decimal::Decimal = rust_decimal::Decimal::from_parts(50, 0, 0, false, 1); // 5.0
+
 /// Convert a Gamma API market to our domain MarketInfo.
 /// Returns None if required fields are missing.
 fn convert_market(market: &gamma::types::response::Market) -> Option<MarketInfo> {
@@ -161,6 +164,9 @@ fn convert_market(market: &gamma::types::response::Market) -> Option<MarketInfo>
         .or(market.start_date)
         .or_else(|| parse_slug_timestamp(slug));
 
+    // Extract minimum order size from API, default to 5.0 shares
+    let min_order_size = market.order_min_size.unwrap_or(DEFAULT_MIN_ORDER_SIZE);
+
     Some(MarketInfo {
         id: condition_id.to_string(),
         slug: slug.clone(),
@@ -173,6 +179,7 @@ fn convert_market(market: &gamma::types::response::Market) -> Option<MarketInfo>
         },
         accepting_orders: market.accepting_orders.unwrap_or(false),
         neg_risk: market.neg_risk.unwrap_or(false),
+        min_order_size,
     })
 }
 

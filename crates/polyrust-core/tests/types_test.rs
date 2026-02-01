@@ -151,6 +151,7 @@ fn market_info_seconds_remaining() {
         },
         accepting_orders: true,
         neg_risk: false,
+        min_order_size: Decimal::new(50, 1), // 5.0 shares default
     };
     let remaining = market.seconds_remaining();
     assert!(remaining >= 299 && remaining <= 301);
@@ -172,6 +173,7 @@ fn market_info_has_ended() {
         },
         accepting_orders: false,
         neg_risk: false,
+        min_order_size: Decimal::new(50, 1), // 5.0 shares default
     };
     assert!(market.has_ended());
     assert_eq!(market.seconds_remaining(), 0);

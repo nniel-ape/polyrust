@@ -443,6 +443,11 @@ impl Strategy for ConfirmedStrategy {
                             (self.base.config.sizing.base_size / opp.buy_price, None)
                         };
 
+                        // Validate minimum order size
+                        if !self.base.validate_min_order_size(&market_id, size).await {
+                            continue;
+                        }
+
                         // Hybrid order mode: GTC at best_ask - limit_offset (maker, $0 fee)
                         let (order_type, order_price) = if self.base.config.order.hybrid_mode {
                             let limit_price = (opp.buy_price - self.base.config.order.limit_offset)

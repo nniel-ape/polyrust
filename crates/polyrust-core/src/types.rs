@@ -182,6 +182,9 @@ pub struct MarketInfo {
     pub token_ids: TokenIds,
     pub accepting_orders: bool,
     pub neg_risk: bool,
+    /// Minimum order size in shares (from Gamma API orderMinSize).
+    /// Defaults to 5.0 if not provided.
+    pub min_order_size: Decimal,
 }
 
 /// Token IDs for the two outcomes of a market
