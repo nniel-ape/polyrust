@@ -27,17 +27,17 @@ struct PricePoint {
     p: String,  // price (decimal string)
 }
 
-/// Data API trade event
+/// Data API trade event.
+/// Fields match the actual Polymarket Data API `/trades` response.
 #[derive(Debug, Deserialize)]
 struct TradeEvent {
-    #[serde(rename = "id")]
-    trade_id: String,
-    #[serde(rename = "asset_id")]
-    token_id: String,
-    #[serde(rename = "timestamp")]
-    timestamp: i64, // Unix timestamp
-    price: String,
-    size: String,
+    #[serde(rename = "transactionHash")]
+    transaction_hash: String,
+    /// Token ID (ERC-1155 asset ID)
+    asset: String,
+    timestamp: i64,
+    price: f64,
+    size: f64,
     side: String,
 }
 
@@ -65,13 +65,13 @@ impl ClobFetcher {
     /// * `token_id` - Token ID (market condition ID)
     /// * `start_ts` - Start timestamp (Unix seconds)
     /// * `end_ts` - End timestamp (Unix seconds)
-    /// * `fidelity_mins` - Price resolution in minutes (1, 5, 15, 60, etc.)
+    /// * `fidelity_secs` - Price resolution in seconds (e.g., 60 = 1min, 300 = 5min)
     pub async fn fetch_price_history(
         &self,
         token_id: &str,
         start_ts: i64,
         end_ts: i64,
-        fidelity_mins: u64,
+        fidelity_secs: u64,
     ) -> BacktestResult<Vec<HistoricalPrice>> {
         // Check if data is already cached
         let start_dt = DateTime::from_timestamp(start_ts, 0)
@@ -84,7 +84,14 @@ impl ClobFetcher {
             return self.store.get_historical_prices(token_id, start_dt, end_dt).await;
         }
 
-        info!(token_id, start_ts, end_ts, fidelity_mins, "Fetching price history from CLOB API");
+        // Convert seconds to minutes for CLOB API (expects minute intervals)
+        // Round up to ensure we don't request finer granularity than specified
+        let fidelity_mins = fidelity_secs.div_ceil(60);
+
+        info!(
+            token_id, start_ts, end_ts, fidelity_secs, fidelity_mins,
+            "Fetching price history from CLOB API ({}s = {}min)", fidelity_secs, fidelity_mins
+        );
 
         let url = format!(
             "{}/prices-history?market={}&startTs={}&endTs={}&fidelity={}",
@@ -147,6 +154,7 @@ impl ClobFetcher {
         start_ts: Option<i64>,
         end_ts: Option<i64>,
         limit: Option<u32>,
+        max_trades: Option<usize>,
     ) -> BacktestResult<Vec<HistoricalTrade>> {
         // Check cache if we have date bounds
         if let (Some(start), Some(end)) = (start_ts, end_ts) {
@@ -162,12 +170,14 @@ impl ClobFetcher {
         }
 
         let limit = limit.unwrap_or(1000).min(10000);
-        info!(market_id, limit, "Fetching trades from Data API");
+        info!(market_id, limit, ?max_trades, "Fetching trades from Data API");
 
         let mut all_trades = Vec::new();
         let mut offset = 0;
+        let mut page = 0u32;
 
         loop {
+            page += 1;
             let mut url = format!(
                 "{}/trades?market={}&limit={}&offset={}",
                 DATA_API_BASE_URL, market_id, limit, offset
@@ -190,24 +200,47 @@ impl ClobFetcher {
                 break;
             }
 
+            debug!(
+                market_id,
+                page,
+                page_trades = trades.len(),
+                total_so_far = all_trades.len() + trades.len(),
+                "Fetched trade page"
+            );
+
             // Convert to HistoricalTrade structs
             for trade in trades.iter() {
                 let timestamp = DateTime::from_timestamp(trade.timestamp, 0)
                     .ok_or_else(|| BacktestError::InvalidInput(format!("Invalid timestamp: {}", trade.timestamp)))?;
-                let price = trade.price.parse::<Decimal>()
-                    .map_err(|e| BacktestError::InvalidInput(format!("Failed to parse price '{}': {}", trade.price, e)))?;
-                let size = trade.size.parse::<Decimal>()
-                    .map_err(|e| BacktestError::InvalidInput(format!("Failed to parse size '{}': {}", trade.size, e)))?;
+                let price = Decimal::try_from(trade.price)
+                    .map_err(|e| BacktestError::InvalidInput(format!("Failed to convert price {}: {}", trade.price, e)))?;
+                let size = Decimal::try_from(trade.size)
+                    .map_err(|e| BacktestError::InvalidInput(format!("Failed to convert size {}: {}", trade.size, e)))?;
 
                 all_trades.push(HistoricalTrade {
-                    id: trade.trade_id.clone(),
-                    token_id: trade.token_id.clone(),
+                    id: trade.transaction_hash.clone(),
+                    token_id: trade.asset.clone(),
                     timestamp,
                     price,
                     size,
-                    side: trade.side.clone(),
+                    side: trade.side.to_lowercase(),
                     source: "clob".to_string(),
                 });
+            }
+
+            // Check trade cap
+            if let Some(max) = max_trades
+                && all_trades.len() >= max
+            {
+                warn!(
+                    market_id,
+                    max_trades = max,
+                    fetched = all_trades.len(),
+                    pages = page,
+                    "Trade cap reached, truncating"
+                );
+                all_trades.truncate(max);
+                break;
             }
 
             // Check if we got a full page (more data may exist)
@@ -239,7 +272,7 @@ impl ClobFetcher {
             }).await?;
         }
 
-        info!(market_id, row_count, "Fetched and cached trades");
+        info!(market_id, row_count, pages = page, "Fetched and cached trades");
         Ok(all_trades)
     }
 
@@ -476,7 +509,7 @@ mod tests {
         let end_ts = Utc::now().timestamp();
         let start_ts = end_ts - 86400; // 24 hours ago
 
-        let trades = fetcher.fetch_trades(market_id, Some(start_ts), Some(end_ts), Some(100)).await;
+        let trades = fetcher.fetch_trades(market_id, Some(start_ts), Some(end_ts), Some(100), Some(10_000)).await;
 
         match trades {
             Ok(data) => {

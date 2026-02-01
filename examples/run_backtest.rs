@@ -80,9 +80,12 @@ async fn main() -> anyhow::Result<()> {
         start_date: Utc::now() - chrono::Duration::days(7),
         end_date: Utc::now() - chrono::Duration::days(6),
         initial_balance: dec!(1000.00),
-        data_fidelity_mins: 5,
+        data_fidelity_secs: 300,
         data_db_path: "backtest_data.db".to_string(),
         fees: Default::default(),
+        market_duration_secs: None,
+        max_trades_per_market: Some(2_000),
+        fetch_concurrency: 10,
     };
 
     tracing::info!(
@@ -101,8 +104,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize data fetcher (in a real backtest, you'd fetch data first)
     let fetch_config = DataFetchConfig {
-        fidelity_mins: config.data_fidelity_mins,
+        fidelity_secs: config.data_fidelity_secs,
         clob_recent_days: 7,
+        max_trades_per_market: config.max_trades_per_market,
     };
     let _data_fetcher = DataFetcher::new(Arc::clone(&data_store), fetch_config)?;
     tracing::info!("Initialized data fetcher (note: this example uses existing cached data)");

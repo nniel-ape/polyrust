@@ -371,8 +371,9 @@ async fn run_backtest() -> anyhow::Result<()> {
 
     // Initialize DataFetcher
     let fetch_config = DataFetchConfig {
-        fidelity_mins: backtest_config.data_fidelity_mins,
+        fidelity_secs: backtest_config.data_fidelity_secs,
         clob_recent_days: 7,
+        max_trades_per_market: backtest_config.max_trades_per_market,
     };
     let data_fetcher = DataFetcher::new(Arc::clone(&data_store), fetch_config)?;
 
@@ -395,6 +396,7 @@ async fn run_backtest() -> anyhow::Result<()> {
                     coin,
                     backtest_config.start_date,
                     backtest_config.end_date,
+                    backtest_config.market_duration_secs,
                 )
                 .await?;
 
@@ -425,15 +427,45 @@ async fn run_backtest() -> anyhow::Result<()> {
         );
     }
 
-    // Fetch market data for all markets (discovered or configured)
+    // Fetch market data for all markets concurrently (bounded by fetch_concurrency)
+    let total_markets = market_ids.len();
+    let concurrency = backtest_config.fetch_concurrency;
+    let fetcher = Arc::new(data_fetcher);
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut completed = 0usize;
+
+    info!(
+        total_markets,
+        concurrency,
+        "Fetching market data concurrently"
+    );
+
     for market_id in &market_ids {
-        data_fetcher
-            .fetch_market_data(
-                market_id,
-                backtest_config.start_date,
-                backtest_config.end_date,
-            )
-            .await?;
+        // If at capacity, wait for one to finish before spawning
+        while tasks.len() >= concurrency {
+            if let Some(result) = tasks.join_next().await {
+                result??;
+                completed += 1;
+                info!(
+                    progress = format!("[{}/{}]", completed, total_markets),
+                    "Market data fetched"
+                );
+            }
+        }
+        let f = Arc::clone(&fetcher);
+        let id = market_id.clone();
+        let start = backtest_config.start_date;
+        let end = backtest_config.end_date;
+        tasks.spawn(async move { f.fetch_market_data(&id, start, end).await });
+    }
+    // Drain remaining tasks
+    while let Some(result) = tasks.join_next().await {
+        result??;
+        completed += 1;
+        info!(
+            progress = format!("[{}/{}]", completed, total_markets),
+            "Market data fetched"
+        );
     }
 
     // Update backtest config with discovered/configured market_ids

@@ -305,14 +305,15 @@ market_ids = []                         # Empty = auto-discover via Gamma API
 start_date = "2025-01-01T00:00:00Z"     # Backtest window start (RFC3339)
 end_date = "2025-01-31T23:59:59Z"       # Backtest window end (RFC3339)
 initial_balance = 1000.00               # Starting USDC balance
-data_fidelity_mins = 1                  # Price history granularity (minutes)
+data_fidelity_secs = 60                 # Price granularity in seconds (60 = 1min, 300 = 5min)
 data_db_path = "backtest_data.db"       # Persistent historical data cache
+fetch_concurrency = 10                  # Markets fetched in parallel (default 10)
 
 [backtest.fees]
 taker_fee_rate = 0.0315  # 3.15% at 50/50 probability
 ```
 
-Environment variable overrides: `POLY_BACKTEST_START`, `POLY_BACKTEST_END`, `POLY_BACKTEST_INITIAL_BALANCE`, `POLY_BACKTEST_DATA_DB_PATH`, etc.
+Environment variable overrides: `POLY_BACKTEST_START`, `POLY_BACKTEST_END`, `POLY_BACKTEST_INITIAL_BALANCE`, `POLY_BACKTEST_DATA_DB_PATH`, `POLY_BACKTEST_FETCH_CONCURRENCY`, etc.
 
 ### Running Backtests
 
@@ -326,6 +327,12 @@ Backtest report includes: total P&L, realized/unrealized P&L, win rate, max draw
 ### Strategy Compatibility
 
 Any `impl Strategy` works in backtest without modification — strategies receive the same `Event` stream and return `Vec<Action>` as in live/paper mode. The engine handles the rest.
+
+## Danger Zones & Approvals
+
+- When adding a new workspace crate, update `Dockerfile` in 3 places: manifest `COPY`, dummy `RUN` source, and `find crates` touch
+- Never push Docker images with `config.toml` baked in — it's `.dockerignore`d and mounted at runtime
+- `cargo build --release --locked` in Docker requires `Cargo.lock` committed and up-to-date
 
 ## Design Documents
 

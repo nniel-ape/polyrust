@@ -210,8 +210,9 @@ initial_balance = 10000  # Starting USDC balance
 #   POLY_BACKTEST_END              — end date (RFC3339 format)
 #   POLY_BACKTEST_INITIAL_BALANCE  — starting USDC balance
 #   POLY_BACKTEST_DATA_DB_PATH     — path to historical data cache DB
-#   POLY_BACKTEST_FIDELITY_MINS    — price data granularity in minutes
+#   POLY_BACKTEST_FIDELITY_SECS    — price data granularity in seconds
 #   POLY_BACKTEST_MARKET_IDS       — comma-separated market IDs to backtest
+#   POLY_BACKTEST_FETCH_CONCURRENCY — number of markets to fetch in parallel
 
 # [backtest]
 # strategy_name = "crypto-arb"            # Strategy to backtest (must be registered)
@@ -219,8 +220,10 @@ initial_balance = 10000  # Starting USDC balance
 # start_date = "2025-01-01T00:00:00Z"     # Backtest window start (RFC3339 format)
 # end_date = "2025-01-31T23:59:59Z"       # Backtest window end (RFC3339 format)
 # initial_balance = 1000.00               # Starting USDC balance for backtest
-# data_fidelity_mins = 1                  # Price history granularity in minutes (default: 1)
+# data_fidelity_secs = 60                 # Price granularity in seconds (60 = 1min, 300 = 5min, 3600 = 1hr)
 # data_db_path = "backtest_data.db"       # Persistent historical data cache (reused across runs)
+# max_trades_per_market = 2000            # Cap trades fetched per market (default 2000, 0 = unlimited)
+# fetch_concurrency = 10                  # Markets fetched in parallel (default 10)
 
 # Fee model (matches strategy config for realistic P&L)
 # [backtest.fees]

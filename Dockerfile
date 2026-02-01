@@ -22,6 +22,7 @@ COPY crates/polyrust-execution/Cargo.toml ./crates/polyrust-execution/
 COPY crates/polyrust-store/Cargo.toml ./crates/polyrust-store/
 COPY crates/polyrust-strategies/Cargo.toml ./crates/polyrust-strategies/
 COPY crates/polyrust-dashboard/Cargo.toml ./crates/polyrust-dashboard/
+COPY crates/polyrust-backtest/Cargo.toml ./crates/polyrust-backtest/
 
 # ── Layer 3: Create dummy sources to trigger dependency compilation ──────────
 RUN mkdir -p src && echo "fn main() {}" > src/main.rs && \
@@ -30,7 +31,8 @@ RUN mkdir -p src && echo "fn main() {}" > src/main.rs && \
     mkdir -p crates/polyrust-execution/src && echo "pub fn dummy() {}" > crates/polyrust-execution/src/lib.rs && \
     mkdir -p crates/polyrust-store/src && echo "pub fn dummy() {}" > crates/polyrust-store/src/lib.rs && \
     mkdir -p crates/polyrust-strategies/src && echo "pub fn dummy() {}" > crates/polyrust-strategies/src/lib.rs && \
-    mkdir -p crates/polyrust-dashboard/src && echo "pub fn dummy() {}" > crates/polyrust-dashboard/src/lib.rs
+    mkdir -p crates/polyrust-dashboard/src && echo "pub fn dummy() {}" > crates/polyrust-dashboard/src/lib.rs && \
+    mkdir -p crates/polyrust-backtest/src && echo "pub fn dummy() {}" > crates/polyrust-backtest/src/lib.rs
 
 # ── Layer 4: Build dependencies ONLY (expensive, cached until deps change) ───
 ENV RUSTFLAGS="-C target-feature=-crt-static"

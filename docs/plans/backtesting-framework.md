@@ -74,7 +74,7 @@
 
 ### Task 3: CLOB API data fetcher (last ~7 days)
 - [x] Create `data/clob_fetcher.rs` — HTTP client for CLOB REST API
-- [x] Implement `fetch_price_history(token_id, start_ts, end_ts, fidelity_mins)` → `Vec<HistoricalPrice>`
+- [x] Implement `fetch_price_history(token_id, start_ts, end_ts, fidelity_secs)` → `Vec<HistoricalPrice>`
   - Endpoint: `GET https://clob.polymarket.com/prices-history?market={token_id}&startTs={}&endTs={}&fidelity={}`
   - Parse response: `{"history": [{"t": timestamp, "p": price}]}`
 - [x] Implement `fetch_trades(market_id, limit, offset)` → `Vec<HistoricalTrade>`
@@ -132,7 +132,7 @@
   - `market_ids: Vec<String>` — markets to include (or discover by pattern)
   - `start_date: DateTime<Utc>`, `end_date: DateTime<Utc>` — backtest window
   - `initial_balance: Decimal` — starting USDC
-  - `data_fidelity_mins: u64` — price history granularity in minutes (default 1 min)
+  - `data_fidelity_secs: u64` — price history granularity in seconds (default 60s)
   - `data_db_path: String` — path to persistent historical data cache (default `backtest_data.db`)
   - `fee_model: FeeConfig` — reuse existing fee config
 - [x] Add `[backtest]` section to `config.example.toml`
@@ -302,7 +302,7 @@ coins = ["BTC", "ETH"]  # used for market discovery
 start_date = "2025-01-01T00:00:00Z"
 end_date = "2025-01-31T00:00:00Z"
 initial_balance = 1000.00
-data_fidelity_mins = 1
+data_fidelity_secs = 60
 data_db_path = "backtest_data.db"  # persistent cache, reused across runs
 # Fill mode is always Immediate — historical orderbook depth not available from Polymarket APIs
 

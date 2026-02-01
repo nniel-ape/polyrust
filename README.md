@@ -269,7 +269,7 @@ market_ids = []                            # Empty = auto-discover from coins
 start_date = "2025-01-01T00:00:00Z"       # Backtest period start (RFC3339)
 end_date = "2025-01-31T23:59:59Z"         # Backtest period end (RFC3339)
 initial_balance = 1000.00                  # Starting USDC balance
-data_fidelity_mins = 1                     # Price data granularity
+data_fidelity_secs = 60                    # Price granularity in seconds (60 = 1min)
 data_db_path = "backtest_data.db"         # Historical data cache (persistent)
 
 [backtest.fees]

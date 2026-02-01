@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -33,6 +33,69 @@ pub struct BacktestTrade {
     pub price: Decimal,
     pub size: Decimal,
     pub realized_pnl: Option<Decimal>,
+}
+
+/// Synthesize PriceChange events from trade data by bucketing trades into N-second windows.
+///
+/// For each token, trades are grouped into time buckets of `fidelity_secs` duration.
+/// The last trade's price in each bucket becomes a PriceChange event, timestamped
+/// at the bucket's end (bucket_start + fidelity_secs).
+///
+/// This enables sub-minute price resolution when `data_fidelity_secs < 60`,
+/// since the CLOB `/prices-history` API only supports minute-level granularity.
+fn synthesize_price_events_from_trades(
+    trades: &[HistoricalEvent],
+    fidelity_secs: u64,
+) -> Vec<HistoricalEvent> {
+    if trades.is_empty() || fidelity_secs == 0 {
+        return Vec::new();
+    }
+
+    let fidelity = fidelity_secs as i64;
+
+    // Group trades by token_id, then bucket by time window
+    // BTreeMap ensures deterministic ordering of buckets
+    let mut token_buckets: HashMap<String, BTreeMap<i64, (String, Decimal)>> = HashMap::new();
+
+    for event in trades {
+        if let Event::MarketData(MarketDataEvent::Trade {
+            token_id, price, ..
+        }) = &event.event
+        {
+            let ts = event.timestamp.timestamp();
+            let bucket_start = (ts / fidelity) * fidelity;
+
+            token_buckets
+                .entry(token_id.clone())
+                .or_default()
+                .insert(bucket_start, (token_id.clone(), *price));
+        }
+    }
+
+    let mut synthetic_events = Vec::new();
+
+    for buckets in token_buckets.values() {
+        for (&bucket_start, (token_id, price)) in buckets {
+            let bucket_end = bucket_start + fidelity;
+            let timestamp = DateTime::from_timestamp(bucket_end, 0).unwrap_or_else(|| {
+                Utc::now() // Fallback; shouldn't happen with valid trade timestamps
+            });
+
+            synthetic_events.push(HistoricalEvent {
+                timestamp,
+                token_id: token_id.clone(),
+                event: Event::MarketData(MarketDataEvent::PriceChange {
+                    token_id: token_id.clone(),
+                    price: *price,
+                    side: OrderSide::Buy,
+                    best_bid: *price,
+                    best_ask: *price,
+                }),
+            });
+        }
+    }
+
+    synthetic_events
 }
 
 /// Backtesting engine that replays historical events through a strategy.
@@ -262,6 +325,25 @@ impl BacktestEngine {
                 }
             } // end token_ids loop
         } // end market_ids loop
+
+        // For sub-minute fidelity, synthesize PriceChange events from trades
+        if self.config.data_fidelity_secs < 60 {
+            let trade_events: Vec<_> = events
+                .iter()
+                .filter(|e| matches!(&e.event, Event::MarketData(MarketDataEvent::Trade { .. })))
+                .cloned()
+                .collect();
+            let synthetic = synthesize_price_events_from_trades(
+                &trade_events,
+                self.config.data_fidelity_secs,
+            );
+            info!(
+                synthetic_prices = synthetic.len(),
+                fidelity_secs = self.config.data_fidelity_secs,
+                "Synthesized PriceChange events from trade data"
+            );
+            events.extend(synthetic);
+        }
 
         // Sort events chronologically
         events.sort_by_key(|e| e.timestamp);
@@ -665,11 +747,14 @@ mod tests {
             start_date: DateTime::from_timestamp(500, 0).unwrap(),
             end_date: DateTime::from_timestamp(3000, 0).unwrap(),
             initial_balance: dec!(1000),
-            data_fidelity_mins: 1,
+            data_fidelity_secs: 60,
             data_db_path: ":memory:".to_string(),
             fees: FeeConfig {
                 taker_fee_rate: dec!(0.01),
             },
+            market_duration_secs: None,
+            max_trades_per_market: Some(2_000),
+            fetch_concurrency: 10,
         };
 
         let strategy = Box::new(TestStrategy { event_count: 0 });
@@ -741,11 +826,14 @@ mod tests {
             start_date: DateTime::from_timestamp(500, 0).unwrap(),
             end_date: DateTime::from_timestamp(4000, 0).unwrap(),
             initial_balance: dec!(1000),
-            data_fidelity_mins: 1,
+            data_fidelity_secs: 60,
             data_db_path: ":memory:".to_string(),
             fees: FeeConfig {
                 taker_fee_rate: dec!(0.01),
             },
+            market_duration_secs: None,
+            max_trades_per_market: Some(2_000),
+            fetch_concurrency: 10,
         };
 
         let strategy = Box::new(TestStrategy { event_count: 0 });
@@ -783,11 +871,14 @@ mod tests {
             start_date: DateTime::from_timestamp(500, 0).unwrap(),
             end_date: DateTime::from_timestamp(2000, 0).unwrap(),
             initial_balance: dec!(1.0), // Insufficient for 0.50 * 10 = 5.00 + fee
-            data_fidelity_mins: 1,
+            data_fidelity_secs: 60,
             data_db_path: ":memory:".to_string(),
             fees: FeeConfig {
                 taker_fee_rate: dec!(0.01),
             },
+            market_duration_secs: None,
+            max_trades_per_market: Some(2_000),
+            fetch_concurrency: 10,
         };
 
         let strategy = Box::new(TestStrategy { event_count: 0 });
@@ -797,5 +888,208 @@ mod tests {
 
         // Should have 0 trades (BUY was skipped due to insufficient balance)
         assert_eq!(trades.len(), 0);
+    }
+
+    #[test]
+    fn synthesize_price_events_empty_input() {
+        let result = synthesize_price_events_from_trades(&[], 5);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn synthesize_price_events_from_trades_basic() {
+        // 10 trades over 30 seconds at 5-second fidelity -> 6 buckets
+        let base_ts = 1000i64;
+        let trades: Vec<HistoricalEvent> = (0..10)
+            .map(|i| {
+                let ts = base_ts + (i * 3); // trades at 0, 3, 6, 9, 12, 15, 18, 21, 24, 27s
+                HistoricalEvent {
+                    timestamp: DateTime::from_timestamp(ts, 0).unwrap(),
+                    token_id: "token_a".to_string(),
+                    event: Event::MarketData(MarketDataEvent::Trade {
+                        token_id: "token_a".to_string(),
+                        price: dec!(0.50) + Decimal::new(i, 2), // 0.50, 0.51, ..., 0.59
+                        size: dec!(10),
+                        timestamp: DateTime::from_timestamp(ts, 0).unwrap(),
+                    }),
+                }
+            })
+            .collect();
+
+        let result = synthesize_price_events_from_trades(&trades, 5);
+
+        // Buckets (5s): [1000-1005), [1005-1010), [1010-1015), [1015-1020), [1020-1025), [1025-1030)
+        // Trade at t=1000 -> bucket 1000, t=1003 -> bucket 1000, t=1006 -> bucket 1005, ...
+        assert_eq!(result.len(), 6, "Expected 6 buckets for 10 trades over 30s at 5s fidelity");
+
+        // All should be PriceChange events
+        for event in &result {
+            assert!(matches!(
+                &event.event,
+                Event::MarketData(MarketDataEvent::PriceChange { .. })
+            ));
+        }
+
+        // Timestamps should be at bucket ends (bucket_start + fidelity)
+        let mut timestamps: Vec<i64> = result.iter().map(|e| e.timestamp.timestamp()).collect();
+        timestamps.sort();
+        assert_eq!(timestamps, vec![1005, 1010, 1015, 1020, 1025, 1030]);
+
+        // Last trade in first bucket (t=1000, t=1003) should have price from t=1003 trade
+        // Bucket 1000 has trades at i=0 (t=1000, p=0.50) and i=1 (t=1003, p=0.51)
+        // Last inserted wins in BTreeMap: i=1 at bucket_start=1000
+        let first_bucket = result
+            .iter()
+            .find(|e| e.timestamp.timestamp() == 1005)
+            .unwrap();
+        if let Event::MarketData(MarketDataEvent::PriceChange { price, .. }) = &first_bucket.event {
+            assert_eq!(*price, dec!(0.51));
+        } else {
+            panic!("Expected PriceChange event");
+        }
+    }
+
+    #[test]
+    fn synthesize_price_events_multiple_tokens() {
+        let trades = vec![
+            HistoricalEvent {
+                timestamp: DateTime::from_timestamp(1000, 0).unwrap(),
+                token_id: "token_a".to_string(),
+                event: Event::MarketData(MarketDataEvent::Trade {
+                    token_id: "token_a".to_string(),
+                    price: dec!(0.50),
+                    size: dec!(10),
+                    timestamp: DateTime::from_timestamp(1000, 0).unwrap(),
+                }),
+            },
+            HistoricalEvent {
+                timestamp: DateTime::from_timestamp(1000, 0).unwrap(),
+                token_id: "token_b".to_string(),
+                event: Event::MarketData(MarketDataEvent::Trade {
+                    token_id: "token_b".to_string(),
+                    price: dec!(0.30),
+                    size: dec!(5),
+                    timestamp: DateTime::from_timestamp(1000, 0).unwrap(),
+                }),
+            },
+            HistoricalEvent {
+                timestamp: DateTime::from_timestamp(1007, 0).unwrap(),
+                token_id: "token_a".to_string(),
+                event: Event::MarketData(MarketDataEvent::Trade {
+                    token_id: "token_a".to_string(),
+                    price: dec!(0.55),
+                    size: dec!(10),
+                    timestamp: DateTime::from_timestamp(1007, 0).unwrap(),
+                }),
+            },
+        ];
+
+        let result = synthesize_price_events_from_trades(&trades, 5);
+
+        // token_a: buckets at 1000 (trade t=1000) and 1005 (trade t=1007) -> 2 events
+        // token_b: bucket at 1000 (trade t=1000) -> 1 event
+        assert_eq!(result.len(), 3);
+
+        let token_a_events: Vec<_> = result.iter().filter(|e| e.token_id == "token_a").collect();
+        let token_b_events: Vec<_> = result.iter().filter(|e| e.token_id == "token_b").collect();
+        assert_eq!(token_a_events.len(), 2);
+        assert_eq!(token_b_events.len(), 1);
+
+        // Verify token_b price
+        if let Event::MarketData(MarketDataEvent::PriceChange { price, .. }) =
+            &token_b_events[0].event
+        {
+            assert_eq!(*price, dec!(0.30));
+        } else {
+            panic!("Expected PriceChange event");
+        }
+    }
+
+    // Strategy that counts PriceChange events it receives
+    struct PriceCountStrategy {
+        price_change_count: usize,
+        trade_count: usize,
+    }
+
+    #[async_trait]
+    impl Strategy for PriceCountStrategy {
+        fn name(&self) -> &str {
+            "price-count-strategy"
+        }
+
+        fn description(&self) -> &str {
+            "Counts PriceChange and Trade events"
+        }
+
+        async fn on_event(&mut self, event: &Event, _ctx: &StrategyContext) -> Result<Vec<Action>> {
+            match event {
+                Event::MarketData(MarketDataEvent::PriceChange { .. }) => {
+                    self.price_change_count += 1;
+                }
+                Event::MarketData(MarketDataEvent::Trade { .. }) => {
+                    self.trade_count += 1;
+                }
+                _ => {}
+            }
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn backtest_engine_sub_minute_fidelity_synthesizes_prices() {
+        let store = Arc::new(Store::new(":memory:").await.unwrap());
+        let data_store = Arc::new(HistoricalDataStore::new(":memory:").await.unwrap());
+
+        // Insert trade data only (no price history — simulating sub-minute mode)
+        let trades: Vec<crate::data::store::HistoricalTrade> = (0..6)
+            .map(|i| crate::data::store::HistoricalTrade {
+                id: format!("trade_{}", i),
+                token_id: "token1".to_string(),
+                timestamp: DateTime::from_timestamp(1000 + i * 3, 0).unwrap(),
+                price: dec!(0.50) + Decimal::new(i, 2),
+                size: dec!(10),
+                side: "buy".to_string(),
+                source: "subgraph".to_string(),
+            })
+            .collect();
+
+        data_store.insert_historical_trades(trades).await.unwrap();
+
+        let config = BacktestConfig {
+            strategy_name: "price-count-strategy".to_string(),
+            market_ids: vec!["token1".to_string()],
+            start_date: DateTime::from_timestamp(900, 0).unwrap(),
+            end_date: DateTime::from_timestamp(1100, 0).unwrap(),
+            initial_balance: dec!(1000),
+            data_fidelity_secs: 5, // Sub-minute!
+            data_db_path: ":memory:".to_string(),
+            fees: FeeConfig {
+                taker_fee_rate: dec!(0.01),
+            },
+            market_duration_secs: None,
+            max_trades_per_market: Some(2_000),
+            fetch_concurrency: 10,
+        };
+
+        let strategy = Box::new(PriceCountStrategy {
+            price_change_count: 0,
+            trade_count: 0,
+        });
+
+        let mut engine = BacktestEngine::new(config, strategy, data_store, store).await;
+        let _trades = engine.run().await.unwrap();
+
+        // Strategy should have received both Trade events and synthesized PriceChange events
+        // Downcast to check counts — access via the engine's strategy field
+        // Since we can't downcast easily, verify indirectly: the engine should have
+        // price entries in token_prices from synthesized PriceChange events
+        assert!(
+            engine.token_prices.contains_key("token1"),
+            "Token prices should be populated from synthesized PriceChange events"
+        );
+
+        // Verify the final price is from the last trade
+        let final_price = engine.token_prices.get("token1").unwrap();
+        assert_eq!(*final_price, dec!(0.55)); // Last trade: 0.50 + 0.05
     }
 }

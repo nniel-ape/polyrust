@@ -13,32 +13,49 @@ const MAX_RETRIES: u32 = 3;
 const RETRY_DELAY_MS: u64 = 1000;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 
-/// Gamma API market response structures
+/// 15-minute window in seconds.
+const WINDOW_SECS: i64 = 900;
+
+/// Slug prefixes for supported coins' 15-minute Up/Down markets.
+/// Must match the live DiscoveryFeed's COIN_SLUGS.
+const COIN_SLUGS: &[(&str, &str)] = &[
+    ("BTC", "btc-updown-15m"),
+    ("ETH", "eth-updown-15m"),
+    ("SOL", "sol-updown-15m"),
+    ("XRP", "xrp-updown-15m"),
+];
+
+/// Gamma API market response structures.
+/// The API returns `clobTokenIds` as a JSON-encoded string (e.g. `"[\"id1\", \"id2\"]"`)
+/// and `negRisk` can be null for older markets.
 #[derive(Debug, Deserialize)]
 struct GammaMarket {
     #[serde(rename = "conditionId")]
     condition_id: String,
-    #[serde(rename = "slug")]
     slug: String,
-    #[serde(rename = "question")]
     question: String,
     #[serde(rename = "startDate")]
-    start_date: Option<String>, // ISO 8601 format
+    start_date: Option<String>,
     #[serde(rename = "endDate")]
-    end_date: Option<String>, // ISO 8601 format
-    #[serde(rename = "tokens")]
-    tokens: Vec<Token>,
+    end_date: Option<String>,
+    /// JSON-encoded array of token IDs, e.g. `"[\"tokenId1\", \"tokenId2\"]"`
+    #[serde(rename = "clobTokenIds", default)]
+    clob_token_ids: Option<String>,
     #[serde(rename = "negRisk", default)]
-    neg_risk: bool,
+    neg_risk: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
-struct Token {
-    #[serde(rename = "tokenId")]
-    token_id: String,
-    #[serde(rename = "outcome")]
-    #[allow(dead_code)]
-    outcome: String,
+/// Parse a unix timestamp from the slug suffix (e.g. `btc-updown-15m-1706000000`).
+/// Returns `None` if the slug doesn't end with a valid unix timestamp.
+fn parse_slug_timestamp(slug: &str) -> Option<DateTime<Utc>> {
+    let last_segment = slug.rsplit('-').next()?;
+    let ts: i64 = last_segment.parse().ok()?;
+    // Sanity: must be a reasonable unix timestamp (after 2020)
+    if ts > 1_577_836_800 {
+        DateTime::from_timestamp(ts, 0)
+    } else {
+        None
+    }
 }
 
 /// HTTP client for Gamma API (market discovery and metadata).
@@ -120,52 +137,127 @@ impl GammaFetcher {
     }
 
     /// Fetch expired markets for a specific coin and date range.
-    /// This is useful for discovering historical 15-minute crypto markets.
+    /// Uses deterministic slug-based lookup (same as live DiscoveryFeed):
+    /// enumerates all 15-minute windows in the range and looks up each
+    /// slug via `GET /markets/slug/{prefix}-{timestamp}`.
     ///
     /// # Arguments
     /// * `coin` - Coin symbol (e.g., "BTC", "ETH", "SOL")
     /// * `start_date` - Start of date range
     /// * `end_date` - End of date range
+    /// * `_duration_filter` - Ignored (slug-based lookup always returns 15-min markets)
     pub async fn fetch_expired_markets(
         &self,
         coin: &str,
         start_date: DateTime<Utc>,
         end_date: DateTime<Utc>,
+        _duration_filter: Option<u64>,
     ) -> BacktestResult<Vec<HistoricalMarket>> {
-        info!(coin, ?start_date, ?end_date, "Fetching expired markets for coin");
+        let upper = coin.to_uppercase();
+        let prefix = COIN_SLUGS
+            .iter()
+            .find(|(k, _)| *k == upper)
+            .map(|(_, p)| *p)
+            .ok_or_else(|| {
+                BacktestError::InvalidInput(format!(
+                    "Unsupported coin: {}. Supported: {:?}",
+                    coin,
+                    COIN_SLUGS.iter().map(|(k, _)| k).collect::<Vec<_>>()
+                ))
+            })?;
 
-        // Search for markets by slug pattern (e.g., "btc" for BTC markets)
-        let slug_pattern = coin.to_lowercase();
-        let all_markets = self.fetch_markets_by_slug(&slug_pattern).await?;
-
-        // Filter to markets that expired within the date range
-        let expired_markets: Vec<HistoricalMarket> = all_markets
-            .into_iter()
-            .filter(|m| {
-                m.end_date >= start_date && m.end_date <= end_date
-            })
-            .collect();
+        // Enumerate all 15-min window timestamps in the date range
+        let mut ts = (start_date.timestamp() / WINDOW_SECS) * WINDOW_SECS;
+        let end_ts = end_date.timestamp();
+        let total_windows = ((end_ts - ts) / WINDOW_SECS).max(0);
 
         info!(
             coin,
-            count = expired_markets.len(),
-            "Found expired markets in date range"
+            prefix,
+            ?start_date,
+            ?end_date,
+            total_windows,
+            "Discovering markets via slug enumeration"
         );
 
-        Ok(expired_markets)
+        let mut markets = Vec::new();
+        let mut found = 0u64;
+        let mut missed = 0u64;
+
+        while ts <= end_ts {
+            let slug = format!("{prefix}-{ts}");
+            match self.fetch_single_market_by_slug(&slug).await {
+                Ok(Some(market)) => {
+                    if let Some(hist) = self.convert_to_historical_market(market)? {
+                        self.store.insert_historical_market(hist.clone()).await?;
+                        markets.push(hist);
+                        found += 1;
+                    }
+                }
+                Ok(None) => {
+                    missed += 1;
+                }
+                Err(e) => {
+                    debug!(slug, error = %e, "Failed to fetch market by slug");
+                    missed += 1;
+                }
+            }
+            ts += WINDOW_SECS;
+
+            // Log progress every 100 windows
+            if (found + missed) > 0 && (found + missed).is_multiple_of(100) {
+                info!(
+                    coin,
+                    found,
+                    missed,
+                    progress = format!("{}/{}", found + missed, total_windows),
+                    "Discovery progress"
+                );
+            }
+        }
+
+        info!(
+            coin,
+            found,
+            missed,
+            "Discovery complete"
+        );
+
+        Ok(markets)
+    }
+
+    /// Fetch a single market by exact slug via `GET /markets/slug/{slug}`.
+    /// Returns None for 404s / missing markets.
+    async fn fetch_single_market_by_slug(&self, slug: &str) -> BacktestResult<Option<GammaMarket>> {
+        let url = format!("{}/markets/slug/{}", GAMMA_BASE_URL, slug);
+
+        match self.fetch_with_retry(&url).await {
+            Ok(response) => {
+                let market: GammaMarket = response
+                    .json()
+                    .await
+                    .map_err(|e| BacktestError::Network(format!("Failed to parse market response for slug {}: {}", slug, e)))?;
+                Ok(Some(market))
+            }
+            Err(_) => Ok(None), // 404 or other error — slug doesn't exist
+        }
     }
 
     /// Convert Gamma API market to HistoricalMarket struct.
+    /// Falls back to parsing start_date from slug timestamp if missing from API.
     fn convert_to_historical_market(&self, market: GammaMarket) -> BacktestResult<Option<HistoricalMarket>> {
-        // Parse dates (required)
+        // Parse start_date: API field → slug timestamp fallback
         let start_date = match market.start_date {
             Some(ref date_str) => DateTime::parse_from_rfc3339(date_str)
                 .map_err(|e| BacktestError::InvalidInput(format!("Failed to parse start_date: {}", e)))?
                 .with_timezone(&Utc),
-            None => {
-                debug!(condition_id = %market.condition_id, "Skipping market with no start_date");
-                return Ok(None);
-            }
+            None => match parse_slug_timestamp(&market.slug) {
+                Some(ts) => ts,
+                None => {
+                    debug!(condition_id = %market.condition_id, slug = %market.slug, "Skipping market with no start_date");
+                    return Ok(None);
+                }
+            },
         };
 
         let end_date = match market.end_date {
@@ -178,18 +270,20 @@ impl GammaFetcher {
             }
         };
 
-        // Extract token IDs (expect exactly 2 tokens: Yes/No or Up/Down)
-        if market.tokens.len() != 2 {
+        // Parse clobTokenIds JSON string (e.g. "[\"id1\", \"id2\"]")
+        let token_ids: Vec<String> = match market.clob_token_ids {
+            Some(ref ids_str) => serde_json::from_str(ids_str).unwrap_or_default(),
+            None => Vec::new(),
+        };
+
+        if token_ids.len() != 2 {
             debug!(
                 condition_id = %market.condition_id,
-                token_count = market.tokens.len(),
+                token_count = token_ids.len(),
                 "Skipping market with incorrect token count"
             );
             return Ok(None);
         }
-
-        let token_a = market.tokens[0].token_id.clone();
-        let token_b = market.tokens[1].token_id.clone();
 
         Ok(Some(HistoricalMarket {
             market_id: market.condition_id,
@@ -197,9 +291,9 @@ impl GammaFetcher {
             question: market.question,
             start_date,
             end_date,
-            token_a,
-            token_b,
-            neg_risk: market.neg_risk,
+            token_a: token_ids[0].clone(),
+            token_b: token_ids[1].clone(),
+            neg_risk: market.neg_risk.unwrap_or(false),
         }))
     }
 
@@ -281,17 +375,8 @@ mod tests {
             question: "Will BTC go up?".to_string(),
             start_date: Some("2025-01-01T00:00:00Z".to_string()),
             end_date: Some("2025-01-01T00:15:00Z".to_string()),
-            tokens: vec![
-                Token {
-                    token_id: "token_a".to_string(),
-                    outcome: "Up".to_string(),
-                },
-                Token {
-                    token_id: "token_b".to_string(),
-                    outcome: "Down".to_string(),
-                },
-            ],
-            neg_risk: false,
+            clob_token_ids: Some("[\"token_a\", \"token_b\"]".to_string()),
+            neg_risk: Some(false),
         };
 
         let result = fetcher.convert_to_historical_market(gamma_market).unwrap();
@@ -316,17 +401,8 @@ mod tests {
             question: "Will BTC go up?".to_string(),
             start_date: None,
             end_date: Some("2025-01-01T00:15:00Z".to_string()),
-            tokens: vec![
-                Token {
-                    token_id: "token_a".to_string(),
-                    outcome: "Up".to_string(),
-                },
-                Token {
-                    token_id: "token_b".to_string(),
-                    outcome: "Down".to_string(),
-                },
-            ],
-            neg_risk: false,
+            clob_token_ids: Some("[\"token_a\", \"token_b\"]".to_string()),
+            neg_risk: Some(false),
         };
 
         let result = fetcher.convert_to_historical_market(gamma_market).unwrap();
@@ -344,13 +420,8 @@ mod tests {
             question: "Will BTC go up?".to_string(),
             start_date: Some("2025-01-01T00:00:00Z".to_string()),
             end_date: Some("2025-01-01T00:15:00Z".to_string()),
-            tokens: vec![
-                Token {
-                    token_id: "token_a".to_string(),
-                    outcome: "Up".to_string(),
-                },
-            ],
-            neg_risk: false,
+            clob_token_ids: Some("[\"token_a\"]".to_string()),
+            neg_risk: Some(false),
         };
 
         let result = fetcher.convert_to_historical_market(gamma_market).unwrap();
@@ -470,7 +541,7 @@ mod tests {
         let end_date = Utc::now();
         let start_date = end_date - chrono::Duration::days(7);
 
-        let markets = fetcher.fetch_expired_markets("BTC", start_date, end_date).await;
+        let markets = fetcher.fetch_expired_markets("BTC", start_date, end_date, None).await;
 
         match markets {
             Ok(data) => {

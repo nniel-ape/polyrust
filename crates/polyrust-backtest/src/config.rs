@@ -15,15 +15,26 @@ pub struct BacktestConfig {
     pub end_date: DateTime<Utc>,
     /// Initial USDC balance
     pub initial_balance: Decimal,
-    /// Price history granularity in minutes
+    /// Price history granularity in seconds (e.g., 60 = 1min, 300 = 5min)
     #[serde(default = "default_fidelity")]
-    pub data_fidelity_mins: u64,
+    pub data_fidelity_secs: u64,
     /// Path to persistent historical data cache
     #[serde(default = "default_data_db_path")]
     pub data_db_path: String,
     /// Fee model configuration
     #[serde(default)]
     pub fees: FeeConfig,
+    /// Optional: Filter markets by exact duration (in seconds)
+    /// Example: 900 for 15-minute markets, 3600 for 1-hour markets
+    #[serde(default)]
+    pub market_duration_secs: Option<u64>,
+    /// Maximum trades to fetch per market (caps pagination to avoid 100k+ trade fetches).
+    /// Default: 2,000. Set to 0 or "none" (via env) for unlimited.
+    #[serde(default = "default_max_trades")]
+    pub max_trades_per_market: Option<usize>,
+    /// Number of markets to fetch concurrently (default: 10).
+    #[serde(default = "default_fetch_concurrency")]
+    pub fetch_concurrency: usize,
 }
 
 /// Fee model configuration for backtesting.
@@ -43,11 +54,19 @@ impl Default for FeeConfig {
 }
 
 fn default_fidelity() -> u64 {
-    1
+    60
 }
 
 fn default_data_db_path() -> String {
     "backtest_data.db".to_string()
+}
+
+fn default_max_trades() -> Option<usize> {
+    Some(2_000)
+}
+
+fn default_fetch_concurrency() -> usize {
+    10
 }
 
 impl Default for BacktestConfig {
@@ -58,9 +77,12 @@ impl Default for BacktestConfig {
             start_date: Utc::now(),
             end_date: Utc::now(),
             initial_balance: Decimal::ZERO,
-            data_fidelity_mins: 1,
+            data_fidelity_secs: 60,
             data_db_path: "backtest_data.db".to_string(),
             fees: FeeConfig::default(),
+            market_duration_secs: None,
+            max_trades_per_market: Some(2_000),
+            fetch_concurrency: 10,
         }
     }
 }
@@ -89,10 +111,10 @@ impl BacktestConfig {
         if let Ok(v) = std::env::var("POLY_BACKTEST_DATA_DB_PATH") {
             self.data_db_path = v;
         }
-        if let Ok(v) = std::env::var("POLY_BACKTEST_FIDELITY_MINS")
+        if let Ok(v) = std::env::var("POLY_BACKTEST_FIDELITY_SECS")
             && let Ok(fid) = v.parse::<u64>()
         {
-            self.data_fidelity_mins = fid;
+            self.data_fidelity_secs = fid;
         }
         if let Ok(v) = std::env::var("POLY_BACKTEST_MARKET_IDS") {
             self.market_ids = v
@@ -100,6 +122,42 @@ impl BacktestConfig {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
+        }
+        if let Ok(v) = std::env::var("POLY_BACKTEST_MARKET_DURATION_SECS")
+            && let Ok(dur) = v.parse::<u64>()
+        {
+            self.market_duration_secs = Some(dur);
+        }
+        if let Ok(v) = std::env::var("POLY_BACKTEST_FETCH_CONCURRENCY")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            self.fetch_concurrency = n;
+        }
+        if let Ok(v) = std::env::var("POLY_BACKTEST_MAX_TRADES_PER_MARKET") {
+            let lower = v.trim().to_lowercase();
+            if lower == "none" || lower == "0" {
+                self.max_trades_per_market = None;
+            } else if let Ok(n) = v.parse::<usize>() {
+                self.max_trades_per_market = Some(n);
+            }
+        }
+
+        // Validate fidelity
+        if self.data_fidelity_secs == 0 {
+            return Err(polyrust_core::error::PolyError::Config(
+                "data_fidelity_secs must be > 0".into(),
+            ));
+        }
+        if self.data_fidelity_secs > 86400 {
+            return Err(polyrust_core::error::PolyError::Config(
+                "data_fidelity_secs must be <= 86400 (24 hours)".into(),
+            ));
+        }
+        if self.data_fidelity_secs < 60 {
+            tracing::info!(
+                "Sub-minute granularity ({} seconds): synthesizing PriceChange events from trade data",
+                self.data_fidelity_secs
+            );
         }
 
         // Validate date range
@@ -127,7 +185,7 @@ mod tests {
         assert_eq!(config.strategy_name, "");
         assert_eq!(config.market_ids.len(), 0);
         assert_eq!(config.initial_balance, Decimal::ZERO);
-        assert_eq!(config.data_fidelity_mins, 1);
+        assert_eq!(config.data_fidelity_secs, 60);
         assert_eq!(config.data_db_path, "backtest_data.db");
         assert_eq!(config.fees.taker_fee_rate, dec!(0.0315));
     }
@@ -142,16 +200,19 @@ mod tests {
             start_date: start,
             end_date: end,
             initial_balance: dec!(1000.00),
-            data_fidelity_mins: 5,
+            data_fidelity_secs: 300,
             data_db_path: "custom_backtest_data.db".to_string(),
             fees: FeeConfig {
                 taker_fee_rate: dec!(0.02),
             },
+            market_duration_secs: None,
+            max_trades_per_market: Some(2_000),
+            fetch_concurrency: 10,
         };
         assert_eq!(config.strategy_name, "test-strategy");
         assert_eq!(config.market_ids.len(), 2);
         assert_eq!(config.initial_balance, dec!(1000.00));
-        assert_eq!(config.data_fidelity_mins, 5);
+        assert_eq!(config.data_fidelity_secs, 300);
         assert_eq!(config.data_db_path, "custom_backtest_data.db");
         assert_eq!(config.fees.taker_fee_rate, dec!(0.02));
     }
@@ -163,7 +224,7 @@ mod tests {
             start_date = "2025-01-01T00:00:00Z"
             end_date = "2025-01-31T23:59:59Z"
             initial_balance = "1000.00"
-            data_fidelity_mins = 5
+            data_fidelity_secs = 300
             data_db_path = "test_backtest.db"
 
             [fees]
@@ -171,7 +232,7 @@ mod tests {
         "#;
         let config: BacktestConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.strategy_name, "crypto-arb");
-        assert_eq!(config.data_fidelity_mins, 5);
+        assert_eq!(config.data_fidelity_secs, 300);
         assert_eq!(config.initial_balance, dec!(1000.00));
         assert_eq!(config.fees.taker_fee_rate, dec!(0.0250));
     }
@@ -184,7 +245,7 @@ mod tests {
             std::env::remove_var("POLY_BACKTEST_STRATEGY");
             std::env::remove_var("POLY_BACKTEST_INITIAL_BALANCE");
             std::env::remove_var("POLY_BACKTEST_DATA_DB_PATH");
-            std::env::remove_var("POLY_BACKTEST_FIDELITY_MINS");
+            std::env::remove_var("POLY_BACKTEST_FIDELITY_SECS");
             std::env::remove_var("POLY_BACKTEST_MARKET_IDS");
             std::env::remove_var("POLY_BACKTEST_START");
             std::env::remove_var("POLY_BACKTEST_END");
@@ -192,7 +253,7 @@ mod tests {
             std::env::set_var("POLY_BACKTEST_STRATEGY", "env-strategy");
             std::env::set_var("POLY_BACKTEST_INITIAL_BALANCE", "5000");
             std::env::set_var("POLY_BACKTEST_DATA_DB_PATH", "env_backtest.db");
-            std::env::set_var("POLY_BACKTEST_FIDELITY_MINS", "10");
+            std::env::set_var("POLY_BACKTEST_FIDELITY_SECS", "10");
             std::env::set_var("POLY_BACKTEST_MARKET_IDS", "market1,market2,market3");
             std::env::set_var("POLY_BACKTEST_START", "2025-01-01T00:00:00Z");
             std::env::set_var("POLY_BACKTEST_END", "2025-02-01T00:00:00Z");
@@ -202,7 +263,7 @@ mod tests {
         assert_eq!(config.strategy_name, "env-strategy");
         assert_eq!(config.initial_balance, dec!(5000));
         assert_eq!(config.data_db_path, "env_backtest.db");
-        assert_eq!(config.data_fidelity_mins, 10);
+        assert_eq!(config.data_fidelity_secs, 10);
         assert_eq!(config.market_ids, vec!["market1", "market2", "market3"]);
         assert_eq!(
             config.start_date,
@@ -222,7 +283,7 @@ mod tests {
             std::env::remove_var("POLY_BACKTEST_STRATEGY");
             std::env::remove_var("POLY_BACKTEST_INITIAL_BALANCE");
             std::env::remove_var("POLY_BACKTEST_DATA_DB_PATH");
-            std::env::remove_var("POLY_BACKTEST_FIDELITY_MINS");
+            std::env::remove_var("POLY_BACKTEST_FIDELITY_SECS");
             std::env::remove_var("POLY_BACKTEST_MARKET_IDS");
             std::env::remove_var("POLY_BACKTEST_START");
             std::env::remove_var("POLY_BACKTEST_END");
@@ -237,7 +298,7 @@ mod tests {
             std::env::remove_var("POLY_BACKTEST_STRATEGY");
             std::env::remove_var("POLY_BACKTEST_INITIAL_BALANCE");
             std::env::remove_var("POLY_BACKTEST_DATA_DB_PATH");
-            std::env::remove_var("POLY_BACKTEST_FIDELITY_MINS");
+            std::env::remove_var("POLY_BACKTEST_FIDELITY_SECS");
             std::env::remove_var("POLY_BACKTEST_MARKET_IDS");
             std::env::remove_var("POLY_BACKTEST_START");
             std::env::remove_var("POLY_BACKTEST_END");
@@ -266,7 +327,7 @@ mod tests {
             initial_balance = "1000"
         "#;
         let config: BacktestConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.data_fidelity_mins, 1); // default
+        assert_eq!(config.data_fidelity_secs, 60); // default
         assert_eq!(config.data_db_path, "backtest_data.db"); // default
         assert_eq!(config.fees.taker_fee_rate, dec!(0.0315)); // default
         assert!(config.market_ids.is_empty()); // default
