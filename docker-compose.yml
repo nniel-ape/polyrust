@@ -14,7 +14,7 @@ services:
       # Uncomment and customize as needed:
 
       # - POLY_PAPER_TRADING=true
-      - POLY_DASHBOARD_HOST=0.0.0.0  # Allow access from host machine
+      - POLY_DASHBOARD_HOST=0.0.0.0 # Allow access from host machine
       # - POLY_DASHBOARD_PORT=3000
       - POLY_DB_PATH=/app/data/polyrust.db
 
@@ -32,7 +32,7 @@ services:
       # - POLY_RPC_URLS=https://polygon-rpc.com,https://rpc.ankr.com/polygon
 
       # Logging — polyrust=debug enables pipeline skip-reason diagnostics
-      - RUST_LOG=${RUST_LOG:-info,polyrust=debug}
+      - RUST_LOG=${RUST_LOG:-info,polyrust=info}
     restart: unless-stopped
     networks:
       - polyrust-net
