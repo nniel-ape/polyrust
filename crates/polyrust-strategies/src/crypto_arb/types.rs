@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
 use polyrust_core::prelude::*;
+use crate::crypto_arb::config::ReferenceQualityLevel;
 
 /// How accurately the reference price matches the market's actual start-of-window price.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,21 @@ impl ReferenceQuality {
             ReferenceQuality::Historical(_) => Decimal::new(85, 2),
             ReferenceQuality::Current => Decimal::new(70, 2),
         }
+    }
+
+    /// Convert to quality level for threshold comparison.
+    pub fn as_level(&self) -> ReferenceQualityLevel {
+        match self {
+            ReferenceQuality::Exact => ReferenceQualityLevel::Exact,
+            ReferenceQuality::OnChain(_) => ReferenceQualityLevel::OnChain,
+            ReferenceQuality::Historical(_) => ReferenceQualityLevel::Historical,
+            ReferenceQuality::Current => ReferenceQualityLevel::Current,
+        }
+    }
+
+    /// Check if this quality meets the minimum required level.
+    pub fn meets_threshold(&self, min_level: ReferenceQualityLevel) -> bool {
+        self.as_level() >= min_level
     }
 }
 
@@ -224,6 +240,9 @@ pub struct ArbitragePosition {
     /// Estimated fee **per share** at entry (for P&L calculation).
     /// Total fee for position = `estimated_fee * size`.
     pub estimated_fee: Decimal,
+    /// Market price (best bid) at entry time (for post-entry confirmation).
+    /// Used to detect false signals when price drops shortly after entry.
+    pub entry_market_price: Decimal,
 }
 
 /// A detected price spike event.

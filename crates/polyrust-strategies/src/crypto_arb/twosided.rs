@@ -192,6 +192,7 @@ impl TwoSidedStrategy {
             peak_bid: pending.price,
             mode: pending.mode.clone(),
             estimated_fee: pending.estimated_fee,
+            entry_market_price: pending.price,
         };
 
         info!(
@@ -248,6 +249,7 @@ impl TwoSidedStrategy {
             peak_bid: price,
             mode: lo.mode,
             estimated_fee: lo.estimated_fee,
+            entry_market_price: price,
         };
 
         self.base.record_position(position).await;

@@ -32,6 +32,31 @@ impl TailEndStrategy {
         Self { base }
     }
 
+    /// Get the dynamic ask threshold based on time remaining.
+    /// Uses the tightest (highest) threshold where time_remaining <= bucket threshold.
+    /// Falls back to legacy ask_threshold if no dynamic thresholds match.
+    #[cfg(test)]
+    pub(crate) fn get_ask_threshold(&self, time_remaining_secs: i64) -> Decimal {
+        self.get_ask_threshold_impl(time_remaining_secs)
+    }
+
+    fn get_ask_threshold_impl(&self, time_remaining_secs: i64) -> Decimal {
+        let thresholds = &self.base.config.tailend.dynamic_thresholds;
+
+        // Sort by time bucket ascending to find the tightest applicable threshold first
+        let mut sorted = thresholds.clone();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for (bucket_secs, threshold) in sorted {
+            if time_remaining_secs <= bucket_secs as i64 {
+                return threshold;
+            }
+        }
+
+        // Fallback to legacy threshold
+        self.base.config.tailend.ask_threshold
+    }
+
     /// Evaluate tail-end opportunity for a market.
     async fn evaluate_opportunity(
         &self,
@@ -70,6 +95,18 @@ impl TailEndStrategy {
             debug!(
                 market = %market_id,
                 "TailEnd skip: mode auto-disabled by performance tracker"
+            );
+            return None;
+        }
+
+        // Check reference quality against configured threshold
+        let min_quality = self.base.config.tailend.min_reference_quality;
+        if !market.reference_quality.meets_threshold(min_quality) {
+            debug!(
+                market = %market_id,
+                quality = ?market.reference_quality,
+                min_quality = ?min_quality,
+                "TailEnd skip: reference quality below threshold"
             );
             return None;
         }
@@ -116,13 +153,87 @@ impl TailEndStrategy {
             }
         };
 
-        // Ask must be >= configured threshold for tail-end
-        if ask_price < self.base.config.tailend.ask_threshold {
+        // Get best bid for spread calculation
+        let bid = match predicted {
+            OutcomeSide::Up | OutcomeSide::Yes => {
+                md.orderbooks
+                    .get(&market.market.token_ids.outcome_a)
+                    .and_then(|ob| ob.best_bid())
+            }
+            OutcomeSide::Down | OutcomeSide::No => {
+                md.orderbooks
+                    .get(&market.market.token_ids.outcome_b)
+                    .and_then(|ob| ob.best_bid())
+            }
+        };
+        drop(md);
+
+        // Ask must be >= dynamic threshold for tail-end (based on time remaining)
+        let ask_threshold = self.get_ask_threshold_impl(time_remaining);
+        if ask_price < ask_threshold {
             debug!(
                 market = %market_id,
                 ask = %ask_price,
+                threshold = %ask_threshold,
                 time_remaining = time_remaining,
-                "TailEnd skip: ask below 0.90 threshold"
+                "TailEnd skip: ask below dynamic threshold"
+            );
+            return None;
+        }
+
+        // Check spread to filter out illiquid markets
+        if let Some(bid_price) = bid
+            && bid_price > Decimal::ZERO
+            && ask_price > Decimal::ZERO
+        {
+            let spread = ask_price - bid_price;
+            let mid_price = (ask_price + bid_price) / Decimal::new(2, 0);
+            let spread_pct = spread / mid_price;
+            let max_spread = self.base.config.tailend.max_spread_bps / Decimal::new(10000, 0);
+
+            if spread_pct > max_spread {
+                debug!(
+                    market = %market_id,
+                    spread_pct = %spread_pct,
+                    max_spread = %max_spread,
+                    bid = %bid_price,
+                    ask = %ask_price,
+                    "TailEnd skip: spread too wide (illiquidity filter)"
+                );
+                return None;
+            }
+        }
+
+        // Check sustained price direction (momentum filter)
+        let min_sustained = self.base.config.tailend.min_sustained_secs;
+        let sustained = self
+            .base
+            .check_sustained_direction(&market.coin, market.reference_price, predicted, min_sustained)
+            .await;
+
+        if !sustained {
+            debug!(
+                market = %market_id,
+                coin = %market.coin,
+                min_sustained_secs = min_sustained,
+                "TailEnd skip: price direction not sustained long enough"
+            );
+            return None;
+        }
+
+        // Check recent volatility (wick filter)
+        let max_volatility = self.base.config.tailend.max_recent_volatility;
+        if let Some(volatility) = self
+            .base
+            .max_recent_volatility(&market.coin, market.reference_price, 10)
+            .await
+            && volatility > max_volatility
+        {
+            debug!(
+                market = %market_id,
+                volatility = %volatility,
+                max_volatility = %max_volatility,
+                "TailEnd skip: recent volatility too high (choppy market)"
             );
             return None;
         }
@@ -131,13 +242,17 @@ impl TailEndStrategy {
         let estimated_fee = taker_fee(ask_price, self.base.config.fee.taker_fee_rate);
         let net_margin = profit_margin - estimated_fee;
 
+        // Apply quality factor to confidence (reduces position size via Kelly sizing)
+        let quality_factor = market.reference_quality.quality_factor();
+        let confidence = Decimal::ONE * quality_factor;
+
         Some(ArbitrageOpportunity {
             mode: ArbitrageMode::TailEnd,
             market_id: market_id.clone(),
             outcome_to_buy: predicted,
             token_id: token_id.clone(),
             buy_price: ask_price,
-            confidence: Decimal::ONE, // Tail-end always has max confidence
+            confidence,
             profit_margin,
             estimated_fee,
             net_margin,
@@ -219,6 +334,7 @@ impl TailEndStrategy {
             peak_bid: pending.price,
             mode: pending.mode.clone(),
             estimated_fee: pending.estimated_fee,
+            entry_market_price: pending.price, // Entry price is the market price at entry
         };
 
         info!(
@@ -418,6 +534,39 @@ impl Strategy for TailEndStrategy {
                         let mut pending_sl = self.base.pending_stop_loss.write().await;
                         pending_sl.insert(pos.token_id.clone(), exit_price);
                         actions.push(action);
+                        continue;
+                    }
+
+                    // Post-entry confirmation: exit if price drops significantly
+                    // within 10 seconds of entry (catches false signals immediately)
+                    let seconds_since_entry = Utc::now()
+                        .signed_duration_since(pos.entry_time)
+                        .num_seconds();
+                    if seconds_since_entry <= 10
+                        && let Some(current_bid) = snapshot.best_bid()
+                    {
+                        // Exit if market price drops below 0.85 (85%)
+                        let post_entry_exit_threshold = Decimal::new(85, 2);
+                        if current_bid < post_entry_exit_threshold {
+                            info!(
+                                market = %pos.market_id,
+                                entry_market_price = %pos.entry_market_price,
+                                current_bid = %current_bid,
+                                seconds_since_entry = seconds_since_entry,
+                                "TailEnd post-entry exit triggered: price dropped below 0.85"
+                            );
+                            let order = OrderRequest {
+                                token_id: pos.token_id.clone(),
+                                price: current_bid,
+                                size: pos.size,
+                                side: OrderSide::Sell,
+                                order_type: OrderType::Fok,
+                                neg_risk: false,
+                            };
+                            let mut pending_sl = self.base.pending_stop_loss.write().await;
+                            pending_sl.insert(pos.token_id.clone(), current_bid);
+                            actions.push(Action::PlaceOrder(order));
+                        }
                     }
                 }
 

@@ -317,6 +317,89 @@ impl CryptoArbBase {
             .and_then(|h| h.back().map(|(_, p, _)| *p))
     }
 
+    /// Check if price has favored the given direction for at least `min_sustained_secs`.
+    ///
+    /// Returns true if for the last `min_sustained_secs`, all prices consistently
+    /// indicate the same outcome (above reference for Up, below for Down).
+    pub async fn check_sustained_direction(
+        &self,
+        coin: &str,
+        reference_price: Decimal,
+        predicted: OutcomeSide,
+        min_sustained_secs: u64,
+    ) -> bool {
+        let history = self.price_history.read().await;
+        let entries = match history.get(coin) {
+            Some(e) => e,
+            None => return false,
+        };
+
+        let now = Utc::now();
+        let cutoff = now - chrono::Duration::seconds(min_sustained_secs as i64);
+
+        // Get all entries within the sustained window
+        let window_entries: Vec<_> = entries.iter().filter(|(ts, _, _)| *ts >= cutoff).collect();
+
+        // Need at least 2 entries to establish a direction
+        if window_entries.len() < 2 {
+            return false;
+        }
+
+        // Check if ALL entries in the window favor the predicted direction
+        match predicted {
+            OutcomeSide::Up | OutcomeSide::Yes => {
+                window_entries.iter().all(|(_, price, _)| *price > reference_price)
+            }
+            OutcomeSide::Down | OutcomeSide::No => {
+                window_entries.iter().all(|(_, price, _)| *price < reference_price)
+            }
+        }
+    }
+
+    /// Calculate maximum volatility (price wick) in the last `window_secs`.
+    ///
+    /// Returns the max percentage deviation from the reference price
+    /// as an absolute value (always positive).
+    pub async fn max_recent_volatility(
+        &self,
+        coin: &str,
+        reference_price: Decimal,
+        window_secs: u64,
+    ) -> Option<Decimal> {
+        if reference_price.is_zero() {
+            return None;
+        }
+
+        let history = self.price_history.read().await;
+        let entries = history.get(coin)?;
+
+        let now = Utc::now();
+        let cutoff = now - chrono::Duration::seconds(window_secs as i64);
+
+        let window_entries: Vec<_> = entries.iter().filter(|(ts, _, _)| *ts >= cutoff).collect();
+
+        if window_entries.is_empty() {
+            return None;
+        }
+
+        let max_price = window_entries
+            .iter()
+            .map(|(_, p, _)| *p)
+            .max()
+            .unwrap_or(reference_price);
+        let min_price = window_entries
+            .iter()
+            .map(|(_, p, _)| *p)
+            .min()
+            .unwrap_or(reference_price);
+
+        // Calculate max deviation from reference (wick in either direction)
+        let up_wick = (max_price - reference_price).abs() / reference_price;
+        let down_wick = (min_price - reference_price).abs() / reference_price;
+
+        Some(up_wick.max(down_wick))
+    }
+
     // -------------------------------------------------------------------------
     // Spike detection
     // -------------------------------------------------------------------------

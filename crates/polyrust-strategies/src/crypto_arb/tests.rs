@@ -538,6 +538,7 @@ async fn base_can_open_position() {
                 peak_bid: dec!(0.60),
                 mode: ArbitrageMode::Confirmed,
                 estimated_fee: Decimal::ZERO,
+                entry_market_price: dec!(0.60),
             };
             positions
                 .entry(pos.market_id.clone())
@@ -571,4 +572,231 @@ async fn base_is_mode_disabled() {
 
     // Now should be disabled (0% win rate after 3 trades)
     assert!(base.is_mode_disabled(&ArbitrageMode::Confirmed).await);
+}
+
+// ---------------------------------------------------------------------------
+// ReferenceQuality threshold tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reference_quality_meets_threshold() {
+    use super::config::ReferenceQualityLevel;
+
+    // Quality ordering: Current < Historical < OnChain < Exact (from lowest to highest)
+
+    // Exact is highest quality, meets all thresholds
+    assert!(ReferenceQuality::Exact.meets_threshold(ReferenceQualityLevel::Exact));
+    assert!(ReferenceQuality::Exact.meets_threshold(ReferenceQualityLevel::OnChain));
+    assert!(ReferenceQuality::Exact.meets_threshold(ReferenceQualityLevel::Historical));
+    assert!(ReferenceQuality::Exact.meets_threshold(ReferenceQualityLevel::Current));
+
+    // OnChain is higher quality than Historical and Current, but not Exact
+    // OnChain(10).as_level() = OnChain
+    // OnChain >= OnChain: true
+    // OnChain >= Historical: true
+    // OnChain >= Current: true
+    // OnChain >= Exact: false (OnChain < Exact)
+    assert!(!ReferenceQuality::OnChain(10).meets_threshold(ReferenceQualityLevel::Exact));
+    assert!(ReferenceQuality::OnChain(10).meets_threshold(ReferenceQualityLevel::OnChain));
+    assert!(ReferenceQuality::OnChain(10).meets_threshold(ReferenceQualityLevel::Historical));
+    assert!(ReferenceQuality::OnChain(10).meets_threshold(ReferenceQualityLevel::Current));
+
+    // Historical is higher than Current, but not OnChain or Exact
+    assert!(!ReferenceQuality::Historical(10).meets_threshold(ReferenceQualityLevel::Exact));
+    assert!(!ReferenceQuality::Historical(10).meets_threshold(ReferenceQualityLevel::OnChain));
+    assert!(ReferenceQuality::Historical(10).meets_threshold(ReferenceQualityLevel::Historical));
+    assert!(ReferenceQuality::Historical(10).meets_threshold(ReferenceQualityLevel::Current));
+
+    // Current is lowest quality, only meets Current
+    assert!(!ReferenceQuality::Current.meets_threshold(ReferenceQualityLevel::Exact));
+    assert!(!ReferenceQuality::Current.meets_threshold(ReferenceQualityLevel::OnChain));
+    assert!(!ReferenceQuality::Current.meets_threshold(ReferenceQualityLevel::Historical));
+    assert!(ReferenceQuality::Current.meets_threshold(ReferenceQualityLevel::Current));
+}
+
+// ---------------------------------------------------------------------------
+// Price momentum tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn check_sustained_direction_up() {
+    let base = make_base_no_chainlink();
+
+    // Record prices consistently above reference
+    let now = Utc::now();
+    let reference = dec!(50000);
+
+    {
+        let mut history = base.price_history.write().await;
+        let mut entries = VecDeque::new();
+        // Use longer times to ensure they are within the sustained window
+        entries.push_back((now - Duration::seconds(10), dec!(50100), "rtds".to_string()));
+        entries.push_back((now - Duration::seconds(6), dec!(50200), "rtds".to_string()));
+        entries.push_back((now - Duration::seconds(3), dec!(50300), "rtds".to_string()));
+        entries.push_back((now - Duration::seconds(1), dec!(50400), "rtds".to_string()));
+        history.insert("BTC".to_string(), entries);
+    }
+
+    // Should detect sustained up direction when looking back 5 seconds
+    assert!(
+        base.check_sustained_direction("BTC", reference, OutcomeSide::Up, 5)
+            .await
+    );
+    // Should NOT detect sustained down direction
+    assert!(
+        !base.check_sustained_direction("BTC", reference, OutcomeSide::Down, 5)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn check_sustained_direction_not_sustained() {
+    let base = make_base_no_chainlink();
+
+    // Record prices that cross the reference
+    let now = Utc::now();
+    let reference = dec!(50000);
+
+    {
+        let mut history = base.price_history.write().await;
+        let mut entries = VecDeque::new();
+        entries.push_back((now - Duration::seconds(5), dec!(49900), "rtds".to_string())); // Below
+        entries.push_back((now - Duration::seconds(3), dec!(50100), "rtds".to_string())); // Above
+        entries.push_back((now - Duration::seconds(1), dec!(50200), "rtds".to_string())); // Above
+        history.insert("BTC".to_string(), entries);
+    }
+
+    // Should NOT detect sustained up direction (one entry was below)
+    assert!(
+        !base.check_sustained_direction("BTC", reference, OutcomeSide::Up, 3)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn max_recent_volatility_no_wick() {
+    let base = make_base_no_chainlink();
+
+    // Record stable prices
+    let now = Utc::now();
+    let reference = dec!(50000);
+
+    {
+        let mut history = base.price_history.write().await;
+        let mut entries = VecDeque::new();
+        entries.push_back((now - Duration::seconds(8), dec!(50100), "rtds".to_string()));
+        entries.push_back((now - Duration::seconds(5), dec!(50200), "rtds".to_string()));
+        entries.push_back((now - Duration::seconds(2), dec!(50150), "rtds".to_string()));
+        history.insert("BTC".to_string(), entries);
+    }
+
+    let volatility = base.max_recent_volatility("BTC", reference, 10).await;
+    assert!(volatility.is_some());
+    // Max price was 50200, reference is 50000
+    // Volatility = (50200 - 50000) / 50000 = 0.004
+    assert!(volatility.unwrap() < dec!(0.01)); // Less than 1%
+}
+
+#[tokio::test]
+async fn max_recent_volatility_with_wick() {
+    let base = make_base_no_chainlink();
+
+    // Record prices with a significant wick
+    let now = Utc::now();
+    let reference = dec!(50000);
+
+    {
+        let mut history = base.price_history.write().await;
+        let mut entries = VecDeque::new();
+        entries.push_back((now - Duration::seconds(8), dec!(50100), "rtds".to_string()));
+        entries.push_back((now - Duration::seconds(5), dec!(51000), "rtds".to_string())); // 2% wick
+        entries.push_back((now - Duration::seconds(2), dec!(50150), "rtds".to_string()));
+        history.insert("BTC".to_string(), entries);
+    }
+
+    let volatility = base.max_recent_volatility("BTC", reference, 10).await;
+    assert!(volatility.is_some());
+    // Max price was 51000, reference is 50000
+    // Volatility = (51000 - 50000) / 50000 = 0.02
+    assert!(volatility.unwrap() >= dec!(0.02)); // At least 2%
+}
+
+// ---------------------------------------------------------------------------
+// TailEndConfig tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tailend_config_defaults() {
+    use super::config::{ReferenceQualityLevel, TailEndConfig};
+
+    let config = TailEndConfig::default();
+    assert!(!config.enabled);
+    assert_eq!(config.time_threshold_secs, 120);
+    assert_eq!(config.ask_threshold, dec!(0.90));
+    assert_eq!(config.min_reference_quality, ReferenceQualityLevel::Historical);
+    assert_eq!(config.max_spread_bps, dec!(100));
+    assert_eq!(config.min_sustained_secs, 3);
+    assert_eq!(config.max_recent_volatility, dec!(0.01));
+    assert!(!config.dynamic_thresholds.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic threshold tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dynamic_ask_threshold_tightens_as_expiry_approaches() {
+    use super::config::TailEndConfig;
+    use super::tailend::TailEndStrategy;
+    use std::sync::Arc;
+
+    let mut config = super::config::ArbitrageConfig::default();
+    config.tailend.dynamic_thresholds = vec![
+        (120, dec!(0.90)), // 0.90 at 120s
+        (90, dec!(0.92)),  // 0.92 at 90s
+        (60, dec!(0.93)),  // 0.93 at 60s
+        (30, dec!(0.95)),  // 0.95 at 30s
+    ];
+
+    let base = Arc::new(super::base::CryptoArbBase::new(config, vec![]));
+    let strategy = TailEndStrategy::new(base);
+
+    // At 120s, should use 0.90 (120s bucket)
+    assert_eq!(strategy.get_ask_threshold(120), dec!(0.90));
+    // At 119s, should still use 0.90 (120s bucket is tightest that applies)
+    assert_eq!(strategy.get_ask_threshold(119), dec!(0.90));
+
+    // At 90s, should use 0.92 (90s bucket)
+    assert_eq!(strategy.get_ask_threshold(90), dec!(0.92));
+    // At 89s, should still use 0.92 (90s bucket is tightest that applies)
+    assert_eq!(strategy.get_ask_threshold(89), dec!(0.92));
+
+    // At 60s, should use 0.93 (60s bucket)
+    assert_eq!(strategy.get_ask_threshold(60), dec!(0.93));
+    // At 45s, should use 0.93 (60s bucket is tightest that applies)
+    assert_eq!(strategy.get_ask_threshold(45), dec!(0.93));
+
+    // At 30s, should use 0.95 (30s bucket - tightest)
+    assert_eq!(strategy.get_ask_threshold(30), dec!(0.95));
+    // At 15s, should use 0.95 (30s bucket is tightest that applies)
+    assert_eq!(strategy.get_ask_threshold(15), dec!(0.95));
+
+    // At 1s, should use 0.95 (30s bucket is tightest that applies)
+    assert_eq!(strategy.get_ask_threshold(1), dec!(0.95));
+}
+
+#[test]
+fn dynamic_ask_threshold_fallback_to_legacy() {
+    use super::tailend::TailEndStrategy;
+    use std::sync::Arc;
+
+    let mut config = super::config::ArbitrageConfig::default();
+    config.tailend.dynamic_thresholds = vec![]; // Empty - should fallback
+    config.tailend.ask_threshold = dec!(0.88); // Legacy threshold
+
+    let base = Arc::new(super::base::CryptoArbBase::new(config, vec![]));
+    let strategy = TailEndStrategy::new(base);
+
+    // Should fallback to legacy threshold when dynamic thresholds is empty
+    assert_eq!(strategy.get_ask_threshold(60), dec!(0.88));
 }

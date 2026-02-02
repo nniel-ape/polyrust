@@ -8,6 +8,28 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
+// Reference Quality Level
+// ---------------------------------------------------------------------------
+
+/// Minimum required reference price quality for tail-end entry.
+///
+/// Used to filter out trades when the reference price is stale or inaccurate.
+/// Ordered from lowest to highest quality (for Ord derivation).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceQualityLevel {
+    /// Current price at discovery time (least accurate, fallback).
+    #[default]
+    Current,
+    /// Historical price entry (within 30s of window start).
+    Historical,
+    /// On-chain Chainlink price lookup.
+    OnChain,
+    /// Exact boundary snapshot (captured within 2s of window start).
+    Exact,
+}
+
+// ---------------------------------------------------------------------------
 // Per-Mode Configuration Structs
 // ---------------------------------------------------------------------------
 
@@ -15,7 +37,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// Entry conditions:
 /// - Time remaining < `time_threshold_secs` (default 120s)
-/// - Predicted winner's ask >= `ask_threshold` (default 0.90)
+/// - Predicted winner's ask >= dynamic threshold based on time remaining
+/// - Reference quality >= `min_reference_quality` (default Historical)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TailEndConfig {
@@ -24,7 +47,34 @@ pub struct TailEndConfig {
     /// Maximum seconds remaining to enter (default 120).
     pub time_threshold_secs: u64,
     /// Minimum ask price to enter (default 0.90).
+    /// Deprecated: use dynamic thresholds below instead.
     pub ask_threshold: Decimal,
+    /// Minimum required reference quality to enter (default Historical).
+    /// Trades with Current quality will be skipped.
+    pub min_reference_quality: ReferenceQualityLevel,
+    /// Dynamic ask thresholds by time bucket (in seconds remaining).
+    /// Higher thresholds as expiration approaches to reduce false positives.
+    /// Default: 120s->0.90, 90s->0.92, 60s->0.93, 30s->0.95
+    #[serde(default = "default_time_thresholds")]
+    pub dynamic_thresholds: Vec<(u64, Decimal)>,
+    /// Maximum spread in basis points (1 bp = 0.01%, default 100 = 1%).
+    /// Filters out illiquid markets where wide spread masquerades as certainty.
+    pub max_spread_bps: Decimal,
+    /// Minimum seconds the crypto price must have favored the predicted direction.
+    /// Filters out sudden spikes that immediately reverse. Default: 3 seconds.
+    pub min_sustained_secs: u64,
+    /// Maximum recent volatility (price wick) in last 10 seconds.
+    /// Filters out choppy/volatile conditions. Default: 0.01 (1%).
+    pub max_recent_volatility: Decimal,
+}
+
+fn default_time_thresholds() -> Vec<(u64, Decimal)> {
+    vec![
+        (120, Decimal::new(90, 2)),  // 0.90 at 120s
+        (90, Decimal::new(92, 2)),   // 0.92 at 90s
+        (60, Decimal::new(93, 2)),   // 0.93 at 60s
+        (30, Decimal::new(95, 2)),   // 0.95 at 30s
+    ]
 }
 
 impl Default for TailEndConfig {
@@ -33,6 +83,11 @@ impl Default for TailEndConfig {
             enabled: false,
             time_threshold_secs: 120,
             ask_threshold: Decimal::new(90, 2), // 0.90
+            min_reference_quality: ReferenceQualityLevel::Historical, // Default: skip Current quality
+            dynamic_thresholds: default_time_thresholds(),
+            max_spread_bps: Decimal::new(100, 0), // 100 bps = 1%
+            min_sustained_secs: 3,
+            max_recent_volatility: Decimal::new(1, 2), // 0.01 = 1%
         }
     }
 }
@@ -284,6 +339,31 @@ impl Default for PerformanceConfig {
     }
 }
 
+/// Order amount rounding configuration.
+///
+/// Polymarket API has specific decimal precision requirements:
+/// - Maker amount (USDC total): max 2 decimals
+/// - Taker amount (shares): max 2 decimals (SDK LOT_SIZE_SCALE = 2)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoundingConfig {
+    /// Maximum decimal places for order size (taker amount).
+    /// SDK enforces max 2 decimals (LOT_SIZE_SCALE = 2).
+    pub size_decimals: u32,
+    /// Maximum decimal places for order price.
+    /// Tick size typically determines this (0.01 = 2 decimals).
+    pub price_decimals: u32,
+}
+
+impl Default for RoundingConfig {
+    fn default() -> Self {
+        Self {
+            size_decimals: 2,  // SDK enforces max 2 (LOT_SIZE_SCALE = 2)
+            price_decimals: 2, // Standard tick size
+        }
+    }
+}
+
 /// Configuration for the crypto arbitrage strategy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -338,6 +418,9 @@ pub struct ArbitrageConfig {
     /// Performance tracking configuration.
     #[serde(default)]
     pub performance: PerformanceConfig,
+    /// Order amount rounding configuration.
+    #[serde(default)]
+    pub rounding: RoundingConfig,
 }
 
 impl Default for ArbitrageConfig {
@@ -361,6 +444,7 @@ impl Default for ArbitrageConfig {
             sizing: SizingConfig::default(),
             stop_loss: StopLossConfig::default(),
             performance: PerformanceConfig::default(),
+            rounding: RoundingConfig::default(),
         }
     }
 }
