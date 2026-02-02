@@ -4,7 +4,7 @@ use chrono::Utc;
 use polyrust_backtest::{BacktestConfig, BacktestEngine, DataFetcher, HistoricalDataStore};
 use polyrust_core::prelude::*;
 use polyrust_dashboard::Dashboard;
-use polyrust_execution::{FillMode, LiveBackend, PaperBackend};
+use polyrust_execution::{FillMode, LiveBackend, PaperBackend, RoundingConfig};
 use polyrust_market::{ClobFeed, DiscoveryConfig, DiscoveryFeed, MarketDataFeed, PriceFeed};
 use polyrust_store::Store;
 use polyrust_strategies::{
@@ -81,7 +81,11 @@ async fn main() -> anyhow::Result<()> {
         ))
     } else {
         info!("live trading mode enabled");
-        Box::new(LiveBackend::new(&config).await?)
+        let rounding = RoundingConfig {
+            size_decimals: arb_config.rounding.size_decimals,
+            price_decimals: arb_config.rounding.price_decimals,
+        };
+        Box::new(LiveBackend::new_with_rounding(&config, rounding).await?)
     };
 
     // Create feed command channel for engine → ClobFeed communication

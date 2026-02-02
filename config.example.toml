@@ -181,6 +181,19 @@ initial_balance = 10000  # Starting USDC balance
 # window_size = 50        # Rolling window for recent P&L tracking
 # auto_disable = false    # Auto-disable modes with low win rate
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Order Rounding Precision
+# ─────────────────────────────────────────────────────────────────────────────
+# Polymarket API has specific decimal precision requirements:
+# - Maker amount (USDC total): max 2 decimals
+# - Taker amount (shares): max 2 decimals (SDK LOT_SIZE_SCALE = 2)
+#
+# Only change these if the API requirements change.
+
+# [arbitrage.rounding]
+# size_decimals = 2       # Max 2 decimals (SDK LOT_SIZE_SCALE limit)
+# price_decimals = 2      # Standard tick size for 15-min markets (0.01)
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # BACKTESTING
 # ═══════════════════════════════════════════════════════════════════════════════

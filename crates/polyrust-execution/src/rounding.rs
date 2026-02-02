@@ -9,7 +9,16 @@ use rust_decimal::Decimal;
 /// The SDK's `limit_order()` builder handles tick size validation internally
 /// via cached tick sizes per token, so this is a safety net for the common case.
 pub fn round_price(price: Decimal) -> Decimal {
-    round_to_tick(price, Decimal::new(1, 2)) // 0.01
+    round_price_with_decimals(price, 2)
+}
+
+/// Round a price to the specified number of decimal places.
+///
+/// Default is 2 decimals (standard tick size for 15-min markets).
+/// Rounds DOWN to avoid overpaying.
+pub fn round_price_with_decimals(price: Decimal, decimals: u32) -> Decimal {
+    let tick = Decimal::new(1, decimals);
+    round_to_tick(price, tick)
 }
 
 /// Round a price to the specified tick size.
@@ -26,7 +35,16 @@ pub fn round_to_tick(price: Decimal, tick_size: Decimal) -> Decimal {
 ///
 /// Polymarket requires order sizes to have at most 2 decimal places.
 pub fn round_size(size: Decimal) -> Decimal {
-    round_to_tick(size, Decimal::new(1, 2))
+    round_size_with_decimals(size, 2)
+}
+
+/// Round a size to the specified number of decimal places.
+///
+/// Default is 5 decimals (max allowed by Polymarket API for taker amount).
+/// Rounds DOWN to avoid exceeding available balance.
+pub fn round_size_with_decimals(size: Decimal, decimals: u32) -> Decimal {
+    let tick = Decimal::new(1, decimals);
+    round_to_tick(size, tick)
 }
 
 #[cfg(test)]
@@ -57,6 +75,16 @@ mod tests {
     #[test]
     fn round_price_one() {
         assert_eq!(round_price(dec!(1.00)), dec!(1.00));
+    }
+
+    #[test]
+    fn round_price_with_decimals_3() {
+        assert_eq!(round_price_with_decimals(dec!(0.4567), 3), dec!(0.456));
+    }
+
+    #[test]
+    fn round_price_with_decimals_5() {
+        assert_eq!(round_price_with_decimals(dec!(0.456789), 5), dec!(0.45678));
     }
 
     #[test]
@@ -92,5 +120,15 @@ mod tests {
     #[test]
     fn round_size_rounds_down() {
         assert_eq!(round_size(dec!(100.999)), dec!(100.99));
+    }
+
+    #[test]
+    fn round_size_with_decimals_5() {
+        assert_eq!(round_size_with_decimals(dec!(100.123456), 5), dec!(100.12345));
+    }
+
+    #[test]
+    fn round_size_with_decimals_0() {
+        assert_eq!(round_size_with_decimals(dec!(100.99), 0), dec!(100));
     }
 }

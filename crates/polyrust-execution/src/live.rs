@@ -16,7 +16,27 @@ use polyrust_core::config::Config;
 use polyrust_core::error::{PolyError, Result};
 use polyrust_core::types::*;
 
-use crate::rounding::{round_price, round_size};
+use crate::rounding::{round_price_with_decimals, round_size_with_decimals};
+
+/// Rounding configuration for order amounts.
+#[derive(Debug, Clone, Copy)]
+pub struct RoundingConfig {
+    /// Maximum decimal places for order size (taker amount).
+    /// SDK enforces max 2 decimals (LOT_SIZE_SCALE = 2).
+    pub size_decimals: u32,
+    /// Maximum decimal places for order price.
+    /// Tick size typically determines this (0.01 = 2 decimals).
+    pub price_decimals: u32,
+}
+
+impl Default for RoundingConfig {
+    fn default() -> Self {
+        Self {
+            size_decimals: 2,  // SDK enforces max 2 (LOT_SIZE_SCALE = 2)
+            price_decimals: 2, // Standard tick size
+        }
+    }
+}
 
 /// Live execution backend using rs-clob-client for real Polymarket orders.
 ///
@@ -26,6 +46,8 @@ pub struct LiveBackend {
     /// Boxed inner implementation to erase the `Kind` type parameter from
     /// `Client<Authenticated<K>>` (Normal vs Builder mode).
     inner: Box<dyn LiveBackendInner>,
+    /// Rounding configuration for order amounts.
+    rounding: RoundingConfig,
 }
 
 /// Trait object wrapper to erase the `Kind` generic from `Client<Authenticated<K>>`.
@@ -50,7 +72,19 @@ impl LiveBackend {
     ///
     /// Authenticates with Polymarket using the private key from config.
     /// If `safe_address` is set, uses GnosisSafe signature type; otherwise EOA.
+    /// Uses default rounding config (5 decimals for size, 2 for price).
     pub async fn new(config: &Config) -> Result<Self> {
+        Self::new_with_rounding(config, RoundingConfig::default()).await
+    }
+
+    /// Create a new LiveBackend with custom rounding configuration.
+    ///
+    /// Authenticates with Polymarket using the private key from config.
+    /// If `safe_address` is set, uses GnosisSafe signature type; otherwise EOA.
+    pub async fn new_with_rounding(
+        config: &Config,
+        rounding: RoundingConfig,
+    ) -> Result<Self> {
         let private_key = config.polymarket.private_key.as_deref().ok_or_else(|| {
             PolyError::Config("POLY_PRIVATE_KEY is required for live trading".into())
         })?;
@@ -80,6 +114,8 @@ impl LiveBackend {
 
         info!(
             address = %authenticated.address(),
+            size_decimals = rounding.size_decimals,
+            price_decimals = rounding.price_decimals,
             "LiveBackend authenticated with Polymarket"
         );
 
@@ -88,6 +124,7 @@ impl LiveBackend {
                 client: authenticated,
                 signer,
             }),
+            rounding,
         })
     }
 }
@@ -95,7 +132,11 @@ impl LiveBackend {
 #[async_trait]
 impl polyrust_core::execution::ExecutionBackend for LiveBackend {
     async fn place_order(&self, order: &OrderRequest) -> Result<OrderResult> {
-        self.inner.place_order(order).await
+        // Apply rounding with configured precision before passing to inner
+        let mut rounded_order = order.clone();
+        rounded_order.price = round_price_with_decimals(order.price, self.rounding.price_decimals);
+        rounded_order.size = round_size_with_decimals(order.size, self.rounding.size_decimals);
+        self.inner.place_order(&rounded_order).await
     }
 
     async fn cancel_order(&self, order_id: &str) -> Result<()> {
@@ -120,9 +161,13 @@ impl polyrust_core::execution::ExecutionBackend for LiveBackend {
 
     async fn place_batch_orders(&self, orders: &[OrderRequest]) -> Result<Vec<OrderResult>> {
         // SDK does not expose a batch endpoint; fall back to sequential placement.
+        // Apply rounding with configured precision for each order.
         let mut results = Vec::with_capacity(orders.len());
         for order in orders {
-            results.push(self.inner.place_order(order).await?);
+            let mut rounded_order = order.clone();
+            rounded_order.price = round_price_with_decimals(order.price, self.rounding.price_decimals);
+            rounded_order.size = round_size_with_decimals(order.size, self.rounding.size_decimals);
+            results.push(self.inner.place_order(&rounded_order).await?);
         }
         Ok(results)
     }
@@ -139,8 +184,9 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
         // Set neg_risk on the client's internal cache
         self.client.set_neg_risk(token_id, order.neg_risk);
 
-        let price = round_price(order.price);
-        let size = round_size(order.size);
+        // Note: rounding is applied in LiveBackend::place_order before calling inner
+        let price = order.price;
+        let size = order.size;
         let sdk_side = map_order_side(order.side);
         let sdk_order_type = map_order_type(order.order_type);
 
