@@ -263,11 +263,20 @@ pub struct TokenIds {
 }
 
 impl MarketInfo {
+    pub fn has_ended_at(&self, now: DateTime<Utc>) -> bool {
+        now >= self.end_date
+    }
+
+    pub fn seconds_remaining_at(&self, now: DateTime<Utc>) -> i64 {
+        (self.end_date - now).num_seconds().max(0)
+    }
+
+    /// Convenience: uses Utc::now(). Prefer `_at` variants in backtest-aware code.
     pub fn has_ended(&self) -> bool {
-        Utc::now() >= self.end_date
+        self.has_ended_at(Utc::now())
     }
 
     pub fn seconds_remaining(&self) -> i64 {
-        (self.end_date - Utc::now()).num_seconds().max(0)
+        self.seconds_remaining_at(Utc::now())
     }
 }

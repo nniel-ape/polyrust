@@ -76,7 +76,8 @@ impl TailEndStrategy {
             }
         };
 
-        let time_remaining = market.market.seconds_remaining();
+        let now = ctx.now().await;
+        let time_remaining = market.market.seconds_remaining_at(now);
 
         // Must be within the tail-end window
         if time_remaining >= self.base.config.tailend.time_threshold_secs as i64

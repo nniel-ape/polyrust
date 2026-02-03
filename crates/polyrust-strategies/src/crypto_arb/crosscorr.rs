@@ -105,7 +105,7 @@ impl CrossCorrStrategy {
                 }
 
                 // Skip ended markets
-                if market.market.seconds_remaining() <= 0 {
+                if market.market.seconds_remaining_at(ctx.now().await) <= 0 {
                     continue;
                 }
 

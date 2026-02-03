@@ -40,7 +40,8 @@ impl TwoSidedStrategy {
         let markets = self.base.active_markets.read().await;
         let market = markets.get(market_id)?;
 
-        let time_remaining = market.market.seconds_remaining();
+        let now = ctx.now().await;
+        let time_remaining = market.market.seconds_remaining_at(now);
         if time_remaining <= 0 {
             return None;
         }
