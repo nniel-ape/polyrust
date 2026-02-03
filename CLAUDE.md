@@ -89,8 +89,9 @@ Real-time updates use SSE: strategies emit `"dashboard-update"` signals, the SSE
 - **Prices**: Probabilities in [0, 1] range — use `rust_decimal::Decimal`, never floats
 - **USDC**: 6 decimal places; store as `Decimal`, persist as TEXT in SQLite
 - **Tick sizes**: Typically 0.01 (2 decimal price, 2 decimal size). USDC amount precision is order-type-dependent:
-  - GTC/GTD: `price_decimals + size_decimals` (e.g., 4 for tick=0.01)
-  - FOK: `price_decimals` only (e.g., 2 for tick=0.01) — round UP for BUY, DOWN for SELL
+  - GTC/GTD: `price_decimals + size_decimals` (e.g., 4 for tick=0.01), uses **tick-rounded** price
+  - FOK: `price_decimals` only (e.g., 2 for tick=0.01), uses **raw price** (round UP for BUY, DOWN for SELL)
+  - FOK must use raw price because tick-rounding drops effective bid below ask for sub-tick prices (e.g. 0.997→0.99)
 - **neg_risk**: Boolean on orders — false for 15-minute markets (most common)
 
 ## Configuration
@@ -335,7 +336,7 @@ Any `impl Strategy` works in backtest without modification — strategies receiv
 - When adding a new workspace crate, update `Dockerfile` in 3 places: manifest `COPY`, dummy `RUN` source, and `find crates` touch
 - Never push Docker images with `config.toml` baked in — it's `.dockerignore`d and mounted at runtime
 - `cargo build --release --locked` in Docker requires `Cargo.lock` committed and up-to-date
-- USDC rounding in `rounding.rs` must branch on `OrderType` — FOK and GTC have different max decimal rules from the CLOB API (rs-clob-client issue #114)
+- USDC rounding in `rounding.rs` must branch on `OrderType` — FOK uses **raw price** (`size * price`), GTC uses **tick-rounded price** (`size * rounded_price`). FOK also has stricter decimal precision (`price_decimals` only vs `price_decimals + size_decimals`). See rs-clob-client issue #114
 
 ## Design Documents
 
