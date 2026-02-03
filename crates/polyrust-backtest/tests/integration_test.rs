@@ -164,6 +164,7 @@ async fn test_full_backtest_pipeline() {
         market_duration_secs: None,
         max_trades_per_market: Some(2_000),
         fetch_concurrency: 10,
+        offline: false,
     };
 
     // Create in-memory results store
@@ -243,6 +244,7 @@ async fn test_backtest_with_no_data() {
         market_duration_secs: None,
         max_trades_per_market: Some(2_000),
         fetch_concurrency: 10,
+        offline: false,
     };
 
     let strategy = Box::new(SimpleTestStrategy::new());

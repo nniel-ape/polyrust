@@ -86,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
         market_duration_secs: None,
         max_trades_per_market: Some(2_000),
         fetch_concurrency: 10,
+        offline: false,
     };
 
     tracing::info!(

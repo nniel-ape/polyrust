@@ -268,6 +268,46 @@ impl HistoricalDataStore {
         }
     }
 
+    /// List all cached markets whose time range overlaps [start, end].
+    pub async fn list_cached_markets(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> BacktestResult<Vec<HistoricalMarket>> {
+        let conn = self.conn();
+        let mut rows = conn
+            .query(
+                "SELECT market_id, slug, question, start_date, end_date, token_a, token_b, neg_risk FROM historical_markets WHERE start_date < ?2 AND end_date > ?1",
+                params![start.to_rfc3339(), end.to_rfc3339()],
+            )
+            .await
+            .map_err(|e| BacktestError::Database(e.to_string()))?;
+
+        let mut markets = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| BacktestError::Database(e.to_string()))? {
+            let start_str: String = row.get(3).map_err(|e| BacktestError::Database(e.to_string()))?;
+            let end_str: String = row.get(4).map_err(|e| BacktestError::Database(e.to_string()))?;
+            let neg_risk_int: i64 = row.get(7).map_err(|e| BacktestError::Database(e.to_string()))?;
+
+            markets.push(HistoricalMarket {
+                market_id: row.get(0).map_err(|e| BacktestError::Database(e.to_string()))?,
+                slug: row.get(1).map_err(|e| BacktestError::Database(e.to_string()))?,
+                question: row.get(2).map_err(|e| BacktestError::Database(e.to_string()))?,
+                start_date: DateTime::parse_from_rfc3339(&start_str)
+                    .map_err(|e| BacktestError::Database(format!("Invalid start_date: {}", e)))?
+                    .with_timezone(&Utc),
+                end_date: DateTime::parse_from_rfc3339(&end_str)
+                    .map_err(|e| BacktestError::Database(format!("Invalid end_date: {}", e)))?
+                    .with_timezone(&Utc),
+                token_a: row.get(5).map_err(|e| BacktestError::Database(e.to_string()))?,
+                token_b: row.get(6).map_err(|e| BacktestError::Database(e.to_string()))?,
+                neg_risk: neg_risk_int != 0,
+            });
+        }
+
+        Ok(markets)
+    }
+
     /// Get historical prices for a token within a time range.
     pub async fn get_historical_prices(
         &self,

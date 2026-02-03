@@ -194,6 +194,12 @@ impl BacktestEngine {
         for historical_event in events {
             self.current_time = historical_event.timestamp;
 
+            // Advance simulated clock so strategies see correct time
+            {
+                let mut clock = self.ctx.simulated_clock.write().await;
+                *clock = Some(self.current_time);
+            }
+
             // Update token price cache if this is a price/trade event
             match &historical_event.event {
                 Event::MarketData(MarketDataEvent::PriceChange { token_id, price, .. }) => {
@@ -222,18 +228,7 @@ impl BacktestEngine {
             }
         }
 
-        // Emit MarketExpired events for all markets at end_date
-        self.current_time = self.config.end_date;
-        let market_ids = self.config.market_ids.clone();
-        for market_id in market_ids {
-            let expiration_event = Event::MarketData(MarketDataEvent::MarketExpired(market_id));
-            let actions = self.strategy.on_event(&expiration_event, &self.ctx).await?;
-            for action in actions {
-                if let Some(trade) = self.execute_action(action).await? {
-                    trades.push(trade);
-                }
-            }
-        }
+        // MarketExpired events are injected per-market in load_events at their actual end_date.
 
         // Call strategy.on_stop
         let final_actions = self.strategy.on_stop(&self.ctx).await?;
@@ -256,7 +251,8 @@ impl BacktestEngine {
     async fn load_events(&self) -> Result<Vec<HistoricalEvent>> {
         let mut events = Vec::new();
 
-        // For each market_id, load prices and trades for both tokens
+        // For each market_id, load prices and trades for both tokens,
+        // and inject MarketDiscovered/MarketExpired lifecycle events.
         for market_id in &self.config.market_ids {
             // Query the historical_markets table to get both token IDs
             let market = self
@@ -265,13 +261,76 @@ impl BacktestEngine {
                 .await
                 .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
 
-            let token_ids = if let Some(m) = market {
-                vec![m.token_a, m.token_b]
+            let token_ids = if let Some(ref m) = market {
+                vec![m.token_a.clone(), m.token_b.clone()]
             } else {
                 // Market not found in cache - assume market_id IS a token_id for backwards compatibility
                 warn!(market_id, "Market not found in cache, treating as token_id");
                 vec![market_id.clone()]
             };
+
+            // Inject MarketDiscovered event at market start_date (or backtest start if earlier)
+            if let Some(ref m) = market {
+                let discover_ts = m.start_date.max(self.config.start_date);
+                let market_info = MarketInfo {
+                    id: m.market_id.clone(),
+                    slug: m.slug.clone(),
+                    question: m.question.clone(),
+                    start_date: Some(m.start_date),
+                    end_date: m.end_date,
+                    token_ids: TokenIds {
+                        outcome_a: m.token_a.clone(),
+                        outcome_b: m.token_b.clone(),
+                    },
+                    accepting_orders: true,
+                    neg_risk: m.neg_risk,
+                    min_order_size: Decimal::new(5, 0),
+                    tick_size: Decimal::new(1, 2),
+                    fee_rate_bps: 0,
+                };
+                events.push(HistoricalEvent {
+                    timestamp: discover_ts,
+                    token_id: m.token_a.clone(),
+                    event: Event::MarketData(MarketDataEvent::MarketDiscovered(market_info)),
+                });
+
+                // Inject an immediate ExternalPrice event right after discovery so
+                // the pending market gets promoted before the next MarketDiscovered
+                // for the same coin overwrites it in pending_discovery (HashMap<coin, market>).
+                let slug_lower = m.slug.to_lowercase();
+                let coin_symbol = if slug_lower.starts_with("btc") {
+                    Some(("BTC", Decimal::new(100_000, 0)))
+                } else if slug_lower.starts_with("eth") {
+                    Some(("ETH", Decimal::new(3_000, 0)))
+                } else if slug_lower.starts_with("sol") {
+                    Some(("SOL", Decimal::new(200, 0)))
+                } else {
+                    None
+                };
+                if let Some((coin, base_price)) = coin_symbol {
+                    // Use discover_ts + 1ns to sort after the MarketDiscovered event
+                    let price_ts = discover_ts + chrono::Duration::nanoseconds(1);
+                    events.push(HistoricalEvent {
+                        timestamp: price_ts,
+                        token_id: coin.to_string(),
+                        event: Event::MarketData(MarketDataEvent::ExternalPrice {
+                            symbol: coin.to_string(),
+                            price: base_price,
+                            source: "backtest-discovery".to_string(),
+                            timestamp: price_ts,
+                        }),
+                    });
+                }
+
+                // Inject MarketExpired event at market end_date
+                if m.end_date <= self.config.end_date {
+                    events.push(HistoricalEvent {
+                        timestamp: m.end_date,
+                        token_id: m.token_a.clone(),
+                        event: Event::MarketData(MarketDataEvent::MarketExpired(m.market_id.clone())),
+                    });
+                }
+            }
 
             // Load data for each token in the market
             for token_id in token_ids {
@@ -325,6 +384,85 @@ impl BacktestEngine {
                 }
             } // end token_ids loop
         } // end market_ids loop
+
+        // Synthesize ExternalPrice events from Up-token (outcome_a) trades.
+        // Strategy needs external crypto prices to activate markets and evaluate
+        // opportunities. We derive synthetic prices: base_price * (1 + scale * (p - 0.5))
+        // where p is the Up token's trade probability.
+        {
+            let nominal_bases: HashMap<&str, Decimal> = [
+                ("btc", Decimal::new(100_000, 0)),
+                ("eth", Decimal::new(3_000, 0)),
+                ("sol", Decimal::new(200, 0)),
+                ("xrp", Decimal::new(1, 0)),
+            ]
+            .into();
+
+            // Build up_token -> coin map from market metadata
+            let mut up_token_to_coin: HashMap<String, String> = HashMap::new();
+            for market_id in &self.config.market_ids {
+                if let Ok(Some(m)) = self
+                    .data_store
+                    .get_historical_market(market_id)
+                    .await
+                    .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))
+                {
+                    let slug_lower = m.slug.to_lowercase();
+                    for (prefix, _) in &nominal_bases {
+                        if slug_lower.starts_with(prefix) {
+                            up_token_to_coin
+                                .insert(m.token_a.clone(), prefix.to_uppercase());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let scale = Decimal::new(1, 1); // 0.1 = 10% price swing for full 0->1 move
+
+            // For each trade on an Up token, emit a synthetic ExternalPrice
+            let trade_events: Vec<_> = events
+                .iter()
+                .filter_map(|e| {
+                    if let Event::MarketData(MarketDataEvent::Trade {
+                        token_id, price, ..
+                    }) = &e.event
+                    {
+                        up_token_to_coin.get(token_id).map(|coin| {
+                            let coin_lower = coin.to_lowercase();
+                            let base = nominal_bases
+                                .get(coin_lower.as_str())
+                                .copied()
+                                .unwrap_or(Decimal::new(100, 0));
+                            let half = Decimal::new(5, 1); // 0.5
+                            let synthetic_price = base * (Decimal::ONE + scale * (*price - half));
+                            (e.timestamp, coin.clone(), synthetic_price)
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            info!(
+                external_price_events = trade_events.len(),
+                coins_mapped = up_token_to_coin.len(),
+                "Synthesized ExternalPrice events from Up-token trades"
+            );
+
+            for (ts, coin, price) in trade_events {
+                events.push(HistoricalEvent {
+                    timestamp: ts,
+                    token_id: coin.clone(),
+                    event: Event::MarketData(MarketDataEvent::ExternalPrice {
+                        symbol: coin,
+                        price,
+                        source: "backtest-synthetic".to_string(),
+                        timestamp: ts,
+                    }),
+                });
+            }
+        }
 
         // For sub-minute fidelity, synthesize PriceChange events from trades
         if self.config.data_fidelity_secs < 60 {
@@ -755,6 +893,7 @@ mod tests {
             market_duration_secs: None,
             max_trades_per_market: Some(2_000),
             fetch_concurrency: 10,
+            offline: false,
         };
 
         let strategy = Box::new(TestStrategy { event_count: 0 });
@@ -834,6 +973,7 @@ mod tests {
             market_duration_secs: None,
             max_trades_per_market: Some(2_000),
             fetch_concurrency: 10,
+            offline: false,
         };
 
         let strategy = Box::new(TestStrategy { event_count: 0 });
@@ -879,6 +1019,7 @@ mod tests {
             market_duration_secs: None,
             max_trades_per_market: Some(2_000),
             fetch_concurrency: 10,
+            offline: false,
         };
 
         let strategy = Box::new(TestStrategy { event_count: 0 });
@@ -1069,6 +1210,7 @@ mod tests {
             market_duration_secs: None,
             max_trades_per_market: Some(2_000),
             fetch_concurrency: 10,
+            offline: false,
         };
 
         let strategy = Box::new(PriceCountStrategy {

@@ -35,6 +35,9 @@ pub struct BacktestConfig {
     /// Number of markets to fetch concurrently (default: 10).
     #[serde(default = "default_fetch_concurrency")]
     pub fetch_concurrency: usize,
+    /// Offline mode: skip all network fetches, use only cached data from backtest_data.db.
+    #[serde(default)]
+    pub offline: bool,
 }
 
 /// Fee model configuration for backtesting.
@@ -83,6 +86,7 @@ impl Default for BacktestConfig {
             market_duration_secs: None,
             max_trades_per_market: Some(2_000),
             fetch_concurrency: 10,
+            offline: false,
         }
     }
 }
@@ -132,6 +136,10 @@ impl BacktestConfig {
             && let Ok(n) = v.parse::<usize>()
         {
             self.fetch_concurrency = n;
+        }
+        if let Ok(v) = std::env::var("POLY_BACKTEST_OFFLINE") {
+            let lower = v.trim().to_lowercase();
+            self.offline = matches!(lower.as_str(), "1" | "true" | "yes");
         }
         if let Ok(v) = std::env::var("POLY_BACKTEST_MAX_TRADES_PER_MARKET") {
             let lower = v.trim().to_lowercase();
@@ -208,6 +216,7 @@ mod tests {
             market_duration_secs: None,
             max_trades_per_market: Some(2_000),
             fetch_concurrency: 10,
+            offline: false,
         };
         assert_eq!(config.strategy_name, "test-strategy");
         assert_eq!(config.market_ids.len(), 2);

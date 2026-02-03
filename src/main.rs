@@ -383,92 +383,114 @@ async fn run_backtest() -> anyhow::Result<()> {
     // Fetch or verify cached data for the backtest period
     let mut market_ids = backtest_config.market_ids.clone();
 
-    if !market_ids.is_empty() {
-        info!(
-            market_count = market_ids.len(),
-            "Checking cached data for configured markets"
-        );
-    } else {
-        info!("No market_ids configured - discovering markets for configured coins");
-
-        // Discover markets for each coin in the arbitrage config
-        for coin in &arb_config.coins {
-            info!(coin, "Discovering markets for coin");
-            let markets = data_fetcher
-                .discover_expired_markets(
-                    coin,
-                    backtest_config.start_date,
-                    backtest_config.end_date,
-                    backtest_config.market_duration_secs,
-                )
+    if backtest_config.offline {
+        // Offline mode: use only cached data, no network requests
+        if market_ids.is_empty() {
+            info!("Offline mode: loading cached markets from backtest_data.db");
+            let cached = data_store
+                .list_cached_markets(backtest_config.start_date, backtest_config.end_date)
                 .await?;
-
-            info!(
-                coin,
-                market_count = markets.len(),
-                "Discovered {} markets for coin", markets.len()
-            );
-
-            // Add market IDs to our list
-            for market in markets {
-                market_ids.push(market.market_id.clone());
-
-                // Cache the market metadata
-                data_store.insert_historical_market(market).await?;
-            }
+            market_ids = cached.into_iter().map(|m| m.market_id).collect();
         }
 
         if market_ids.is_empty() {
             return Err(anyhow::anyhow!(
-                "No markets found for configured coins in the specified date range"
+                "Offline mode: no cached markets found for the configured date range"
             ));
         }
 
         info!(
             total_markets = market_ids.len(),
-            "Discovered {} total markets", market_ids.len()
+            "Offline mode: using {} cached markets", market_ids.len()
         );
-    }
+    } else {
+        if !market_ids.is_empty() {
+            info!(
+                market_count = market_ids.len(),
+                "Checking cached data for configured markets"
+            );
+        } else {
+            info!("No market_ids configured - discovering markets for configured coins");
 
-    // Fetch market data for all markets concurrently (bounded by fetch_concurrency)
-    let total_markets = market_ids.len();
-    let concurrency = backtest_config.fetch_concurrency;
-    let fetcher = Arc::new(data_fetcher);
-    let mut tasks = tokio::task::JoinSet::new();
-    let mut completed = 0usize;
+            // Discover markets for each coin in the arbitrage config
+            for coin in &arb_config.coins {
+                info!(coin, "Discovering markets for coin");
+                let markets = data_fetcher
+                    .discover_expired_markets(
+                        coin,
+                        backtest_config.start_date,
+                        backtest_config.end_date,
+                        backtest_config.market_duration_secs,
+                    )
+                    .await?;
 
-    info!(
-        total_markets,
-        concurrency,
-        "Fetching market data concurrently"
-    );
-
-    for market_id in &market_ids {
-        // If at capacity, wait for one to finish before spawning
-        while tasks.len() >= concurrency {
-            if let Some(result) = tasks.join_next().await {
-                result??;
-                completed += 1;
                 info!(
-                    progress = format!("[{}/{}]", completed, total_markets),
-                    "Market data fetched"
+                    coin,
+                    market_count = markets.len(),
+                    "Discovered {} markets for coin", markets.len()
                 );
+
+                // Add market IDs to our list
+                for market in markets {
+                    market_ids.push(market.market_id.clone());
+
+                    // Cache the market metadata
+                    data_store.insert_historical_market(market).await?;
+                }
             }
+
+            if market_ids.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "No markets found for configured coins in the specified date range"
+                ));
+            }
+
+            info!(
+                total_markets = market_ids.len(),
+                "Discovered {} total markets", market_ids.len()
+            );
         }
-        let f = Arc::clone(&fetcher);
-        let id = market_id.clone();
-        let start = backtest_config.start_date;
-        let end = backtest_config.end_date;
-        tasks.spawn(async move { f.fetch_market_data(&id, start, end).await });
-    }
-    // Drain remaining tasks
-    while let Some(result) = tasks.join_next().await {
-        result??;
-        completed += 1;
+
+        // Fetch market data for all markets concurrently (bounded by fetch_concurrency)
+        let total_markets = market_ids.len();
+        let concurrency = backtest_config.fetch_concurrency;
+        let fetcher = Arc::new(data_fetcher);
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut completed = 0usize;
+
         info!(
-            progress = format!("[{}/{}]", completed, total_markets),
-            "Market data fetched"
+            total_markets,
+            concurrency,
+            "Fetching market data concurrently"
         );
+
+        for market_id in &market_ids {
+            // If at capacity, wait for one to finish before spawning
+            while tasks.len() >= concurrency {
+                if let Some(result) = tasks.join_next().await {
+                    result??;
+                    completed += 1;
+                    info!(
+                        progress = format!("[{}/{}]", completed, total_markets),
+                        "Market data fetched"
+                    );
+                }
+            }
+            let f = Arc::clone(&fetcher);
+            let id = market_id.clone();
+            let start = backtest_config.start_date;
+            let end = backtest_config.end_date;
+            tasks.spawn(async move { f.fetch_market_data(&id, start, end).await });
+        }
+        // Drain remaining tasks
+        while let Some(result) = tasks.join_next().await {
+            result??;
+            completed += 1;
+            info!(
+                progress = format!("[{}/{}]", completed, total_markets),
+                "Market data fetched"
+            );
+        }
     }
 
     // Update backtest config with discovered/configured market_ids
