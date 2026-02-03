@@ -3622,6 +3622,7 @@ dependencies = [
  "chrono",
  "polymarket-client-sdk",
  "polyrust-core",
+ "rand 0.9.2",
  "rust_decimal",
  "rust_decimal_macros",
  "thiserror 2.0.18",

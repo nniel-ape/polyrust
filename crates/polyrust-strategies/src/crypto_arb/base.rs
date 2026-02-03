@@ -193,6 +193,8 @@ pub struct CryptoArbBase {
     pub last_dashboard_emit: RwLock<Option<tokio::time::Instant>>,
     /// Throttle for periodic pipeline status summary (~60 seconds).
     pub last_status_log: RwLock<Option<tokio::time::Instant>>,
+    /// FOK rejection cooldowns per market — prevents retry storms.
+    pub fok_cooldowns: RwLock<HashMap<MarketId, tokio::time::Instant>>,
     /// Coins configured for this strategy.
     coins: HashSet<String>,
 }
@@ -224,6 +226,7 @@ impl CryptoArbBase {
             cached_asks: RwLock::new(HashMap::new()),
             last_dashboard_emit: RwLock::new(None),
             last_status_log: RwLock::new(None),
+            fok_cooldowns: RwLock::new(HashMap::new()),
             coins,
         }
     }
@@ -1020,14 +1023,16 @@ impl CryptoArbBase {
         };
 
         if (crypto_reversed && market_dropped) || trailing_triggered {
-            let order = OrderRequest {
-                token_id: pos.token_id.clone(),
-                price: current_bid,
-                size: pos.size,
-                side: OrderSide::Sell,
-                order_type: OrderType::Fok,
-                neg_risk: false,
-            };
+            let order = OrderRequest::new(
+                pos.token_id.clone(),
+                current_bid,
+                pos.size,
+                OrderSide::Sell,
+                OrderType::Fok,
+                false, // neg_risk
+            )
+            .with_tick_size(pos.tick_size)
+            .with_fee_rate_bps(pos.fee_rate_bps);
             Some((Action::PlaceOrder(order), current_bid))
         } else {
             None
@@ -1067,6 +1072,24 @@ impl CryptoArbBase {
     // -------------------------------------------------------------------------
     // Order management
     // -------------------------------------------------------------------------
+
+    /// Record a FOK rejection cooldown for a market.
+    pub async fn record_fok_cooldown(&self, market_id: &MarketId, cooldown_secs: u64) {
+        let expires_at =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(cooldown_secs);
+        let mut cooldowns = self.fok_cooldowns.write().await;
+        cooldowns.insert(market_id.clone(), expires_at);
+    }
+
+    /// Check if a market is still in FOK rejection cooldown.
+    pub async fn is_fok_cooled_down(&self, market_id: &MarketId) -> bool {
+        let cooldowns = self.fok_cooldowns.read().await;
+        if let Some(expires_at) = cooldowns.get(market_id) {
+            tokio::time::Instant::now() < *expires_at
+        } else {
+            false
+        }
+    }
 
     /// Cancel GTC limit orders that have been open longer than `max_age_secs`.
     pub async fn check_stale_limit_orders(&self) -> Vec<Action> {

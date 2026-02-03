@@ -335,6 +335,8 @@ impl TailEndStrategy {
             mode: pending.mode.clone(),
             estimated_fee: pending.estimated_fee,
             entry_market_price: pending.price, // Entry price is the market price at entry
+            tick_size: pending.tick_size,
+            fee_rate_bps: pending.fee_rate_bps,
         };
 
         info!(
@@ -401,6 +403,15 @@ impl Strategy for TailEndStrategy {
                 };
 
                 for market_id in market_ids {
+                    // Skip if in FOK rejection cooldown
+                    if self.base.is_fok_cooled_down(&market_id).await {
+                        debug!(
+                            market = %market_id,
+                            "TailEnd skip: FOK rejection cooldown active"
+                        );
+                        continue;
+                    }
+
                     // Skip if we already have exposure
                     if self.base.has_market_exposure(&market_id).await {
                         debug!(
@@ -419,6 +430,12 @@ impl Strategy for TailEndStrategy {
                         break;
                     }
 
+                    // Get market info for order construction
+                    let market_info = {
+                        let markets = self.base.active_markets.read().await;
+                        markets.get(&market_id).cloned()
+                    };
+
                     if let Some(opp) = self.evaluate_opportunity(&market_id, *price, ctx).await {
                         if opp.buy_price.is_zero() {
                             warn!(market = %market_id, "skipping TailEnd opportunity with zero buy_price");
@@ -426,7 +443,51 @@ impl Strategy for TailEndStrategy {
                         }
 
                         // TailEnd uses fixed sizing (no Kelly - confidence is always 1.0)
-                        let size = self.base.config.sizing.base_size / opp.buy_price;
+                        // Round to 2dp immediately — raw division produces 28+ decimals
+                        // which confuses logs and depth comparisons
+                        let mut size = (self.base.config.sizing.base_size / opp.buy_price)
+                            .round_dp_with_strategy(
+                                2,
+                                rust_decimal::RoundingStrategy::ToZero,
+                            );
+
+                        // Cap to available orderbook depth to avoid guaranteed FOK rejection
+                        let available = {
+                            let md = ctx.market_data.read().await;
+                            match md.orderbooks.get(&opp.token_id) {
+                                Some(ob) => {
+                                    // Skip if orderbook snapshot is stale (>2s old)
+                                    // In competitive tail-end windows, 5s is an eternity
+                                    let age = Utc::now()
+                                        .signed_duration_since(ob.timestamp)
+                                        .num_seconds();
+                                    if age > 2 {
+                                        warn!(
+                                            market = %market_id,
+                                            age_secs = age,
+                                            "TailEnd skip: stale orderbook"
+                                        );
+                                        continue;
+                                    }
+                                    // Cumulative depth at all ask levels up to our buy price
+                                    ob.ask_depth_up_to(opp.buy_price)
+                                }
+                                None => Decimal::ZERO,
+                            }
+                        };
+                        // 50% safety margin — 80% was still too aggressive for competitive tail-end windows
+                        // where multiple bots race for the same asks during ~1-5s total latency
+                        let safe_available = available * Decimal::new(50, 2);
+                        if safe_available < size {
+                            warn!(
+                                market = %market_id,
+                                wanted = %size,
+                                available = %available,
+                                safe_available = %safe_available,
+                                "TailEnd: capping order size to safe available ask depth"
+                            );
+                            size = safe_available;
+                        }
 
                         // Validate minimum order size
                         if !self.base.validate_min_order_size(&market_id, size).await {
@@ -434,13 +495,26 @@ impl Strategy for TailEndStrategy {
                         }
 
                         // TailEnd always uses FOK orders (speed matters)
-                        let order = OrderRequest {
-                            token_id: opp.token_id.clone(),
-                            price: opp.buy_price,
-                            size,
-                            side: OrderSide::Buy,
-                            order_type: OrderType::Fok,
-                            neg_risk: false,
+                        let order = if let Some(ref market) = market_info {
+                            OrderRequest::new(
+                                opp.token_id.clone(),
+                                opp.buy_price,
+                                size,
+                                OrderSide::Buy,
+                                OrderType::Fok,
+                                market.market.neg_risk,
+                            )
+                            .with_tick_size(market.market.tick_size)
+                            .with_fee_rate_bps(market.market.fee_rate_bps)
+                        } else {
+                            OrderRequest::new(
+                                opp.token_id.clone(),
+                                opp.buy_price,
+                                size,
+                                OrderSide::Buy,
+                                OrderType::Fok,
+                                false,
+                            )
                         };
 
                         info!(
@@ -448,32 +522,34 @@ impl Strategy for TailEndStrategy {
                             market = %market_id,
                             confidence = %opp.confidence,
                             price = %opp.buy_price,
+                            size = %size,
+                            available_depth = %available,
+                            safe_depth = %safe_available,
                             side = ?opp.outcome_to_buy,
                             "Submitting TailEnd order"
                         );
 
                         // Track pending order
-                        {
-                            let markets = self.base.active_markets.read().await;
-                            if let Some(market) = markets.get(&market_id) {
-                                let mut pending = self.base.pending_orders.write().await;
-                                pending.insert(
-                                    opp.token_id.clone(),
-                                    PendingOrder {
-                                        market_id: market_id.clone(),
-                                        token_id: opp.token_id.clone(),
-                                        side: opp.outcome_to_buy,
-                                        price: opp.buy_price,
-                                        size,
-                                        reference_price: market.reference_price,
-                                        coin: market.coin.clone(),
-                                        order_type: OrderType::Fok,
-                                        mode: ArbitrageMode::TailEnd,
-                                        kelly_fraction: None,
-                                        estimated_fee: opp.estimated_fee,
+                        if let Some(market) = market_info {
+                            let mut pending = self.base.pending_orders.write().await;
+                            pending.insert(
+                                opp.token_id.clone(),
+                                PendingOrder {
+                                    market_id: market_id.clone(),
+                                    token_id: opp.token_id.clone(),
+                                    side: opp.outcome_to_buy,
+                                    price: opp.buy_price,
+                                    size,
+                                    reference_price: market.reference_price,
+                                    coin: market.coin.clone(),
+                                    order_type: OrderType::Fok,
+                                    mode: ArbitrageMode::TailEnd,
+                                    kelly_fraction: None,
+                                    estimated_fee: opp.estimated_fee,
+                                    tick_size: market.market.tick_size,
+                                    fee_rate_bps: market.market.fee_rate_bps,
                                     },
                                 );
-                            }
                         }
 
                         result.push(Action::PlaceOrder(order));
@@ -555,14 +631,16 @@ impl Strategy for TailEndStrategy {
                                 seconds_since_entry = seconds_since_entry,
                                 "TailEnd post-entry exit triggered: price dropped below 0.85"
                             );
-                            let order = OrderRequest {
-                                token_id: pos.token_id.clone(),
-                                price: current_bid,
-                                size: pos.size,
-                                side: OrderSide::Sell,
-                                order_type: OrderType::Fok,
-                                neg_risk: false,
-                            };
+                            let order = OrderRequest::new(
+                                pos.token_id.clone(),
+                                current_bid,
+                                pos.size,
+                                OrderSide::Sell,
+                                OrderType::Fok,
+                                false, // neg_risk - will be set from market info if needed
+                            )
+                            .with_tick_size(pos.tick_size)
+                            .with_fee_rate_bps(pos.fee_rate_bps);
                             let mut pending_sl = self.base.pending_stop_loss.write().await;
                             pending_sl.insert(pos.token_id.clone(), current_bid);
                             actions.push(Action::PlaceOrder(order));
@@ -577,15 +655,22 @@ impl Strategy for TailEndStrategy {
 
             Event::OrderUpdate(OrderEvent::Rejected { token_id, .. }) => {
                 if let Some(token_id) = token_id {
-                    // Clear pending buy order if it's ours
+                    // Clear pending buy order if it's ours and record cooldown
                     let mut pending = self.base.pending_orders.write().await;
                     if let Some(p) = pending.get(token_id)
                         && p.mode == ArbitrageMode::TailEnd
                     {
+                        let market_id = p.market_id.clone();
                         pending.remove(token_id);
+                        drop(pending);
+
+                        let cooldown = self.base.config.tailend.fok_cooldown_secs;
+                        self.base.record_fok_cooldown(&market_id, cooldown).await;
                         warn!(
                             token_id = %token_id,
-                            "TailEnd pending order rejected"
+                            market = %market_id,
+                            cooldown_secs = cooldown,
+                            "TailEnd FOK order rejected, cooldown applied"
                         );
                     }
 

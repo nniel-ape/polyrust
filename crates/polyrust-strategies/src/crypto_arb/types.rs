@@ -243,6 +243,10 @@ pub struct ArbitragePosition {
     /// Market price (best bid) at entry time (for post-entry confirmation).
     /// Used to detect false signals when price drops shortly after entry.
     pub entry_market_price: Decimal,
+    /// Market tick size for order rounding.
+    pub tick_size: Decimal,
+    /// Fee rate in basis points for this market.
+    pub fee_rate_bps: u32,
 }
 
 /// A detected price spike event.
@@ -352,6 +356,10 @@ pub struct PendingOrder {
     pub kelly_fraction: Option<Decimal>,
     /// Estimated fee **per share** at entry. Total fee = `estimated_fee * size`.
     pub estimated_fee: Decimal,
+    /// Market tick size for order rounding.
+    pub tick_size: Decimal,
+    /// Fee rate in basis points for this market.
+    pub fee_rate_bps: u32,
 }
 
 /// An open GTC limit order that has been placed but not yet fully filled.
@@ -385,4 +393,8 @@ pub struct OpenLimitOrder {
     /// Estimated fee **per share** at entry (0 for GTC maker orders).
     /// Total fee = `estimated_fee * size`.
     pub estimated_fee: Decimal,
+    /// Market tick size for order rounding.
+    pub tick_size: Decimal,
+    /// Fee rate in basis points for this market.
+    pub fee_rate_bps: u32,
 }

@@ -171,6 +171,8 @@ impl TwoSidedStrategy {
                         mode: pending.mode,
                         kelly_fraction: pending.kelly_fraction,
                         estimated_fee: pending.estimated_fee,
+                        tick_size: pending.tick_size,
+                        fee_rate_bps: pending.fee_rate_bps,
                     },
                 );
             }
@@ -193,6 +195,8 @@ impl TwoSidedStrategy {
             mode: pending.mode.clone(),
             estimated_fee: pending.estimated_fee,
             entry_market_price: pending.price,
+            tick_size: pending.tick_size,
+            fee_rate_bps: pending.fee_rate_bps,
         };
 
         info!(
@@ -250,6 +254,8 @@ impl TwoSidedStrategy {
             mode: lo.mode,
             estimated_fee: lo.estimated_fee,
             entry_market_price: price,
+            tick_size: lo.tick_size,
+            fee_rate_bps: lo.fee_rate_bps,
         };
 
         self.base.record_position(position).await;
@@ -364,23 +370,35 @@ impl Strategy for TwoSidedStrategy {
                                 (OrderType::Fok, opps[0].buy_price, opps[1].buy_price)
                             };
 
+                        // Get market info for tick_size and fee_rate_bps
+                        let markets = self.base.active_markets.read().await;
+                        let market = markets.get(&market_id);
+                        let tick_size = market.map(|m| m.market.tick_size).unwrap_or_else(|| Decimal::new(1, 2));
+                        let fee_rate_bps = market.map(|m| m.market.fee_rate_bps).unwrap_or(0);
+                        let neg_risk = market.map(|m| m.market.neg_risk).unwrap_or(false);
+                        drop(markets);
+
                         let batch_orders = vec![
-                            OrderRequest {
-                                token_id: opps[0].token_id.clone(),
-                                price: up_price,
-                                size: share_count,
-                                side: OrderSide::Buy,
+                            OrderRequest::new(
+                                opps[0].token_id.clone(),
+                                up_price,
+                                share_count,
+                                OrderSide::Buy,
                                 order_type,
-                                neg_risk: false,
-                            },
-                            OrderRequest {
-                                token_id: opps[1].token_id.clone(),
-                                price: down_price,
-                                size: share_count,
-                                side: OrderSide::Buy,
+                                neg_risk,
+                            )
+                            .with_tick_size(tick_size)
+                            .with_fee_rate_bps(fee_rate_bps),
+                            OrderRequest::new(
+                                opps[1].token_id.clone(),
+                                down_price,
+                                share_count,
+                                OrderSide::Buy,
                                 order_type,
-                                neg_risk: false,
-                            },
+                                neg_risk,
+                            )
+                            .with_tick_size(tick_size)
+                            .with_fee_rate_bps(fee_rate_bps),
                         ];
 
                         info!(
@@ -415,6 +433,8 @@ impl Strategy for TwoSidedStrategy {
                                             mode: ArbitrageMode::TwoSided,
                                             kelly_fraction: None,
                                             estimated_fee: opp.estimated_fee,
+                                            tick_size: market.market.tick_size,
+                                            fee_rate_bps: market.market.fee_rate_bps,
                                         },
                                     );
                                 }

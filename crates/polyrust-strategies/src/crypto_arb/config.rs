@@ -66,6 +66,9 @@ pub struct TailEndConfig {
     /// Maximum recent volatility (price wick) in last 10 seconds.
     /// Filters out choppy/volatile conditions. Default: 0.01 (1%).
     pub max_recent_volatility: Decimal,
+    /// Cooldown in seconds after a FOK order is rejected before re-evaluating
+    /// the same market. Prevents retry storms on every price tick. Default: 15.
+    pub fok_cooldown_secs: u64,
 }
 
 fn default_time_thresholds() -> Vec<(u64, Decimal)> {
@@ -88,6 +91,7 @@ impl Default for TailEndConfig {
             max_spread_bps: Decimal::new(100, 0), // 100 bps = 1%
             min_sustained_secs: 3,
             max_recent_volatility: Decimal::new(1, 2), // 0.01 = 1%
+            fok_cooldown_secs: 15,
         }
     }
 }

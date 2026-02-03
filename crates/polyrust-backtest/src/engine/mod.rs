@@ -686,24 +686,24 @@ mod tests {
                 Event::MarketData(MarketDataEvent::PriceChange { token_id, .. }) => {
                     if self.event_count == 1 {
                         // First event: BUY
-                        Ok(vec![Action::PlaceOrder(OrderRequest {
-                            token_id: token_id.clone(),
-                            price: dec!(0.50),
-                            size: dec!(10),
-                            side: OrderSide::Buy,
-                            order_type: OrderType::Gtc,
-                            neg_risk: false,
-                        })])
+                        Ok(vec![Action::PlaceOrder(OrderRequest::new(
+                            token_id.clone(),
+                            dec!(0.50),
+                            dec!(10),
+                            OrderSide::Buy,
+                            OrderType::Gtc,
+                            false,
+                        ))])
                     } else if self.event_count == 2 {
                         // Second event: SELL
-                        Ok(vec![Action::PlaceOrder(OrderRequest {
-                            token_id: token_id.clone(),
-                            price: dec!(0.60),
-                            size: dec!(10),
-                            side: OrderSide::Sell,
-                            order_type: OrderType::Gtc,
-                            neg_risk: false,
-                        })])
+                        Ok(vec![Action::PlaceOrder(OrderRequest::new(
+                            token_id.clone(),
+                            dec!(0.60),
+                            dec!(10),
+                            OrderSide::Sell,
+                            OrderType::Gtc,
+                            false,
+                        ))])
                     } else {
                         Ok(vec![])
                     }

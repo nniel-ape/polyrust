@@ -41,6 +41,8 @@ fn make_market_info(id: &str, end_date: DateTime<Utc>) -> MarketInfo {
         accepting_orders: true,
         neg_risk: false,
         min_order_size: dec!(5.0), // 5.0 shares default
+        tick_size: dec!(0.01), // 0.01 default
+        fee_rate_bps: 0,
     }
 }
 
@@ -539,6 +541,8 @@ async fn base_can_open_position() {
                 mode: ArbitrageMode::Confirmed,
                 estimated_fee: Decimal::ZERO,
                 entry_market_price: dec!(0.60),
+                tick_size: dec!(0.01),
+                fee_rate_bps: 0,
             };
             positions
                 .entry(pos.market_id.clone())
@@ -746,7 +750,6 @@ fn tailend_config_defaults() {
 
 #[test]
 fn dynamic_ask_threshold_tightens_as_expiry_approaches() {
-    use super::config::TailEndConfig;
     use super::tailend::TailEndStrategy;
     use std::sync::Arc;
 
@@ -799,4 +802,48 @@ fn dynamic_ask_threshold_fallback_to_legacy() {
 
     // Should fallback to legacy threshold when dynamic thresholds is empty
     assert_eq!(strategy.get_ask_threshold(60), dec!(0.88));
+}
+
+// ---------------------------------------------------------------------------
+// FOK cooldown tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn fok_cooldown_blocks_reevaluation() {
+    use std::sync::Arc;
+
+    let config = super::config::ArbitrageConfig::default();
+    let base = Arc::new(super::base::CryptoArbBase::new(config, vec![]));
+
+    let market_id = "market-123".to_string();
+
+    // Initially not cooled down
+    assert!(!base.is_fok_cooled_down(&market_id).await);
+
+    // Record a cooldown
+    base.record_fok_cooldown(&market_id, 15).await;
+
+    // Should be cooled down now
+    assert!(base.is_fok_cooled_down(&market_id).await);
+
+    // Different market should not be cooled down
+    assert!(!base.is_fok_cooled_down(&"other-market".to_string()).await);
+}
+
+#[tokio::test]
+async fn fok_cooldown_expires() {
+    use std::sync::Arc;
+
+    let config = super::config::ArbitrageConfig::default();
+    let base = Arc::new(super::base::CryptoArbBase::new(config, vec![]));
+
+    let market_id = "market-456".to_string();
+
+    // Record a very short cooldown (1 second)
+    base.record_fok_cooldown(&market_id, 1).await;
+    assert!(base.is_fok_cooled_down(&market_id).await);
+
+    // Wait for it to expire
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert!(!base.is_fok_cooled_down(&market_id).await);
 }

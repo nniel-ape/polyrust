@@ -312,22 +312,22 @@ async fn default_place_batch_orders_calls_place_order_per_item() {
     let backend = BatchTrackingBackend::new(dec!(1000));
 
     let orders = vec![
-        OrderRequest {
-            token_id: "token1".to_string(),
-            price: dec!(0.50),
-            size: dec!(10),
-            side: OrderSide::Buy,
-            order_type: OrderType::Gtc,
-            neg_risk: false,
-        },
-        OrderRequest {
-            token_id: "token2".to_string(),
-            price: dec!(0.40),
-            size: dec!(10),
-            side: OrderSide::Buy,
-            order_type: OrderType::Gtc,
-            neg_risk: false,
-        },
+        OrderRequest::new(
+            "token1".to_string(),
+            dec!(0.50),
+            dec!(10),
+            OrderSide::Buy,
+            OrderType::Gtc,
+            false,
+        ),
+        OrderRequest::new(
+            "token2".to_string(),
+            dec!(0.40),
+            dec!(10),
+            OrderSide::Buy,
+            OrderType::Gtc,
+            false,
+        ),
     ];
 
     let results = backend.place_batch_orders(&orders).await.unwrap();

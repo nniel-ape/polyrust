@@ -4,7 +4,7 @@ use chrono::Utc;
 use polyrust_backtest::{BacktestConfig, BacktestEngine, DataFetcher, HistoricalDataStore};
 use polyrust_core::prelude::*;
 use polyrust_dashboard::Dashboard;
-use polyrust_execution::{FillMode, LiveBackend, PaperBackend, RoundingConfig};
+use polyrust_execution::{FillMode, LiveBackend, PaperBackend};
 use polyrust_market::{ClobFeed, DiscoveryConfig, DiscoveryFeed, MarketDataFeed, PriceFeed};
 use polyrust_store::Store;
 use polyrust_strategies::{
@@ -81,11 +81,7 @@ async fn main() -> anyhow::Result<()> {
         ))
     } else {
         info!("live trading mode enabled");
-        let rounding = RoundingConfig {
-            size_decimals: arb_config.rounding.size_decimals,
-            price_decimals: arb_config.rounding.price_decimals,
-        };
-        Box::new(LiveBackend::new_with_rounding(&config, rounding).await?)
+        Box::new(LiveBackend::new(&config).await?)
     };
 
     // Create feed command channel for engine → ClobFeed communication
@@ -185,7 +181,10 @@ async fn main() -> anyhow::Result<()> {
 
     let mut clob_feed = ClobFeed::new().with_command_receiver(feed_cmd_rx);
     let mut price_feed = PriceFeed::new();
-    let mut discovery_feed = DiscoveryFeed::new(DiscoveryConfig::default());
+    let mut discovery_feed = DiscoveryFeed::new(DiscoveryConfig {
+        coins: arb_config.coins.clone(),
+        ..DiscoveryConfig::default()
+    });
 
     let clob_bus = event_bus.clone();
     let price_bus = event_bus.clone();

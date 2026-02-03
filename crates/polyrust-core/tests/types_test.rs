@@ -99,14 +99,14 @@ fn position_negative_pnl() {
 
 #[test]
 fn order_request_serde_roundtrip() {
-    let req = OrderRequest {
-        token_id: "tok1".into(),
-        price: dec!(0.55),
-        size: dec!(5),
-        side: OrderSide::Buy,
-        order_type: OrderType::Gtc,
-        neg_risk: false,
-    };
+    let req = OrderRequest::new(
+        "tok1".into(),
+        dec!(0.55),
+        dec!(5),
+        OrderSide::Buy,
+        OrderType::Gtc,
+        false,
+    );
     let json = serde_json::to_string(&req).unwrap();
     let deserialized: OrderRequest = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.price, dec!(0.55));
@@ -137,6 +137,68 @@ fn order_status_serde() {
 }
 
 #[test]
+fn orderbook_best_ask_depth() {
+    let ob = OrderbookSnapshot {
+        token_id: "tok1".into(),
+        bids: vec![],
+        asks: vec![
+            OrderbookLevel {
+                price: dec!(0.95),
+                size: dec!(20),
+            },
+            OrderbookLevel {
+                price: dec!(0.96),
+                size: dec!(50),
+            },
+        ],
+        timestamp: Utc::now(),
+    };
+    assert_eq!(ob.best_ask_depth(), Some(dec!(20)));
+}
+
+#[test]
+fn orderbook_best_ask_depth_empty() {
+    let ob = OrderbookSnapshot {
+        token_id: "tok1".into(),
+        bids: vec![],
+        asks: vec![],
+        timestamp: Utc::now(),
+    };
+    assert_eq!(ob.best_ask_depth(), None);
+}
+
+#[test]
+fn orderbook_ask_depth_up_to() {
+    let ob = OrderbookSnapshot {
+        token_id: "tok1".into(),
+        bids: vec![],
+        asks: vec![
+            OrderbookLevel {
+                price: dec!(0.95),
+                size: dec!(20),
+            },
+            OrderbookLevel {
+                price: dec!(0.96),
+                size: dec!(30),
+            },
+            OrderbookLevel {
+                price: dec!(0.98),
+                size: dec!(100),
+            },
+        ],
+        timestamp: Utc::now(),
+    };
+    // Up to 0.96 should include first two levels
+    assert_eq!(ob.ask_depth_up_to(dec!(0.96)), dec!(50));
+    // Up to 0.95 should include only first level
+    assert_eq!(ob.ask_depth_up_to(dec!(0.95)), dec!(20));
+    // Up to 1.00 should include all levels
+    assert_eq!(ob.ask_depth_up_to(dec!(1.00)), dec!(150));
+    // Up to 0.90 should include nothing
+    assert_eq!(ob.ask_depth_up_to(dec!(0.90)), dec!(0));
+}
+
+#[test]
 fn market_info_seconds_remaining() {
     let future = Utc::now() + TimeDelta::seconds(300);
     let market = MarketInfo {
@@ -152,6 +214,8 @@ fn market_info_seconds_remaining() {
         accepting_orders: true,
         neg_risk: false,
         min_order_size: Decimal::new(50, 1), // 5.0 shares default
+        tick_size: Decimal::new(1, 2), // 0.01 default
+        fee_rate_bps: 0,
     };
     let remaining = market.seconds_remaining();
     assert!(remaining >= 299 && remaining <= 301);
@@ -174,6 +238,8 @@ fn market_info_has_ended() {
         accepting_orders: false,
         neg_risk: false,
         min_order_size: Decimal::new(50, 1), // 5.0 shares default
+        tick_size: Decimal::new(1, 2), // 0.01 default
+        fee_rate_bps: 0,
     };
     assert!(market.has_ended());
     assert_eq!(market.seconds_remaining(), 0);

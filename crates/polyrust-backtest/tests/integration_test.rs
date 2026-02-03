@@ -50,14 +50,14 @@ impl Strategy for SimpleTestStrategy {
                     if *price > last && balance.available_usdc >= dec!(10.0) {
                         // Price going up - buy
                         self.last_price = Some(*price);
-                        return Ok(vec![Action::PlaceOrder(OrderRequest {
-                            token_id: token_id.clone(),
-                            price: *price,
-                            size: dec!(10.0),
-                            side: OrderSide::Buy,
-                            order_type: OrderType::Gtc,
-                            neg_risk: false,
-                        })]);
+                        return Ok(vec![Action::PlaceOrder(OrderRequest::new(
+                            token_id.clone(),
+                            *price,
+                            dec!(10.0),
+                            OrderSide::Buy,
+                            OrderType::Gtc,
+                            false,
+                        ))]);
                     } else if *price < last
                         && positions
                             .open_positions
@@ -66,14 +66,14 @@ impl Strategy for SimpleTestStrategy {
                     {
                         // Price going down - sell if we have a position
                         self.last_price = Some(*price);
-                        return Ok(vec![Action::PlaceOrder(OrderRequest {
-                            token_id: token_id.clone(),
-                            price: *price,
-                            size: dec!(10.0),
-                            side: OrderSide::Sell,
-                            order_type: OrderType::Gtc,
-                            neg_risk: false,
-                        })]);
+                        return Ok(vec![Action::PlaceOrder(OrderRequest::new(
+                            token_id.clone(),
+                            *price,
+                            dec!(10.0),
+                            OrderSide::Sell,
+                            OrderType::Gtc,
+                            false,
+                        ))]);
                     }
                 }
                 self.last_price = Some(*price);

@@ -581,25 +581,25 @@ mod tests {
     use rust_decimal_macros::dec;
 
     fn buy_order(token_id: &str, price: Decimal, size: Decimal) -> OrderRequest {
-        OrderRequest {
-            token_id: token_id.to_string(),
+        OrderRequest::new(
+            token_id.to_string(),
             price,
             size,
-            side: OrderSide::Buy,
-            order_type: OrderType::Gtc,
-            neg_risk: false,
-        }
+            OrderSide::Buy,
+            OrderType::Gtc,
+            false,
+        )
     }
 
     fn sell_order(token_id: &str, price: Decimal, size: Decimal) -> OrderRequest {
-        OrderRequest {
-            token_id: token_id.to_string(),
+        OrderRequest::new(
+            token_id.to_string(),
             price,
             size,
-            side: OrderSide::Sell,
-            order_type: OrderType::Gtc,
-            neg_risk: false,
-        }
+            OrderSide::Sell,
+            OrderType::Gtc,
+            false,
+        )
     }
 
     fn make_orderbook(

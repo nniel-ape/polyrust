@@ -210,6 +210,8 @@ impl ConfirmedStrategy {
                         mode: pending.mode,
                         kelly_fraction: pending.kelly_fraction,
                         estimated_fee: pending.estimated_fee,
+                        tick_size: pending.tick_size,
+                        fee_rate_bps: pending.fee_rate_bps,
                     },
                 );
             }
@@ -232,6 +234,8 @@ impl ConfirmedStrategy {
             mode: pending.mode.clone(),
             estimated_fee: pending.estimated_fee,
             entry_market_price: pending.price,
+            tick_size: pending.tick_size,
+            fee_rate_bps: pending.fee_rate_bps,
         };
 
         info!(
@@ -290,6 +294,8 @@ impl ConfirmedStrategy {
             mode: lo.mode,
             estimated_fee: lo.estimated_fee,
             entry_market_price: price,
+            tick_size: lo.tick_size,
+            fee_rate_bps: lo.fee_rate_bps,
         };
 
         self.base.record_position(position).await;
@@ -459,13 +465,31 @@ impl Strategy for ConfirmedStrategy {
                             (OrderType::Fok, opp.buy_price)
                         };
 
-                        let order = OrderRequest {
-                            token_id: opp.token_id.clone(),
-                            price: order_price,
-                            size,
-                            side: OrderSide::Buy,
-                            order_type,
-                            neg_risk: false,
+                        // Get market info for order construction
+                        let markets = self.base.active_markets.read().await;
+                        let market_info = markets.get(&market_id).cloned();
+                        drop(markets);
+
+                        let order = if let Some(ref market) = market_info {
+                            OrderRequest::new(
+                                opp.token_id.clone(),
+                                order_price,
+                                size,
+                                OrderSide::Buy,
+                                order_type,
+                                market.market.neg_risk,
+                            )
+                            .with_tick_size(market.market.tick_size)
+                            .with_fee_rate_bps(market.market.fee_rate_bps)
+                        } else {
+                            OrderRequest::new(
+                                opp.token_id.clone(),
+                                order_price,
+                                size,
+                                OrderSide::Buy,
+                                order_type,
+                                false,
+                            )
                         };
 
                         info!(
@@ -480,27 +504,26 @@ impl Strategy for ConfirmedStrategy {
                         );
 
                         // Track pending order
-                        {
-                            let markets = self.base.active_markets.read().await;
-                            if let Some(market) = markets.get(&market_id) {
-                                let mut pending = self.base.pending_orders.write().await;
-                                pending.insert(
-                                    opp.token_id.clone(),
-                                    PendingOrder {
-                                        market_id: market_id.clone(),
-                                        token_id: opp.token_id.clone(),
-                                        side: opp.outcome_to_buy,
-                                        price: order_price,
-                                        size,
-                                        reference_price: market.reference_price,
-                                        coin: market.coin.clone(),
-                                        order_type,
-                                        mode: ArbitrageMode::Confirmed,
-                                        kelly_fraction: kelly_frac,
-                                        estimated_fee: opp.estimated_fee,
-                                    },
-                                );
-                            }
+                        if let Some(market) = market_info {
+                            let mut pending = self.base.pending_orders.write().await;
+                            pending.insert(
+                                opp.token_id.clone(),
+                                PendingOrder {
+                                    market_id: market_id.clone(),
+                                    token_id: opp.token_id.clone(),
+                                    side: opp.outcome_to_buy,
+                                    price: order_price,
+                                    size,
+                                    reference_price: market.reference_price,
+                                    coin: market.coin.clone(),
+                                    order_type,
+                                    mode: ArbitrageMode::Confirmed,
+                                    kelly_fraction: kelly_frac,
+                                    estimated_fee: opp.estimated_fee,
+                                    tick_size: market.market.tick_size,
+                                    fee_rate_bps: market.market.fee_rate_bps,
+                                },
+                            );
                         }
 
                         result.push(Action::PlaceOrder(order));

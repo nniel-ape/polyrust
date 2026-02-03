@@ -88,7 +88,9 @@ Real-time updates use SSE: strategies emit `"dashboard-update"` signals, the SSE
 - **Token IDs**: Each market has 2 outcomes (Up/Down or Yes/No), each is an ERC-1155 token
 - **Prices**: Probabilities in [0, 1] range — use `rust_decimal::Decimal`, never floats
 - **USDC**: 6 decimal places; store as `Decimal`, persist as TEXT in SQLite
-- **Tick sizes**: Typically 0.01 (2 decimal price, 2 decimal size, 4 decimal amount)
+- **Tick sizes**: Typically 0.01 (2 decimal price, 2 decimal size). USDC amount precision is order-type-dependent:
+  - GTC/GTD: `price_decimals + size_decimals` (e.g., 4 for tick=0.01)
+  - FOK: `price_decimals` only (e.g., 2 for tick=0.01) — round UP for BUY, DOWN for SELL
 - **neg_risk**: Boolean on orders — false for 15-minute markets (most common)
 
 ## Configuration
@@ -248,7 +250,7 @@ pub struct ArbitrageConfig {
 ### Key Features
 
 - **Fee-aware profit margins**: Net profit calculation accounts for Polymarket's dynamic taker fees (3.15% at 50/50, ~0% near 0/1)
-- **Hybrid order execution**: GTC maker orders (0% fee) for most trades, FOK taker orders only for tail-end urgency
+- **Hybrid order execution**: GTC maker orders (0% fee) for most trades, FOK taker orders only for tail-end urgency. FOK has stricter USDC precision (see `rounding.rs`)
 - **Kelly criterion sizing**: Position size scales with confidence and edge, clamped to [min_size, max_size]
 - **Spike detection**: Pre-filters small moves, triggers evaluation only on significant price changes or when delta exceeds fee+margin threshold
 - **Trailing stop-loss**: Locks in profits as position moves favorably, with optional time decay near expiration
@@ -333,6 +335,7 @@ Any `impl Strategy` works in backtest without modification — strategies receiv
 - When adding a new workspace crate, update `Dockerfile` in 3 places: manifest `COPY`, dummy `RUN` source, and `find crates` touch
 - Never push Docker images with `config.toml` baked in — it's `.dockerignore`d and mounted at runtime
 - `cargo build --release --locked` in Docker requires `Cargo.lock` committed and up-to-date
+- USDC rounding in `rounding.rs` must branch on `OrderType` — FOK and GTC have different max decimal rules from the CLOB API (rs-clob-client issue #114)
 
 ## Design Documents
 
