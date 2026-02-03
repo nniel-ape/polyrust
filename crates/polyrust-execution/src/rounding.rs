@@ -122,7 +122,14 @@ pub fn calculate_order_amounts(
             // Raw price: FOK matches immediately, tick alignment irrelevant.
             // round_down(price) can drop effective bid below the ask.
             let fok_usdc = rounded_size * price;
-            (round_up(fok_usdc, config.price_decimals), rounded_size)
+            let mut usdc = round_up(fok_usdc, config.price_decimals);
+            // Polymarket requires price strictly < 1.0.
+            // round_up can push USDC to >= size when price is near 1.0 (e.g. 0.999),
+            // making effective price = USDC/size >= 1.0. Clamp to stay valid.
+            if usdc >= rounded_size {
+                usdc = rounded_size - Decimal::new(1, config.price_decimals);
+            }
+            (usdc, rounded_size)
         }
         (OrderType::Fok, OrderSide::Sell) => {
             let fok_usdc = rounded_size * price;
@@ -197,7 +204,14 @@ pub fn build_signable_order(
             // Raw price: FOK matches immediately, tick alignment irrelevant.
             // round_down(price) can drop effective bid below the ask.
             let fok_usdc = rounded_size * price;
-            (round_up(fok_usdc, config.price_decimals), rounded_size)
+            let mut usdc = round_up(fok_usdc, config.price_decimals);
+            // Polymarket requires price strictly < 1.0.
+            // round_up can push USDC to >= size when price is near 1.0 (e.g. 0.999),
+            // making effective price = USDC/size >= 1.0. Clamp to stay valid.
+            if usdc >= rounded_size {
+                usdc = rounded_size - Decimal::new(1, config.price_decimals);
+            }
+            (usdc, rounded_size)
         }
         (OrderType::Fok, OrderSide::Sell) => {
             let fok_usdc = rounded_size * price;
@@ -688,8 +702,9 @@ mod tests {
         );
 
         // fok_usdc = 5.00 * 0.999 = 4.995
-        // round_up(4.995, 2) = 5.00 USDC = 5_000_000
-        assert_eq!(signable.order.makerAmount, SdkU256::from(5_000_000u64));
+        // round_up(4.995, 2) = 5.00, but 5.00 >= 5.00 (size) → clamp to 4.99
+        // effective price = 4.99 / 5.00 = 0.998 < 1.0 ✓
+        assert_eq!(signable.order.makerAmount, SdkU256::from(4_990_000u64));
         assert_eq!(signable.order.takerAmount, SdkU256::from(5_000_000u64));
     }
 
@@ -714,6 +729,52 @@ mod tests {
         // round_up(4.9914, 2) = 5.00 USDC = 5_000_000
         assert_eq!(signable.order.makerAmount, SdkU256::from(5_000_000u64));
         assert_eq!(signable.order.takerAmount, SdkU256::from(5_310_000u64));
+    }
+
+    /// FOK BUY at price=0.999 with tick=0.001: price_decimals=3.
+    /// round_up stays below size so no clamping needed.
+    #[test]
+    fn test_fok_price_999_tick_0_001_no_clamp() {
+        let signable = build_signable_order(
+            SdkU256::from(1u64),
+            dec!(0.999),
+            dec!(5.00),
+            OrderSide::Buy,
+            OrderType::Fok,
+            dec!(0.001),
+            0,
+            SdkAddress::ZERO,
+            None,
+            SignatureType::Eoa,
+        );
+
+        // fok_usdc = 5.00 * 0.999 = 4.995
+        // round_up(4.995, 3) = 4.995 (exact) — no clamping, 4.995 < 5.00
+        assert_eq!(signable.order.makerAmount, SdkU256::from(4_995_000u64));
+        assert_eq!(signable.order.takerAmount, SdkU256::from(5_000_000u64));
+    }
+
+    /// FOK BUY at effective price exactly 1.0 (price=1.0, tick=0.01): clamp prevents rejection.
+    #[test]
+    fn test_fok_price_at_boundary_clamped() {
+        let signable = build_signable_order(
+            SdkU256::from(1u64),
+            dec!(1.00),
+            dec!(10.00),
+            OrderSide::Buy,
+            OrderType::Fok,
+            dec!(0.01),
+            0,
+            SdkAddress::ZERO,
+            None,
+            SignatureType::Eoa,
+        );
+
+        // fok_usdc = 10.00 * 1.00 = 10.00
+        // round_up(10.00, 2) = 10.00, but 10.00 >= 10.00 (size) → clamp to 9.99
+        // effective price = 9.99 / 10.00 = 0.999 < 1.0 ✓
+        assert_eq!(signable.order.makerAmount, SdkU256::from(9_990_000u64));
+        assert_eq!(signable.order.takerAmount, SdkU256::from(10_000_000u64));
     }
 
     #[test]
