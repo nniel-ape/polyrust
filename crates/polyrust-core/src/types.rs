@@ -166,6 +166,25 @@ pub struct Trade {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Request to redeem winning positions after market resolution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedeemRequest {
+    pub market_id: MarketId,
+    /// Hex bytes32 condition_id for CTF contract
+    pub condition_id: String,
+    pub token_ids: Vec<TokenId>,
+    pub neg_risk: bool,
+}
+
+/// Result of a position redemption
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedeemResult {
+    pub market_id: MarketId,
+    pub tx_hash: String,
+    pub success: bool,
+    pub message: String,
+}
+
 /// A single level in an orderbook (price + size)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderbookLevel {

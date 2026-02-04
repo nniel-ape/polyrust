@@ -15,6 +15,8 @@ use polyrust_core::error::{PolyError, Result};
 use polyrust_core::types::*;
 
 use crate::rounding::build_signable_order;
+use crate::ctf_redeemer::CtfRedeemer;
+use polyrust_core::execution::{RedeemRequest, RedeemResult};
 
 /// Live execution backend using rs-clob-client for real Polymarket orders.
 ///
@@ -35,6 +37,8 @@ trait LiveBackendInner: Send + Sync {
     async fn get_open_orders(&self) -> Result<Vec<Order>>;
     async fn get_positions(&self) -> Result<Vec<Position>>;
     async fn get_balance(&self) -> Result<Decimal>;
+    async fn is_market_resolved(&self, condition_id: &str) -> Result<bool>;
+    async fn redeem_positions(&self, request: &RedeemRequest) -> Result<RedeemResult>;
 }
 
 /// Concrete inner implementation parameterized by the SDK `Kind` and signer type.
@@ -47,6 +51,8 @@ struct LiveBackendImpl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + 
     funder: Option<SdkAddress>,
     /// Signature type (EOA or GnosisSafe).
     signature_type: SignatureType,
+    /// CTF redeemer for on-chain position redemption
+    ctf_redeemer: Option<CtfRedeemer>,
 }
 
 impl LiveBackend {
@@ -92,6 +98,24 @@ impl LiveBackend {
             "LiveBackend authenticated with Polymarket"
         );
 
+        // Initialize CtfRedeemer if we have RPC URLs
+        let ctf_redeemer = if !config.polymarket.rpc_urls.is_empty() {
+            let rpc_url = &config.polymarket.rpc_urls[0];
+            match CtfRedeemer::new(rpc_url, private_key, config.polymarket.safe_address.as_deref().unwrap_or("")) {
+                Ok(redeemer) => {
+                    warn!("CtfRedeemer initialized as STUB — on-chain redemption not yet implemented (RPC: {})", rpc_url);
+                    Some(redeemer)
+                }
+                Err(e) => {
+                    warn!("Failed to initialize CtfRedeemer: {} (redemption disabled)", e);
+                    None
+                }
+            }
+        } else {
+            warn!("No RPC URLs configured, redemption disabled");
+            None
+        };
+
         Ok(Self {
             inner: Box::new(LiveBackendImpl {
                 client: authenticated,
@@ -99,6 +123,7 @@ impl LiveBackend {
                 signer_address,
                 funder,
                 signature_type: sig_type,
+                ctf_redeemer,
             }),
         })
     }
@@ -139,6 +164,14 @@ impl polyrust_core::execution::ExecutionBackend for LiveBackend {
             results.push(self.inner.place_order(order).await?);
         }
         Ok(results)
+    }
+
+    async fn is_market_resolved(&self, condition_id: &str) -> Result<bool> {
+        self.inner.is_market_resolved(condition_id).await
+    }
+
+    async fn redeem_positions(&self, request: &RedeemRequest) -> Result<RedeemResult> {
+        self.inner.redeem_positions(request).await
     }
 }
 
@@ -325,6 +358,35 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
 
         debug!(balance = %response.balance, "Retrieved USDC balance");
         Ok(response.balance)
+    }
+
+    async fn is_market_resolved(&self, condition_id: &str) -> Result<bool> {
+        match &self.ctf_redeemer {
+            Some(redeemer) => redeemer.is_resolved(condition_id).await,
+            None => Err(PolyError::Execution(
+                "CtfRedeemer not initialized (no RPC URL configured)".into(),
+            )),
+        }
+    }
+
+    async fn redeem_positions(&self, request: &RedeemRequest) -> Result<RedeemResult> {
+        match &self.ctf_redeemer {
+            Some(redeemer) => {
+                let tx_hash = redeemer
+                    .redeem(&request.condition_id, request.neg_risk)
+                    .await?;
+
+                Ok(RedeemResult {
+                    market_id: request.market_id.clone(),
+                    tx_hash: format!("{:#x}", tx_hash),
+                    success: true,
+                    message: "Position redeemed successfully".to_string(),
+                })
+            }
+            None => Err(PolyError::Execution(
+                "CtfRedeemer not initialized (no RPC URL configured)".into(),
+            )),
+        }
     }
 }
 

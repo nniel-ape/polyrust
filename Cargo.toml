@@ -32,6 +32,11 @@ polymarket-client-sdk = { version = "0.4", features = [
     "clob", "ws", "rtds", "data", "gamma", "tracing", "heartbeats", "ctf"
 ] }
 
+# Alloy for on-chain interaction (CTF redemption)
+# Version must match polymarket-client-sdk's alloy dependency (1.5.2)
+alloy = { version = "1.5", features = ["full", "node-bindings", "rpc-types", "signer-local"] }
+alloy-primitives = "1.1"
+
 # Internal crates
 polyrust-core = { path = "crates/polyrust-core" }
 polyrust-market = { path = "crates/polyrust-market" }

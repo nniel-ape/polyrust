@@ -15,8 +15,9 @@ pub enum Action {
         signal_type: String,
         payload: serde_json::Value,
     },
-    SubscribeMarket(MarketId),
+    SubscribeMarket(MarketInfo),
     UnsubscribeMarket(MarketId),
+    RedeemPosition(RedeemRequest),
 }
 
 /// Log severity level for Action::Log

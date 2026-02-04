@@ -22,6 +22,15 @@ struct ConfigWrapper {
     #[serde(default)]
     backtest: Option<BacktestConfig>,
 }
+
+/// Extract CLI argument value by key.
+#[allow(dead_code)]
+fn cli_arg(args: &[String], key: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == key)
+        .and_then(|i| args.get(i + 1).cloned())
+}
+
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -175,6 +184,23 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut engine = builder.build().await?;
+
+    // Start auto-claim monitor if enabled
+    if config.auto_claim.enabled {
+        info!("Auto-claim enabled (poll interval: {}s)", config.auto_claim.poll_interval_secs);
+        let claim_monitor = Arc::new(ClaimMonitor::new(
+            config.auto_claim.clone(),
+            engine.event_bus().clone(),
+            engine.execution(),
+        ));
+        tokio::spawn(async move {
+            if let Err(e) = claim_monitor.run().await {
+                error!("ClaimMonitor task failed: {e}");
+            }
+        });
+    } else {
+        info!("Auto-claim disabled");
+    }
 
     // Start market data feeds
     let event_bus = engine.event_bus().clone();

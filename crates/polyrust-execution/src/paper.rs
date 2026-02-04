@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use polyrust_core::error::{PolyError, Result};
 use polyrust_core::types::*;
+use polyrust_core::execution::{RedeemRequest, RedeemResult};
 
 /// Fill mode for paper trading orders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -571,6 +572,55 @@ impl polyrust_core::execution::ExecutionBackend for PaperBackend {
     async fn get_balance(&self) -> Result<Decimal> {
         let state = self.state.read().await;
         Ok(state.usdc_balance)
+    }
+
+    async fn is_market_resolved(&self, _condition_id: &str) -> Result<bool> {
+        // In paper mode, markets resolve instantly (no UMA dispute window simulation)
+        Ok(true)
+    }
+
+    async fn redeem_positions(&self, request: &RedeemRequest) -> Result<RedeemResult> {
+        let mut state = self.state.write().await;
+
+        // Find positions for this market's tokens
+        let mut total_redeemed = Decimal::ZERO;
+        for token_id in &request.token_ids {
+            if let Some(pos) = state.positions.remove(token_id) {
+                // Assume winning outcome pays 1 USDC per share
+                let redemption_value = pos.size;
+                state.usdc_balance += redemption_value;
+                total_redeemed += redemption_value;
+                info!(
+                    token_id = %token_id,
+                    size = %pos.size,
+                    value = %redemption_value,
+                    "Paper redemption: position redeemed"
+                );
+            }
+        }
+
+        if total_redeemed == Decimal::ZERO {
+            return Ok(RedeemResult {
+                market_id: request.market_id.clone(),
+                tx_hash: format!("paper-{}", Uuid::new_v4()),
+                success: false,
+                message: "No positions found to redeem".to_string(),
+            });
+        }
+
+        info!(
+            market_id = %request.market_id,
+            total_redeemed = %total_redeemed,
+            new_balance = %state.usdc_balance,
+            "Paper redemption: completed"
+        );
+
+        Ok(RedeemResult {
+            market_id: request.market_id.clone(),
+            tx_hash: format!("paper-{}", Uuid::new_v4()),
+            success: true,
+            message: format!("Redeemed {} USDC", total_redeemed),
+        })
     }
 }
 

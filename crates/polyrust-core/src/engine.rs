@@ -160,6 +160,11 @@ impl Engine {
         &self.config
     }
 
+    /// Access execution backend (for ClaimMonitor or other components).
+    pub fn execution(&self) -> Arc<dyn ExecutionBackend> {
+        Arc::clone(&self.execution)
+    }
+
     /// Run the engine. Blocks until shutdown signal (Ctrl+C).
     pub async fn run(&mut self) -> Result<()> {
         self.start_time = Some(Instant::now());
@@ -554,22 +559,16 @@ async fn execute_action(
                 timestamp: chrono::Utc::now(),
             }));
         }
-        Action::SubscribeMarket(id) => {
+        Action::SubscribeMarket(info) => {
             if let Some(tx) = feed_command_tx {
-                let md = context.market_data.read().await;
-                if let Some(info) = md.markets.get(id) {
-                    let info = info.clone();
-                    drop(md);
-                    if let Err(e) = tx.send(FeedCommand::Subscribe(info)) {
-                        warn!(market_id = %id, error = %e, "failed to send subscribe command to feed");
-                    } else {
-                        info!(market_id = %id, strategy = %strategy_name, "sent subscribe command to feed");
-                    }
+                let market_id = info.id.clone();
+                if let Err(e) = tx.send(FeedCommand::Subscribe(info.clone())) {
+                    warn!(market_id = %market_id, error = %e, "failed to send subscribe command to feed");
                 } else {
-                    warn!(market_id = %id, "SubscribeMarket: market not found in context");
+                    info!(market_id = %market_id, strategy = %strategy_name, "sent subscribe command to feed");
                 }
             } else {
-                warn!(market_id = %id, "SubscribeMarket: no feed command channel configured");
+                warn!(market_id = %info.id, "SubscribeMarket: no feed command channel configured");
             }
         }
         Action::UnsubscribeMarket(id) => {
@@ -581,6 +580,43 @@ async fn execute_action(
                 }
             } else {
                 warn!(market_id = %id, "UnsubscribeMarket: no feed command channel configured");
+            }
+        }
+        Action::RedeemPosition(request) => {
+            match execution.redeem_positions(request).await {
+                Ok(result) => {
+                    if result.success {
+                        info!(
+                            market_id = %result.market_id,
+                            tx_hash = %result.tx_hash,
+                            "Position redeemed successfully"
+                        );
+                        // Sync balance after redemption
+                        if let Ok(balance) = execution.get_balance().await {
+                            let mut bal = context.balance.write().await;
+                            bal.available_usdc = balance;
+                        }
+                        event_bus.publish(Event::OrderUpdate(OrderEvent::Redeemed {
+                            market_id: result.market_id,
+                            tx_hash: result.tx_hash,
+                            strategy_name: strategy_name.to_string(),
+                        }));
+                    } else {
+                        warn!(
+                            market_id = %result.market_id,
+                            message = %result.message,
+                            "Position redemption failed"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        market_id = %request.market_id,
+                        error = %e,
+                        "Position redemption error"
+                    );
+                    return Err(e);
+                }
             }
         }
     }

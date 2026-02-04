@@ -3,6 +3,9 @@ use crate::types::*;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
+// Re-export RedeemRequest and RedeemResult for convenience
+pub use crate::types::{RedeemRequest, RedeemResult};
+
 /// Abstraction over order execution.
 ///
 /// `LiveBackend` sends real orders to Polymarket via rs-clob-client.
@@ -35,6 +38,18 @@ pub trait ExecutionBackend: Send + Sync {
         }
         Ok(results)
     }
+
+    /// Check if a market has resolved on-chain (payoutDenominator > 0).
+    async fn is_market_resolved(&self, _condition_id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Redeem winning positions after market resolution.
+    async fn redeem_positions(&self, _request: &RedeemRequest) -> Result<RedeemResult> {
+        Err(crate::error::PolyError::Execution(
+            "Redemption not supported".into(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -59,5 +74,11 @@ impl ExecutionBackend for Box<dyn ExecutionBackend> {
     }
     async fn place_batch_orders(&self, orders: &[OrderRequest]) -> Result<Vec<OrderResult>> {
         (**self).place_batch_orders(orders).await
+    }
+    async fn is_market_resolved(&self, condition_id: &str) -> Result<bool> {
+        (**self).is_market_resolved(condition_id).await
+    }
+    async fn redeem_positions(&self, request: &RedeemRequest) -> Result<RedeemResult> {
+        (**self).redeem_positions(request).await
     }
 }

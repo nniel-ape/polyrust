@@ -14,6 +14,8 @@ pub struct Config {
     pub store: StoreConfig,
     #[serde(default)]
     pub paper: PaperConfig,
+    #[serde(default)]
+    pub auto_claim: AutoClaimConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +193,42 @@ impl Default for PaperConfig {
 
 fn default_initial_balance() -> Decimal {
     Decimal::new(10_000, 0)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoClaimConfig {
+    #[serde(default = "default_auto_claim_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_secs: u64,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_retry_backoff")]
+    pub retry_backoff_secs: u64,
+}
+
+impl Default for AutoClaimConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_auto_claim_enabled(),
+            poll_interval_secs: default_poll_interval(),
+            max_retries: default_max_retries(),
+            retry_backoff_secs: default_retry_backoff(),
+        }
+    }
+}
+
+fn default_auto_claim_enabled() -> bool {
+    true
+}
+fn default_poll_interval() -> u64 {
+    300 // 5 minutes
+}
+fn default_max_retries() -> u32 {
+    10
+}
+fn default_retry_backoff() -> u64 {
+    60 // 1 minute
 }
 
 impl Config {

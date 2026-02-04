@@ -54,6 +54,17 @@ db_path = "polyrust.db"  # Use ":memory:" for testing
 enabled = true           # Set false + credentials for live trading
 initial_balance = 10000  # Starting USDC balance
 
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTO-CLAIM
+# ─────────────────────────────────────────────────────────────────────────────
+# Automatically redeem winning positions after market resolution on-chain
+
+[auto_claim]
+enabled = true                # Enable automatic position redemption
+poll_interval_secs = 300      # Check for resolved markets every 5 minutes
+max_retries = 10              # Max attempts before manual intervention needed
+retry_backoff_secs = 60       # Wait 1 minute between retry attempts
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # CRYPTO ARBITRAGE STRATEGY
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -69,7 +80,7 @@ initial_balance = 10000  # Starting USDC balance
 # [arbitrage]
 # coins = ["BTC", "ETH", "SOL", "XRP"]  # Coins to track
 # max_positions = 5                      # Maximum concurrent positions
-# min_profit_margin = 0.03               # 3% net profit for Confirmed mode
+# min_profit_margin = 0.03               # 3% net profit for Confirmed mode (env: POLY_MIN_PROFIT_MARGIN, CLI: --min-profit)
 # late_window_margin = 0.02              # 2% relaxed margin (120-300s remaining)
 # scan_interval_secs = 30                # Market discovery scan interval
 # use_chainlink = true                   # On-chain Chainlink vs RTDS boundary snapshots

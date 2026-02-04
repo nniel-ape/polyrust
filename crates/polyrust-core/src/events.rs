@@ -76,6 +76,11 @@ pub enum OrderEvent {
         /// Token ID of the rejected order (for pending order cleanup)
         token_id: Option<TokenId>,
     },
+    Redeemed {
+        market_id: MarketId,
+        tx_hash: String,
+        strategy_name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
