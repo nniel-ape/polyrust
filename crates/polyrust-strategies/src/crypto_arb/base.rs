@@ -777,7 +777,7 @@ impl CryptoArbBase {
         let mut active = self.active_markets.write().await;
         active.insert(market.id.clone(), mwr);
 
-        vec![Action::SubscribeMarket(market.id.clone())]
+        vec![Action::SubscribeMarket(market.clone())]
     }
 
     // -------------------------------------------------------------------------

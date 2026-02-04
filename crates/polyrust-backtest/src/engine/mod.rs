@@ -408,7 +408,7 @@ impl BacktestEngine {
                     .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))
                 {
                     let slug_lower = m.slug.to_lowercase();
-                    for (prefix, _) in &nominal_bases {
+                    for prefix in nominal_bases.keys() {
                         if slug_lower.starts_with(prefix) {
                             up_token_to_coin
                                 .insert(m.token_a.clone(), prefix.to_uppercase());

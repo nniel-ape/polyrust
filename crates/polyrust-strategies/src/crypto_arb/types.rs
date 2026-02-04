@@ -138,7 +138,7 @@ impl MarketWithReference {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ArbitrageMode {
     /// Tail-end mode: < 2 min remaining, market price >= 90%.
-    /// Uses FOK orders for speed (fee ~0% at extreme prices).
+    /// Uses GTC orders with aggressive pricing (0% maker fee, no USDC clamping).
     TailEnd,
     /// Two-sided mode: both outcomes priced below combined $0.98.
     /// Guaranteed profit regardless of outcome. Uses batch GTC orders.

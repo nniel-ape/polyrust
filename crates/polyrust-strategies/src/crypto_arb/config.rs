@@ -461,4 +461,14 @@ impl ArbitrageConfig {
             || self.confirmed.enabled
             || self.correlation.enabled
     }
+
+    /// Apply environment variable overrides to the configuration.
+    pub fn with_env_overrides(mut self) -> Self {
+        if let Ok(v) = std::env::var("POLY_MIN_PROFIT_MARGIN")
+            && let Ok(d) = v.parse::<Decimal>()
+        {
+            self.min_profit_margin = d;
+        }
+        self
+    }
 }

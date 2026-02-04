@@ -5,7 +5,9 @@
 //! - Predicted winner's ask >= 0.90
 //! - Confidence: 1.0 (fixed, highest priority)
 //!
-//! Uses FOK orders for speed (taker fee ~0% at extreme prices).
+//! Uses GTC orders with aggressive pricing (at/above ask) for immediate fills.
+//! GTC avoids the FOK USDC clamping issue at extreme prices (>0.99) and gets
+//! 0% maker fee instead of ~0.06% taker fee.
 
 use std::sync::Arc;
 
@@ -19,7 +21,7 @@ use polyrust_core::prelude::*;
 use crate::crypto_arb::base::{taker_fee, CryptoArbBase};
 use crate::crypto_arb::dashboard::try_emit_dashboard_updates;
 use crate::crypto_arb::types::{
-    ArbitrageMode, ArbitrageOpportunity, ArbitragePosition, PendingOrder,
+    ArbitrageMode, ArbitrageOpportunity, ArbitragePosition, OpenLimitOrder, PendingOrder,
 };
 
 /// TailEnd strategy: trades near expiration with high market prices.
@@ -240,7 +242,7 @@ impl TailEndStrategy {
         }
 
         let profit_margin = Decimal::ONE - ask_price;
-        let estimated_fee = taker_fee(ask_price, self.base.config.fee.taker_fee_rate);
+        let estimated_fee = Decimal::ZERO; // GTC maker fee = 0%
         let net_margin = profit_margin - estimated_fee;
 
         // Apply quality factor to confidence (reduces position size via Kelly sizing)
@@ -320,7 +322,40 @@ impl TailEndStrategy {
             return vec![];
         }
 
-        // FOK orders fill immediately — create position now
+        // GTC orders: track as open limit order; position created on fill event
+        if pending.order_type == OrderType::Gtc {
+            if let Some(order_id) = &result.order_id {
+                info!(
+                    order_id = %order_id,
+                    market = %pending.market_id,
+                    price = %pending.price,
+                    "TailEnd GTC limit order placed"
+                );
+                let mut limits = self.base.open_limit_orders.write().await;
+                limits.insert(
+                    order_id.clone(),
+                    OpenLimitOrder {
+                        order_id: order_id.clone(),
+                        market_id: pending.market_id,
+                        token_id: pending.token_id,
+                        side: pending.side,
+                        price: pending.price,
+                        size: pending.size,
+                        reference_price: pending.reference_price,
+                        coin: pending.coin,
+                        placed_at: tokio::time::Instant::now(),
+                        mode: pending.mode,
+                        kelly_fraction: pending.kelly_fraction,
+                        estimated_fee: pending.estimated_fee,
+                        tick_size: pending.tick_size,
+                        fee_rate_bps: pending.fee_rate_bps,
+                    },
+                );
+            }
+            return vec![];
+        }
+
+        // FOK fallback path (stop-loss sells still use FOK)
         let position = ArbitragePosition {
             market_id: pending.market_id.clone(),
             token_id: pending.token_id,
@@ -335,7 +370,7 @@ impl TailEndStrategy {
             peak_bid: pending.price,
             mode: pending.mode.clone(),
             estimated_fee: pending.estimated_fee,
-            entry_market_price: pending.price, // Entry price is the market price at entry
+            entry_market_price: pending.price,
             tick_size: pending.tick_size,
             fee_rate_bps: pending.fee_rate_bps,
         };
@@ -346,8 +381,60 @@ impl TailEndStrategy {
             price = %position.entry_price,
             size = %position.size,
             mode = %pending.mode,
-            "TailEnd position confirmed after order fill"
+            "TailEnd FOK position confirmed"
         );
+
+        self.base.record_position(position).await;
+        vec![]
+    }
+
+    /// Handle a fully filled GTC order event.
+    async fn on_order_filled(
+        &self,
+        order_id: &str,
+        _token_id: &str,
+        price: Decimal,
+        size: Decimal,
+    ) -> Vec<Action> {
+        let lo = {
+            let mut limits = self.base.open_limit_orders.write().await;
+            match limits.remove(order_id) {
+                Some(lo) if lo.mode == ArbitrageMode::TailEnd => lo,
+                Some(lo) => {
+                    // Not our mode, put it back
+                    limits.insert(order_id.to_string(), lo);
+                    return vec![];
+                }
+                None => return vec![],
+            }
+        };
+
+        info!(
+            order_id = %order_id,
+            market = %lo.market_id,
+            price = %price,
+            size = %size,
+            "TailEnd GTC order filled"
+        );
+
+        let position = ArbitragePosition {
+            market_id: lo.market_id.clone(),
+            token_id: lo.token_id,
+            side: lo.side,
+            entry_price: price,
+            size,
+            reference_price: lo.reference_price,
+            coin: lo.coin,
+            order_id: Some(order_id.to_string()),
+            entry_time: Utc::now(),
+            kelly_fraction: lo.kelly_fraction,
+            peak_bid: price,
+            mode: lo.mode,
+            estimated_fee: lo.estimated_fee,
+            entry_market_price: price,
+            tick_size: lo.tick_size,
+            fee_rate_bps: lo.fee_rate_bps,
+        };
 
         self.base.record_position(position).await;
         vec![]
@@ -495,14 +582,17 @@ impl Strategy for TailEndStrategy {
                             continue;
                         }
 
-                        // TailEnd always uses FOK orders (speed matters)
+                        // TailEnd uses GTC orders with aggressive pricing (at/above ask).
+                        // GTC avoids FOK USDC clamping at extreme prices and gets 0% maker fee.
+                        let limit_offset = self.base.config.order.limit_offset;
+                        let aggressive_price = (opp.buy_price + limit_offset).min(Decimal::new(99, 2));
                         let order = if let Some(ref market) = market_info {
                             OrderRequest::new(
                                 opp.token_id.clone(),
-                                opp.buy_price,
+                                aggressive_price,
                                 size,
                                 OrderSide::Buy,
-                                OrderType::Fok,
+                                OrderType::Gtc,
                                 market.market.neg_risk,
                             )
                             .with_tick_size(market.market.tick_size)
@@ -510,10 +600,10 @@ impl Strategy for TailEndStrategy {
                         } else {
                             OrderRequest::new(
                                 opp.token_id.clone(),
-                                opp.buy_price,
+                                aggressive_price,
                                 size,
                                 OrderSide::Buy,
-                                OrderType::Fok,
+                                OrderType::Gtc,
                                 false,
                             )
                         };
@@ -522,12 +612,13 @@ impl Strategy for TailEndStrategy {
                             mode = ?opp.mode,
                             market = %market_id,
                             confidence = %opp.confidence,
-                            price = %opp.buy_price,
+                            ask_price = %opp.buy_price,
+                            limit_price = %aggressive_price,
                             size = %size,
                             available_depth = %available,
                             safe_depth = %safe_available,
                             side = ?opp.outcome_to_buy,
-                            "Submitting TailEnd order"
+                            "Submitting TailEnd GTC order"
                         );
 
                         // Track pending order
@@ -543,7 +634,7 @@ impl Strategy for TailEndStrategy {
                                     size,
                                     reference_price: market.reference_price,
                                     coin: market.coin.clone(),
-                                    order_type: OrderType::Fok,
+                                    order_type: OrderType::Gtc,
                                     mode: ArbitrageMode::TailEnd,
                                     kelly_fraction: None,
                                     estimated_fee: opp.estimated_fee,
@@ -654,6 +745,17 @@ impl Strategy for TailEndStrategy {
 
             Event::OrderUpdate(OrderEvent::Placed(result)) => self.on_order_placed(result).await,
 
+            Event::OrderUpdate(OrderEvent::Filled {
+                order_id,
+                token_id,
+                price,
+                size,
+                ..
+            }) => {
+                self.on_order_filled(order_id, token_id, *price, *size)
+                    .await
+            }
+
             Event::OrderUpdate(OrderEvent::Rejected { token_id, .. }) => {
                 if let Some(token_id) = token_id {
                     // Clear pending buy order if it's ours and record cooldown
@@ -690,7 +792,7 @@ impl Strategy for TailEndStrategy {
             _ => vec![],
         };
 
-        // Check stale limit orders (TailEnd doesn't use GTC, but check anyway for shared state)
+        // Check stale limit orders (TailEnd uses GTC for entries)
         actions.extend(self.base.check_stale_limit_orders().await);
 
         // Emit SSE dashboard updates (throttled to ~5s across all strategies)
