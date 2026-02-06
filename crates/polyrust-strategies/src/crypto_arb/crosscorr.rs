@@ -99,6 +99,11 @@ impl CrossCorrStrategy {
                 };
                 drop(markets);
 
+                // Skip if market is in stale-removal cooldown
+                if self.base.is_stale_market_cooled_down(&market_id).await {
+                    continue;
+                }
+
                 // Skip if we already have exposure
                 if self.base.has_market_exposure(&market_id).await {
                     continue;
@@ -604,7 +609,7 @@ impl Strategy for CrossCorrStrategy {
                         continue;
                     }
 
-                    if let Some((action, exit_price)) =
+                    if let Some((action, exit_price, trigger)) =
                         self.base.check_stop_loss(&pos, snapshot).await
                     {
                         info!(
@@ -612,6 +617,10 @@ impl Strategy for CrossCorrStrategy {
                             entry = %pos.entry_price,
                             exit = %exit_price,
                             side = ?pos.side,
+                            reason = trigger.reason,
+                            peak_bid = %trigger.peak_bid,
+                            effective_distance = %trigger.effective_distance,
+                            time_remaining = trigger.time_remaining,
                             "CrossCorr stop-loss triggered"
                         );
                         let mut pending_sl = self.base.pending_stop_loss.write().await;
@@ -716,5 +725,183 @@ impl Strategy for CrossCorrStrategy {
 
     fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> {
         None // Uses shared dashboard
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use rust_decimal_macros::dec;
+
+    use crate::crypto_arb::config::ArbitrageConfig;
+    use crate::crypto_arb::types::{MarketWithReference, ReferenceQuality};
+
+    fn make_market_info(
+        id: &str,
+        coin: &str,
+        end_date: chrono::DateTime<Utc>,
+    ) -> polyrust_core::types::MarketInfo {
+        polyrust_core::types::MarketInfo {
+            id: id.to_string(),
+            slug: format!("{}-up-down", coin.to_lowercase()),
+            question: format!("Will {} go up?", coin),
+            start_date: None,
+            end_date,
+            token_ids: polyrust_core::types::TokenIds {
+                outcome_a: format!("{}_up", coin.to_lowercase()),
+                outcome_b: format!("{}_down", coin.to_lowercase()),
+            },
+            accepting_orders: true,
+            neg_risk: false,
+            min_order_size: dec!(5.0),
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+        }
+    }
+
+    async fn make_crosscorr_with_follower() -> (CrossCorrStrategy, StrategyContext) {
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.correlation.enabled = true;
+        config.correlation.discount_factor = dec!(0.7);
+        // Use fixed sizing to avoid Kelly min_order_size issues in tests
+        config.sizing.use_kelly = false;
+        config.sizing.base_size = dec!(100); // Large enough for min_order_size=5
+        // BTC → [ETH] (from default pairs)
+        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+        // Add ETH follower market
+        let market = MarketWithReference {
+            market: make_market_info("eth_market", "ETH", Utc::now() + Duration::seconds(600)),
+            reference_price: dec!(3000),
+            reference_quality: ReferenceQuality::Exact,
+            discovery_time: Utc::now(),
+            coin: "ETH".to_string(),
+        };
+        base.active_markets
+            .write()
+            .await
+            .insert("eth_market".to_string(), market);
+
+        let ctx = StrategyContext::new();
+        let strategy = CrossCorrStrategy::new(base);
+        (strategy, ctx)
+    }
+
+    #[tokio::test]
+    async fn crosscorr_triggers_on_leader_spike() {
+        let (strategy, ctx) = make_crosscorr_with_follower().await;
+
+        // ETH ask in the [0.40, 0.60] range for the Up token
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "eth_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "eth_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel {
+                        price: dec!(0.50),
+                        size: dec!(100),
+                    }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        // BTC spiked up 2% → follower confidence = 0.02 * 0.7 = 0.014... wait,
+        // leader_confidence = min(|change|, 1.0), so 0.02.abs().min(1.0) = 0.02
+        // follower_confidence = 0.02 * 0.7 = 0.014 < 0.50 threshold → skip!
+        // Need large enough spike: 100% → confidence = 1.0 * 0.7 = 0.70 > 0.50
+        let opps = strategy
+            .generate_opportunities("BTC", dec!(1.0), &ctx)
+            .await;
+        assert!(!opps.is_empty());
+        let (opp, _, _) = &opps[0];
+        assert!(matches!(opp.mode, ArbitrageMode::CrossCorrelated { .. }));
+        assert_eq!(opp.token_id, "eth_up");
+    }
+
+    #[tokio::test]
+    async fn crosscorr_applies_discount_factor() {
+        let (strategy, ctx) = make_crosscorr_with_follower().await;
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "eth_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "eth_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel {
+                        price: dec!(0.50),
+                        size: dec!(100),
+                    }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        // 80% spike → leader_confidence = 0.80, follower = 0.80 * 0.7 = 0.56
+        let opps = strategy
+            .generate_opportunities("BTC", dec!(0.80), &ctx)
+            .await;
+        assert!(!opps.is_empty());
+        assert_eq!(opps[0].0.confidence, dec!(0.56)); // 0.80 * 0.70 = 0.56
+    }
+
+    #[tokio::test]
+    async fn crosscorr_skips_moved_follower() {
+        let (strategy, ctx) = make_crosscorr_with_follower().await;
+
+        // ETH ask at 0.75 → outside [0.40, 0.60] → skip
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "eth_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "eth_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel {
+                        price: dec!(0.75),
+                        size: dec!(100),
+                    }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opps = strategy
+            .generate_opportunities("BTC", dec!(1.0), &ctx)
+            .await;
+        assert!(opps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn crosscorr_skips_below_confidence_threshold() {
+        let (strategy, ctx) = make_crosscorr_with_follower().await;
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "eth_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "eth_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel {
+                        price: dec!(0.50),
+                        size: dec!(100),
+                    }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        // Small spike: 5% → leader_confidence = 0.05, follower = 0.05 * 0.7 = 0.035 < 0.50
+        let opps = strategy
+            .generate_opportunities("BTC", dec!(0.05), &ctx)
+            .await;
+        assert!(opps.is_empty());
     }
 }

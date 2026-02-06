@@ -100,10 +100,9 @@ impl LiveBackend {
 
         // Initialize CtfRedeemer if we have RPC URLs
         let ctf_redeemer = if !config.polymarket.rpc_urls.is_empty() {
-            let rpc_url = &config.polymarket.rpc_urls[0];
-            match CtfRedeemer::new(rpc_url, private_key, config.polymarket.safe_address.as_deref().unwrap_or("")) {
+            match CtfRedeemer::new(&config.polymarket.rpc_urls, private_key, config.polymarket.safe_address.as_deref().unwrap_or("")) {
                 Ok(redeemer) => {
-                    info!("CtfRedeemer initialized (RPC: {})", rpc_url);
+                    info!(rpc_count = config.polymarket.rpc_urls.len(), "CtfRedeemer initialized");
                     if let Err(e) = redeemer.ensure_approvals().await {
                         warn!("Token approval check failed: {e} (sells may fail)");
                     }

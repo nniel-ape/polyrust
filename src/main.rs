@@ -1,3 +1,5 @@
+mod verify;
+
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -45,9 +47,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    // Check for --backtest flag
+    // Check for CLI flags
     let args: Vec<String> = std::env::args().collect();
     let backtest_mode = args.contains(&"--backtest".to_string());
+    let verify_mode = args.contains(&"--verify".to_string());
+
+    if verify_mode {
+        info!("Starting in verify mode");
+        return verify::run_verify().await;
+    }
 
     if backtest_mode {
         info!("Starting in backtest mode");

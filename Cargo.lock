@@ -3788,6 +3788,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "polymarket-client-sdk",
  "polyrust-backtest",
  "polyrust-core",
  "polyrust-dashboard",

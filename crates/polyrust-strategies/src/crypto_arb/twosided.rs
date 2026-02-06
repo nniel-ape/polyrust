@@ -315,6 +315,11 @@ impl Strategy for TwoSidedStrategy {
                 };
 
                 for market_id in market_ids {
+                    // Skip if market is in stale-removal cooldown
+                    if self.base.is_stale_market_cooled_down(&market_id).await {
+                        continue;
+                    }
+
                     // Skip if we already have exposure
                     if self.base.has_market_exposure(&market_id).await {
                         continue;
@@ -548,5 +553,190 @@ impl Strategy for TwoSidedStrategy {
 
     fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> {
         None // Uses shared dashboard
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use rust_decimal_macros::dec;
+
+    use crate::crypto_arb::config::ArbitrageConfig;
+    use crate::crypto_arb::types::{MarketWithReference, ReferenceQuality};
+
+    fn make_market_info(id: &str, end_date: chrono::DateTime<Utc>) -> polyrust_core::types::MarketInfo {
+        polyrust_core::types::MarketInfo {
+            id: id.to_string(),
+            slug: "btc-up-down".to_string(),
+            question: "Will BTC go up?".to_string(),
+            start_date: None,
+            end_date,
+            token_ids: polyrust_core::types::TokenIds {
+                outcome_a: "token_up".to_string(),
+                outcome_b: "token_down".to_string(),
+            },
+            accepting_orders: true,
+            neg_risk: false,
+            min_order_size: dec!(5.0),
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+        }
+    }
+
+    async fn make_twosided(time_remaining: i64) -> (TwoSidedStrategy, StrategyContext) {
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.twosided.enabled = true;
+        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+        let market = MarketWithReference {
+            market: make_market_info("market1", Utc::now() + Duration::seconds(time_remaining)),
+            reference_price: dec!(50000),
+            reference_quality: ReferenceQuality::Exact,
+            discovery_time: Utc::now(),
+            coin: "BTC".to_string(),
+        };
+        base.active_markets
+            .write()
+            .await
+            .insert("market1".to_string(), market);
+
+        let ctx = StrategyContext::new();
+        let strategy = TwoSidedStrategy::new(base);
+        (strategy, ctx)
+    }
+
+    #[tokio::test]
+    async fn twosided_generates_two_opportunities() {
+        let (strategy, ctx) = make_twosided(600).await;
+
+        // Both asks below combined threshold: 0.47 + 0.48 = 0.95 < 0.98
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.47), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_down".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.48), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opps = strategy.evaluate_opportunity(&"market1".to_string(), &ctx).await;
+        assert!(opps.is_some());
+        let opps = opps.unwrap();
+        assert_eq!(opps.len(), 2);
+        assert_eq!(opps[0].outcome_to_buy, OutcomeSide::Up);
+        assert_eq!(opps[1].outcome_to_buy, OutcomeSide::Down);
+        assert_eq!(opps[0].buy_price, dec!(0.47));
+        assert_eq!(opps[1].buy_price, dec!(0.48));
+        assert_eq!(opps[0].mode, ArbitrageMode::TwoSided);
+    }
+
+    #[tokio::test]
+    async fn twosided_skips_above_combined_threshold() {
+        let (strategy, ctx) = make_twosided(600).await;
+
+        // Combined = 0.50 + 0.50 = 1.00 >= 0.98
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.50), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_down".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.50), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opps = strategy.evaluate_opportunity(&"market1".to_string(), &ctx).await;
+        assert!(opps.is_none());
+    }
+
+    #[tokio::test]
+    async fn twosided_skips_expired_market() {
+        let (strategy, ctx) = make_twosided(-10).await; // Already expired
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.40), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_down".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.40), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opps = strategy.evaluate_opportunity(&"market1".to_string(), &ctx).await;
+        assert!(opps.is_none());
+    }
+
+    #[tokio::test]
+    async fn twosided_equal_profit_margin_both_legs() {
+        let (strategy, ctx) = make_twosided(600).await;
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.45), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_down".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.45), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opps = strategy.evaluate_opportunity(&"market1".to_string(), &ctx).await;
+        assert!(opps.is_some());
+        let opps = opps.unwrap();
+        // Both legs share the same profit_margin = 1 - 0.90 = 0.10
+        assert_eq!(opps[0].profit_margin, opps[1].profit_margin);
+        assert_eq!(opps[0].profit_margin, dec!(0.10));
     }
 }

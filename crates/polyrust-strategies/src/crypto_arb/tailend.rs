@@ -501,6 +501,16 @@ impl Strategy for TailEndStrategy {
                 };
 
                 for market_id in market_ids {
+                    // Skip if market is in stale-removal cooldown
+                    if self.base.is_stale_market_cooled_down(&market_id).await {
+                        debug!(
+                            market = %market_id,
+                            "TailEnd skip: stale market cooldown active"
+                        );
+                        self.base.record_tailend_skip("stale_cooldown").await;
+                        continue;
+                    }
+
                     // Skip if in FOK rejection cooldown
                     if self.base.is_fok_cooled_down(&market_id).await {
                         debug!(
@@ -706,7 +716,7 @@ impl Strategy for TailEndStrategy {
                         continue;
                     }
 
-                    if let Some((action, exit_price)) =
+                    if let Some((action, exit_price, trigger)) =
                         self.base.check_stop_loss(&pos, snapshot).await
                     {
                         info!(
@@ -714,6 +724,10 @@ impl Strategy for TailEndStrategy {
                             entry = %pos.entry_price,
                             exit = %exit_price,
                             side = ?pos.side,
+                            reason = trigger.reason,
+                            peak_bid = %trigger.peak_bid,
+                            effective_distance = %trigger.effective_distance,
+                            time_remaining = trigger.time_remaining,
                             "TailEnd stop-loss triggered"
                         );
                         let mut pending_sl = self.base.pending_stop_loss.write().await;
@@ -843,5 +857,212 @@ impl Strategy for TailEndStrategy {
 
     fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> {
         None // Uses shared dashboard
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use rust_decimal_macros::dec;
+
+    use crate::crypto_arb::config::ArbitrageConfig;
+    use crate::crypto_arb::types::{MarketWithReference, ReferenceQuality};
+
+    fn make_market_info(id: &str, end_date: chrono::DateTime<Utc>) -> polyrust_core::types::MarketInfo {
+        polyrust_core::types::MarketInfo {
+            id: id.to_string(),
+            slug: "btc-up-down".to_string(),
+            question: "Will BTC go up?".to_string(),
+            start_date: None,
+            end_date,
+            token_ids: polyrust_core::types::TokenIds {
+                outcome_a: "token_up".to_string(),
+                outcome_b: "token_down".to_string(),
+            },
+            accepting_orders: true,
+            neg_risk: false,
+            min_order_size: dec!(5.0),
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+        }
+    }
+
+    async fn make_tailend_strategy(time_remaining: i64) -> (TailEndStrategy, StrategyContext) {
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.tailend.enabled = true;
+        config.tailend.min_sustained_secs = 5; // Small window to keep test simple
+        config.tailend.max_recent_volatility = dec!(1.0); // Disable volatility filter
+        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+        let market = MarketWithReference {
+            market: make_market_info("market1", Utc::now() + Duration::seconds(time_remaining)),
+            reference_price: dec!(50000),
+            reference_quality: ReferenceQuality::Exact,
+            discovery_time: Utc::now(),
+            coin: "BTC".to_string(),
+        };
+        base.active_markets
+            .write()
+            .await
+            .insert("market1".to_string(), market);
+
+        // Populate price history so sustained direction check passes.
+        // Use timestamps spread over last 5s to establish direction.
+        {
+            use std::collections::VecDeque;
+            let mut history = base.price_history.write().await;
+            let mut entries = VecDeque::new();
+            let now = Utc::now();
+            // BTC above reference (51000 > 50000) — favors Up direction
+            entries.push_back((now - Duration::seconds(3), dec!(51000), "test".to_string()));
+            entries.push_back((now - Duration::seconds(1), dec!(51000), "test".to_string()));
+            history.insert("BTC".to_string(), entries);
+        }
+
+        let ctx = StrategyContext::new();
+        let strategy = TailEndStrategy::new(base);
+        (strategy, ctx)
+    }
+
+    #[tokio::test]
+    async fn tailend_generates_order_within_window() {
+        let (strategy, ctx) = make_tailend_strategy(60).await;
+
+        // Set up orderbook with ask >= threshold (0.93 at 60s), tight spread
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.935), size: dec!(100) }],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.94), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        // BTC price above reference → predicts Up → token_up
+        let opp = strategy
+            .evaluate_opportunity(&"market1".to_string(), dec!(51000), &ctx)
+            .await;
+        assert!(opp.is_some());
+        let opp = opp.unwrap();
+        assert_eq!(opp.mode, ArbitrageMode::TailEnd);
+        assert_eq!(opp.token_id, "token_up");
+        assert_eq!(opp.buy_price, dec!(0.94));
+    }
+
+    #[tokio::test]
+    async fn tailend_skips_outside_window() {
+        let (strategy, ctx) = make_tailend_strategy(200).await; // > 120s threshold
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.92), size: dec!(100) }],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.95), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opp = strategy
+            .evaluate_opportunity(&"market1".to_string(), dec!(51000), &ctx)
+            .await;
+        assert!(opp.is_none());
+    }
+
+    #[tokio::test]
+    async fn tailend_skips_below_threshold() {
+        let (strategy, ctx) = make_tailend_strategy(60).await;
+
+        // At 60s, dynamic threshold is 0.93. Set ask to 0.89 (below threshold).
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.87), size: dec!(100) }],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.89), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opp = strategy
+            .evaluate_opportunity(&"market1".to_string(), dec!(51000), &ctx)
+            .await;
+        assert!(opp.is_none());
+    }
+
+    #[tokio::test]
+    async fn tailend_dynamic_threshold_tightens() {
+        let strategy_constructor = |time: i64| async move {
+            let (s, _) = make_tailend_strategy(time).await;
+            s
+        };
+
+        let s120 = strategy_constructor(120).await;
+        let s30 = strategy_constructor(30).await;
+
+        let t120 = s120.get_ask_threshold(120);
+        let t30 = s30.get_ask_threshold(30);
+
+        // At 120s → 0.90, at 30s → 0.95
+        assert_eq!(t120, dec!(0.90));
+        assert_eq!(t30, dec!(0.95));
+        assert!(t30 > t120);
+    }
+
+    #[tokio::test]
+    async fn tailend_respects_max_spread() {
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.tailend.enabled = true;
+        config.tailend.min_sustained_secs = 0;
+        config.tailend.max_recent_volatility = dec!(1.0);
+        config.tailend.max_spread_bps = dec!(50); // 50 bps = 0.5%
+        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+        let market = MarketWithReference {
+            market: make_market_info("market1", Utc::now() + Duration::seconds(60)),
+            reference_price: dec!(50000),
+            reference_quality: ReferenceQuality::Exact,
+            discovery_time: Utc::now(),
+            coin: "BTC".to_string(),
+        };
+        base.active_markets
+            .write()
+            .await
+            .insert("market1".to_string(), market);
+
+        let ctx = StrategyContext::new();
+        let strategy = TailEndStrategy::new(base);
+
+        // Wide spread: bid=0.90, ask=0.95 → spread=5.4% >> 0.5%
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.90), size: dec!(100) }],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.95), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opp = strategy
+            .evaluate_opportunity(&"market1".to_string(), dec!(51000), &ctx)
+            .await;
+        assert!(opp.is_none());
     }
 }

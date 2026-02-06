@@ -356,6 +356,11 @@ impl Strategy for ConfirmedStrategy {
                 };
 
                 for market_id in market_ids {
+                    // Skip if market is in stale-removal cooldown
+                    if self.base.is_stale_market_cooled_down(&market_id).await {
+                        continue;
+                    }
+
                     // Skip if we already have exposure
                     if self.base.has_market_exposure(&market_id).await {
                         continue;
@@ -576,7 +581,7 @@ impl Strategy for ConfirmedStrategy {
                         continue;
                     }
 
-                    if let Some((action, exit_price)) =
+                    if let Some((action, exit_price, trigger)) =
                         self.base.check_stop_loss(&pos, snapshot).await
                     {
                         info!(
@@ -584,6 +589,10 @@ impl Strategy for ConfirmedStrategy {
                             entry = %pos.entry_price,
                             exit = %exit_price,
                             side = ?pos.side,
+                            reason = trigger.reason,
+                            peak_bid = %trigger.peak_bid,
+                            effective_distance = %trigger.effective_distance,
+                            time_remaining = trigger.time_remaining,
                             "Confirmed stop-loss triggered"
                         );
                         let mut pending_sl = self.base.pending_stop_loss.write().await;
@@ -688,5 +697,201 @@ impl Strategy for ConfirmedStrategy {
 
     fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> {
         None // Uses shared dashboard
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use rust_decimal_macros::dec;
+
+    use crate::crypto_arb::config::ArbitrageConfig;
+    use crate::crypto_arb::types::{MarketWithReference, ReferenceQuality};
+
+    fn make_market_info(id: &str, end_date: chrono::DateTime<Utc>) -> polyrust_core::types::MarketInfo {
+        polyrust_core::types::MarketInfo {
+            id: id.to_string(),
+            slug: "btc-up-down".to_string(),
+            question: "Will BTC go up?".to_string(),
+            start_date: None,
+            end_date,
+            token_ids: polyrust_core::types::TokenIds {
+                outcome_a: "token_up".to_string(),
+                outcome_b: "token_down".to_string(),
+            },
+            accepting_orders: true,
+            neg_risk: false,
+            min_order_size: dec!(5.0),
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+        }
+    }
+
+    async fn make_confirmed(time_remaining: i64) -> (ConfirmedStrategy, StrategyContext) {
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.confirmed.enabled = true;
+        config.tailend.enabled = false; // Don't defer to TailEnd
+        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+        let market = MarketWithReference {
+            market: make_market_info("market1", Utc::now() + Duration::seconds(time_remaining)),
+            reference_price: dec!(50000),
+            reference_quality: ReferenceQuality::Exact,
+            discovery_time: Utc::now(),
+            coin: "BTC".to_string(),
+        };
+        base.active_markets
+            .write()
+            .await
+            .insert("market1".to_string(), market);
+
+        let ctx = StrategyContext::new();
+        let strategy = ConfirmedStrategy::new(base);
+        (strategy, ctx)
+    }
+
+    #[tokio::test]
+    async fn confirmed_uses_confidence_model() {
+        let (strategy, ctx) = make_confirmed(600).await;
+
+        // BTC at 50500 (1% above reference) with ask at 0.60
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.60), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opp = strategy
+            .evaluate_opportunity(&"market1".to_string(), dec!(50500), &ctx)
+            .await;
+        assert!(opp.is_some());
+        let opp = opp.unwrap();
+        assert_eq!(opp.mode, ArbitrageMode::Confirmed);
+        assert!(opp.confidence >= dec!(0.50));
+    }
+
+    #[tokio::test]
+    async fn confirmed_skips_low_confidence() {
+        let (strategy, ctx) = make_confirmed(600).await;
+
+        // BTC barely above reference → low confidence
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.50), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        // Tiny move: 50001 vs 50000 → distance ~0.002% → very low confidence
+        let opp = strategy
+            .evaluate_opportunity(&"market1".to_string(), dec!(50001), &ctx)
+            .await;
+        assert!(opp.is_none());
+    }
+
+    #[tokio::test]
+    async fn confirmed_defers_to_tailend_in_window() {
+        // When TailEnd is enabled and time < 120s, Confirmed should skip
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.confirmed.enabled = true;
+        config.tailend.enabled = true; // This makes Confirmed defer
+        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+        let market = MarketWithReference {
+            market: make_market_info("market1", Utc::now() + Duration::seconds(60)), // Within tail window
+            reference_price: dec!(50000),
+            reference_quality: ReferenceQuality::Exact,
+            discovery_time: Utc::now(),
+            coin: "BTC".to_string(),
+        };
+        base.active_markets
+            .write()
+            .await
+            .insert("market1".to_string(), market);
+
+        let ctx = StrategyContext::new();
+        let strategy = ConfirmedStrategy::new(base);
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.60), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opp = strategy
+            .evaluate_opportunity(&"market1".to_string(), dec!(51000), &ctx)
+            .await;
+        assert!(opp.is_none());
+    }
+
+    #[tokio::test]
+    async fn confirmed_late_window_higher_margin() {
+        // Time < 300s → uses late_window_margin (default 0.02)
+        // confirmed.min_margin = 0.02 — same value but test proves late_window path is active
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.confirmed.enabled = true;
+        config.tailend.enabled = false;
+        config.confirmed.min_margin = dec!(0.01); // Normal margin: 1%
+        config.late_window_margin = dec!(0.03);   // Late window: stricter 3%
+        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+        let market = MarketWithReference {
+            market: make_market_info("market1", Utc::now() + Duration::seconds(200)), // < 300s
+            reference_price: dec!(50000),
+            reference_quality: ReferenceQuality::Exact,
+            discovery_time: Utc::now(),
+            coin: "BTC".to_string(),
+        };
+        base.active_markets
+            .write()
+            .await
+            .insert("market1".to_string(), market);
+
+        let ctx = StrategyContext::new();
+        let strategy = ConfirmedStrategy::new(base);
+
+        // Ask at 0.98 → net margin = 0.02 < late_window_margin(0.03) → SKIP
+        // (Would pass with normal min_margin of 0.01)
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.98), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opp = strategy
+            .evaluate_opportunity(&"market1".to_string(), dec!(52000), &ctx)
+            .await;
+        assert!(opp.is_none());
     }
 }

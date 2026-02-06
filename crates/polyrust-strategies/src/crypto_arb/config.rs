@@ -282,6 +282,12 @@ pub struct StopLossConfig {
     pub trailing_distance: Decimal,
     /// Tighten trailing distance as time remaining decreases.
     pub time_decay: bool,
+    /// Floor on effective trailing distance after time decay.
+    /// Prevents noise triggers when time_decay shrinks distance to near-zero.
+    pub trailing_min_distance: Decimal,
+    /// Cooldown in seconds after a stale position is removed before re-entering
+    /// the same market. Prevents immediate re-entry loops.
+    pub stale_market_cooldown_secs: u64,
 }
 
 impl Default for StopLossConfig {
@@ -292,6 +298,8 @@ impl Default for StopLossConfig {
             trailing_enabled: true,
             trailing_distance: Decimal::new(3, 2), // 0.03
             time_decay: true,
+            trailing_min_distance: Decimal::new(1, 2), // 0.01
+            stale_market_cooldown_secs: 120,
         }
     }
 }

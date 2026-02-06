@@ -26,6 +26,19 @@ use crate::crypto_arb::types::{
     OpenLimitOrder, PendingOrder, ReferenceQuality, SpikeEvent,
 };
 
+/// Metadata about why a stop-loss was triggered, for diagnostic logging.
+#[derive(Debug, Clone)]
+pub struct StopLossTrigger {
+    /// Which trigger fired: "trailing_stop" or "dual_trigger".
+    pub reason: &'static str,
+    /// Peak bid observed during position lifetime.
+    pub peak_bid: Decimal,
+    /// Effective trailing distance (after time decay + floor).
+    pub effective_distance: Decimal,
+    /// Seconds remaining on the market.
+    pub time_remaining: i64,
+}
+
 /// Number of price history entries to keep per coin.
 /// At ~5s RTDS intervals, 200 entries covers ~16 minutes — enough for a full
 /// 15-minute window plus discovery delay.
@@ -197,6 +210,8 @@ pub struct CryptoArbBase {
     pub fok_cooldowns: RwLock<HashMap<MarketId, tokio::time::Instant>>,
     /// Stop-loss rejection cooldowns per token — prevents retry storms on sell failures.
     pub stop_loss_cooldowns: RwLock<HashMap<TokenId, tokio::time::Instant>>,
+    /// Stale market cooldowns — prevents re-entry after a position was removed as stale.
+    pub stale_market_cooldowns: RwLock<HashMap<MarketId, tokio::time::Instant>>,
     /// TailEnd skip-reason counters for diagnostics.
     /// Logged every 60s in the pipeline status summary.
     pub tailend_skip_stats: RwLock<HashMap<&'static str, u64>>,
@@ -233,6 +248,7 @@ impl CryptoArbBase {
             last_status_log: RwLock::new(None),
             fok_cooldowns: RwLock::new(HashMap::new()),
             stop_loss_cooldowns: RwLock::new(HashMap::new()),
+            stale_market_cooldowns: RwLock::new(HashMap::new()),
             tailend_skip_stats: RwLock::new(HashMap::new()),
             coins,
         }
@@ -964,12 +980,12 @@ impl CryptoArbBase {
     /// 2. Market price dropped by >= stop_loss_min_drop (5¢) from entry
     /// 3. Time remaining > 60s (don't sell in final minute)
     ///
-    /// Returns `Some((action, exit_price))` when stop-loss should trigger.
+    /// Returns `Some((action, exit_price, trigger))` when stop-loss should trigger.
     pub async fn check_stop_loss(
         &self,
         pos: &ArbitragePosition,
         snapshot: &OrderbookSnapshot,
-    ) -> Option<(Action, Decimal)> {
+    ) -> Option<(Action, Decimal, StopLossTrigger)> {
         // Read time_remaining from active_markets, then drop the lock before
         // acquiring price_history (via get_latest_price) to avoid inconsistent
         // lock ordering with record_price which acquires them in reverse order.
@@ -1008,12 +1024,16 @@ impl CryptoArbBase {
         let price_drop = pos.entry_price - current_bid;
         let market_dropped = price_drop >= self.config.stop_loss.min_drop;
 
-        // Trailing stop: triggers when position was profitable and bid dropped from peak
-        let trailing_triggered = if self.config.stop_loss.trailing_enabled
-            && pos.peak_bid > pos.entry_price
+        let min_distance = self.config.stop_loss.trailing_min_distance;
+
+        // Trailing stop: triggers when position was profitable and bid dropped from peak.
+        // Arming requires peak_bid >= entry_price + trailing_min_distance to avoid
+        // triggering on sub-cent profit noise.
+        let (trailing_triggered, effective_distance) = if self.config.stop_loss.trailing_enabled
+            && pos.peak_bid >= pos.entry_price + min_distance
         {
             let base_distance = self.config.stop_loss.trailing_distance;
-            let effective_distance = if self.config.stop_loss.time_decay {
+            let eff = if self.config.stop_loss.time_decay {
                 // Tighten trailing distance as expiry approaches (900s = 15min market)
                 let decay_factor = Decimal::from(time_remaining) / Decimal::from(900i64);
                 // Clamp to [0, 1]
@@ -1024,17 +1044,29 @@ impl CryptoArbBase {
                 } else {
                     decay_factor
                 };
-                base_distance * clamped
+                // Apply floor: never let effective distance go below trailing_min_distance
+                (base_distance * clamped).max(min_distance)
             } else {
                 base_distance
             };
             let drop_from_peak = pos.peak_bid - current_bid;
-            drop_from_peak >= effective_distance
+            (drop_from_peak >= eff, eff)
         } else {
-            false
+            (false, min_distance)
         };
 
         if (crypto_reversed && market_dropped) || trailing_triggered {
+            let reason = if trailing_triggered {
+                "trailing_stop"
+            } else {
+                "dual_trigger"
+            };
+            let trigger = StopLossTrigger {
+                reason,
+                peak_bid: pos.peak_bid,
+                effective_distance,
+                time_remaining,
+            };
             let order = OrderRequest::new(
                 pos.token_id.clone(),
                 current_bid,
@@ -1045,7 +1077,7 @@ impl CryptoArbBase {
             )
             .with_tick_size(pos.tick_size)
             .with_fee_rate_bps(pos.fee_rate_bps);
-            Some((Action::PlaceOrder(order), current_bid))
+            Some((Action::PlaceOrder(order), current_bid, trigger))
         } else {
             None
         }
@@ -1121,6 +1153,24 @@ impl CryptoArbBase {
         }
     }
 
+    /// Record a stale market cooldown to prevent re-entry after position removal.
+    pub async fn record_stale_market_cooldown(&self, market_id: &MarketId, cooldown_secs: u64) {
+        let expires_at =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(cooldown_secs);
+        let mut cooldowns = self.stale_market_cooldowns.write().await;
+        cooldowns.insert(market_id.clone(), expires_at);
+    }
+
+    /// Check if a market is still in stale-removal cooldown.
+    pub async fn is_stale_market_cooled_down(&self, market_id: &MarketId) -> bool {
+        let cooldowns = self.stale_market_cooldowns.read().await;
+        if let Some(expires_at) = cooldowns.get(market_id) {
+            tokio::time::Instant::now() < *expires_at
+        } else {
+            false
+        }
+    }
+
     /// Handle a rejected stop-loss sell order.
     ///
     /// If the reason indicates a permanent balance/allowance issue, removes the stale
@@ -1138,11 +1188,15 @@ impl CryptoArbBase {
             );
             drop(pending_sl);
             if let Some(pos) = self.remove_position_by_token(token_id).await {
+                let cooldown = self.config.stop_loss.stale_market_cooldown_secs;
+                self.record_stale_market_cooldown(&pos.market_id, cooldown)
+                    .await;
                 info!(
                     token_id = %token_id,
                     market = %pos.market_id,
                     mode = mode_name,
-                    "Stale position removed after stop-loss rejection"
+                    cooldown_secs = cooldown,
+                    "Stale position removed after stop-loss rejection, market cooldown applied"
                 );
             }
         } else {

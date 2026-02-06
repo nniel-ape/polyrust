@@ -312,11 +312,20 @@ impl Engine {
                                 )
                                 .await
                                 {
-                                    error!(
-                                        strategy = %name,
-                                        error = %e,
-                                        "failed to execute action"
-                                    );
+                                    let msg = e.to_string();
+                                    if msg.contains("not enough balance") || msg.contains("allowance") {
+                                        warn!(
+                                            strategy = %name,
+                                            error = %e,
+                                            "order rejected (balance/allowance)"
+                                        );
+                                    } else {
+                                        error!(
+                                            strategy = %name,
+                                            error = %e,
+                                            "failed to execute action"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -412,7 +421,7 @@ pub async fn find_market_id_for_token(
 }
 
 /// Execute a single action from a strategy.
-async fn execute_action(
+pub async fn execute_action(
     action: &Action,
     execution: &Arc<dyn ExecutionBackend>,
     event_bus: &EventBus,

@@ -783,4 +783,101 @@ mod tests {
         // Must be within IEEE 754 safe integer range (2^53 - 1)
         assert!(salt <= (1u64 << 53) - 1);
     }
+
+    // --- Phase 3: New rounding tests ---
+
+    /// FOK BUY at extreme price 0.99 with tick=0.01: round_up preserves fillability.
+    #[test]
+    fn test_fok_buy_extreme_price_099() {
+        let signable = build_signable_order(
+            SdkU256::from(1u64),
+            dec!(0.99),
+            dec!(10.00),
+            OrderSide::Buy,
+            OrderType::Fok,
+            dec!(0.01),
+            0,
+            SdkAddress::ZERO,
+            None,
+            SignatureType::Eoa,
+        );
+
+        // fok_usdc = 10.00 * 0.99 = 9.90
+        // round_up(9.90, 2) = 9.90 (exact), 9.90 < 10.00 → no clamp
+        assert_eq!(signable.order.makerAmount, SdkU256::from(9_900_000u64));
+        assert_eq!(signable.order.takerAmount, SdkU256::from(10_000_000u64));
+    }
+
+    /// GTC vs FOK: same inputs yield different USDC precision.
+    /// GTC uses tick-rounded price with combined (4) decimal precision.
+    /// FOK uses raw price with price-only (2) decimal precision.
+    #[test]
+    fn test_gtc_vs_fok_different_precision() {
+        // GTC: price rounds to 0.99, USDC = 5.01*0.99 = 4.9599, round_down(4) = 4.9599
+        let (gtc_maker, _) = calculate_order_amounts(
+            dec!(0.995),
+            dec!(5.01),
+            OrderSide::Buy,
+            OrderType::Gtc,
+            dec!(0.01),
+        );
+        // FOK: raw price 0.995, USDC = 5.01*0.995 = 4.98495, round_up(2) = 4.99
+        let (fok_maker, _) = calculate_order_amounts(
+            dec!(0.995),
+            dec!(5.01),
+            OrderSide::Buy,
+            OrderType::Fok,
+            dec!(0.01),
+        );
+
+        // GTC maker amount: 4.9599 USDC = 4_959_900
+        assert_eq!(gtc_maker, "4959900");
+        // FOK maker amount: 4.99 USDC = 4_990_000
+        assert_eq!(fok_maker, "4990000");
+        // They're different!
+        assert_ne!(gtc_maker, fok_maker);
+    }
+
+    /// Tick size 0.0001 yields price_decimals=4, amount_decimals=6.
+    #[test]
+    fn test_tick_size_0001_precision() {
+        let config = rounding_config_for_tick(dec!(0.0001));
+        assert_eq!(config.price_decimals, 4);
+        assert_eq!(config.size_decimals, 2);
+        assert_eq!(config.amount_decimals(), 6);
+    }
+
+    /// Tick size 0.001 yields price_decimals=3, amount_decimals=5.
+    #[test]
+    fn test_tick_size_001_precision() {
+        let config = rounding_config_for_tick(dec!(0.001));
+        assert_eq!(config.price_decimals, 3);
+        assert_eq!(config.size_decimals, 2);
+        assert_eq!(config.amount_decimals(), 5);
+    }
+
+    /// Tick size 0.1 yields price_decimals=1, amount_decimals=3.
+    #[test]
+    fn test_tick_size_01_precision() {
+        let config = rounding_config_for_tick(dec!(0.1));
+        assert_eq!(config.price_decimals, 1);
+        assert_eq!(config.size_decimals, 2);
+        assert_eq!(config.amount_decimals(), 3);
+    }
+
+    /// Unknown tick size defaults to 0.01 config.
+    #[test]
+    fn test_tick_size_unknown_defaults_to_001() {
+        let config = rounding_config_for_tick(dec!(0.05));
+        assert_eq!(config.price_decimals, 2);
+        assert_eq!(config.size_decimals, 2);
+        assert_eq!(config.amount_decimals(), 4);
+    }
+
+    /// Round price/size with tick 0.0001 — 4 price decimals.
+    #[test]
+    fn test_round_price_with_tick_0001() {
+        assert_eq!(round_price_with_tick(dec!(0.99876), dec!(0.0001)), dec!(0.9987));
+        assert_eq!(round_size_with_tick(dec!(10.999), dec!(0.0001)), dec!(10.99));
+    }
 }

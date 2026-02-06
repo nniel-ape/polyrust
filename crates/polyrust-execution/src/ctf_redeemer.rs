@@ -8,6 +8,8 @@ use alloy::signers::Signer;
 use alloy::sol;
 use alloy::sol_types::SolCall;
 use polyrust_core::error::{PolyError, Result};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 // Polymarket contract addresses on Polygon mainnet
@@ -16,6 +18,8 @@ const NEG_RISK_ADAPTER: Address = address!("d91E80cF2E7be2e162c6513ceD06f1dD0dA3
 const USDC_ADDRESS: Address = address!("2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
 const CTF_EXCHANGE: Address = address!("4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E");
 const NEG_RISK_EXCHANGE: Address = address!("C5d563A36AE78145C45a50134d48A1215220f80a");
+
+const MAX_RETRIES: u32 = 3;
 
 sol! {
     #[sol(rpc)]
@@ -81,15 +85,25 @@ sol! {
 /// Executes redemptions through the Safe wallet via `execTransaction`.
 /// Standard markets use CTF `redeemPositions` directly.
 /// Neg-risk markets query CTF balances then call the NegRiskAdapter.
+///
+/// Supports multiple RPC endpoints with automatic rotation on rate limits
+/// and exponential backoff on transient errors.
 pub struct CtfRedeemer {
-    rpc_url: String,
+    rpc_urls: Vec<String>,
+    current_rpc: AtomicUsize,
     signer: PrivateKeySigner,
     safe_address: Address,
 }
 
 impl CtfRedeemer {
-    /// Create a new CtfRedeemer with the given RPC endpoint and credentials.
-    pub fn new(rpc_url: &str, private_key: &str, safe_address: &str) -> Result<Self> {
+    /// Create a new CtfRedeemer with the given RPC endpoints and credentials.
+    ///
+    /// Multiple RPC URLs enable automatic failover on rate limits.
+    pub fn new(rpc_urls: &[String], private_key: &str, safe_address: &str) -> Result<Self> {
+        if rpc_urls.is_empty() {
+            return Err(PolyError::Config("No RPC URLs provided".into()));
+        }
+
         let safe_address = safe_address.parse::<Address>().map_err(|e| {
             PolyError::Config(format!("Invalid Safe address: {e}"))
         })?;
@@ -101,14 +115,31 @@ impl CtfRedeemer {
         info!(
             eoa = %signer.address(),
             safe = %safe_address,
+            rpc_count = rpc_urls.len(),
             "CtfRedeemer initialized"
         );
 
         Ok(Self {
-            rpc_url: rpc_url.to_string(),
+            rpc_urls: rpc_urls.to_vec(),
+            current_rpc: AtomicUsize::new(0),
             signer,
             safe_address,
         })
+    }
+
+    /// Get the current RPC URL.
+    fn rpc_url(&self) -> &str {
+        let idx = self.current_rpc.load(Ordering::Relaxed) % self.rpc_urls.len();
+        &self.rpc_urls[idx]
+    }
+
+    /// Rotate to the next RPC URL on rate limit.
+    fn rotate_rpc(&self) {
+        if self.rpc_urls.len() > 1 {
+            let old = self.current_rpc.fetch_add(1, Ordering::Relaxed);
+            let new_idx = (old + 1) % self.rpc_urls.len();
+            debug!(new_idx, "Rotated to next RPC endpoint");
+        }
     }
 
     /// Check and set ERC-1155 (CTF) and ERC-20 (USDC) approvals for Polymarket
@@ -123,18 +154,25 @@ impl CtfRedeemer {
             ("Neg Risk Adapter", NEG_RISK_ADAPTER),
         ];
 
-        let provider = ProviderBuilder::new().connect_http(parse_rpc_url(&self.rpc_url)?);
-        let ctf = IConditionalTokens::new(CTF_ADDRESS, &provider);
-        let usdc = IERC20::new(USDC_ADDRESS, &provider);
-
         for (name, target) in targets {
+            let target = *target;
+            let safe = self.safe_address;
+
             // Check CTF approval (ERC-1155 setApprovalForAll)
-            match ctf.isApprovedForAll(self.safe_address, *target).call().await {
-                Ok(approved) => {
-                    if !approved {
+            let approved = with_retry("isApprovedForAll", self, || async {
+                let provider = ProviderBuilder::new().connect_http(parse_rpc_url(self.rpc_url())?);
+                let ctf = IConditionalTokens::new(CTF_ADDRESS, &provider);
+                ctf.isApprovedForAll(safe, target).call().await.map_err(|e| {
+                    PolyError::Execution(format!("isApprovedForAll check failed: {e}"))
+                })
+            }).await;
+
+            match approved {
+                Ok(is_approved) => {
+                    if !is_approved {
                         info!(contract = name, "CTF not approved, setting approval...");
                         let calldata = IConditionalTokens::setApprovalForAllCall {
-                            operator: *target,
+                            operator: target,
                             approved: true,
                         }
                         .abi_encode();
@@ -153,12 +191,20 @@ impl CtfRedeemer {
             }
 
             // Check USDC approval (ERC-20 approve)
-            match usdc.allowance(self.safe_address, *target).call().await {
-                Ok(allowance) => {
-                    if allowance.is_zero() {
+            let allowance = with_retry("allowance", self, || async {
+                let provider = ProviderBuilder::new().connect_http(parse_rpc_url(self.rpc_url())?);
+                let usdc = IERC20::new(USDC_ADDRESS, &provider);
+                usdc.allowance(safe, target).call().await.map_err(|e| {
+                    PolyError::Execution(format!("USDC allowance check failed: {e}"))
+                })
+            }).await;
+
+            match allowance {
+                Ok(value) => {
+                    if value.is_zero() {
                         info!(contract = name, "USDC not approved, setting approval...");
                         let calldata = IERC20::approveCall {
-                            spender: *target,
+                            spender: target,
                             value: U256::MAX,
                         }
                         .abi_encode();
@@ -187,12 +233,13 @@ impl CtfRedeemer {
     pub async fn is_resolved(&self, condition_id: &str) -> Result<bool> {
         let cid = parse_condition_id(condition_id)?;
 
-        let provider = ProviderBuilder::new().connect_http(parse_rpc_url(&self.rpc_url)?);
-        let ctf = IConditionalTokens::new(CTF_ADDRESS, &provider);
-
-        let result = ctf.payoutDenominator(cid).call().await.map_err(|e| {
-            PolyError::Execution(format!("payoutDenominator call failed: {e}"))
-        })?;
+        let result = with_retry("payoutDenominator", self, || async {
+            let provider = ProviderBuilder::new().connect_http(parse_rpc_url(self.rpc_url())?);
+            let ctf = IConditionalTokens::new(CTF_ADDRESS, &provider);
+            ctf.payoutDenominator(cid).call().await.map_err(|e| {
+                PolyError::Execution(format!("payoutDenominator call failed: {e}"))
+            })
+        }).await?;
 
         let resolved = result > U256::ZERO;
         debug!(condition_id, resolved, "Checked market resolution");
@@ -207,20 +254,18 @@ impl CtfRedeemer {
             return Ok(false);
         }
 
-        let provider = ProviderBuilder::new().connect_http(parse_rpc_url(&self.rpc_url)?);
-        let ctf = IConditionalTokens::new(CTF_ADDRESS, &provider);
-
         for tid in token_ids {
             let token_u256 = tid.parse::<U256>().map_err(|e| {
                 PolyError::Execution(format!("Invalid token_id '{tid}': {e}"))
             })?;
-            let bal = ctf
-                .balanceOf(self.safe_address, token_u256)
-                .call()
-                .await
-                .map_err(|e| {
+            let safe = self.safe_address;
+            let bal = with_retry("balanceOf", self, || async {
+                let provider = ProviderBuilder::new().connect_http(parse_rpc_url(self.rpc_url())?);
+                let ctf = IConditionalTokens::new(CTF_ADDRESS, &provider);
+                ctf.balanceOf(safe, token_u256).call().await.map_err(|e| {
                     PolyError::Execution(format!("balanceOf({tid}) failed: {e}"))
-                })?;
+                })
+            }).await?;
             if bal > U256::ZERO {
                 return Ok(true);
             }
@@ -272,28 +317,40 @@ impl CtfRedeemer {
     ///
     /// Signs the Safe transaction hash with EIP-191 (eth_sign) and adjusts v += 4
     /// per Safe's signature encoding convention.
+    ///
+    /// Individual RPC calls (nonce, getTransactionHash) are retried on rate limits.
+    /// The final execTransaction send is also retried.
     async fn execute_safe_tx(
         &self,
         to: Address,
         data: Bytes,
     ) -> Result<FixedBytes<32>> {
-        let wallet = EthereumWallet::from(self.signer.clone());
-        let provider = ProviderBuilder::new()
-            .wallet(wallet)
-            .connect_http(parse_rpc_url(&self.rpc_url)?);
-        let safe = ISafe::new(self.safe_address, &provider);
+        let safe_addr = self.safe_address;
 
-        // 1. Get Safe nonce
-        let nonce = safe.nonce().call().await.map_err(|e| {
-            PolyError::Execution(format!("Safe nonce() failed: {e}"))
-        })?;
+        // 1. Get Safe nonce (with retry)
+        let nonce = with_retry("nonce", self, || async {
+            let wallet = EthereumWallet::from(self.signer.clone());
+            let provider = ProviderBuilder::new()
+                .wallet(wallet)
+                .connect_http(parse_rpc_url(self.rpc_url())?);
+            let safe = ISafe::new(safe_addr, &provider);
+            safe.nonce().call().await.map_err(|e| {
+                PolyError::Execution(format!("Safe nonce() failed: {e}"))
+            })
+        }).await?;
 
-        // 2. Compute Safe transaction hash
-        let tx_hash = safe
-            .getTransactionHash(
+        // 2. Compute Safe transaction hash (with retry)
+        let data_clone = data.clone();
+        let tx_hash = with_retry("getTransactionHash", self, || async {
+            let wallet = EthereumWallet::from(self.signer.clone());
+            let provider = ProviderBuilder::new()
+                .wallet(wallet)
+                .connect_http(parse_rpc_url(self.rpc_url())?);
+            let safe = ISafe::new(safe_addr, &provider);
+            safe.getTransactionHash(
                 to,
                 U256::ZERO,
-                data.clone(),
+                data_clone.clone(),
                 0u8,
                 U256::ZERO,
                 U256::ZERO,
@@ -306,7 +363,8 @@ impl CtfRedeemer {
             .await
             .map_err(|e| {
                 PolyError::Execution(format!("getTransactionHash failed: {e}"))
-            })?;
+            })
+        }).await?;
 
         // 3. Sign with EIP-191 prefix (eth_sign), v += 4 for Safe convention
         let sig = self
@@ -320,26 +378,34 @@ impl CtfRedeemer {
         sig_bytes.extend_from_slice(&sig.s().to_be_bytes::<32>());
         sig_bytes.push(sig.v() as u8 + 31); // eth_sign: v in {31, 32}
 
-        // 4. Execute through Safe
-        let receipt = safe
-            .execTransaction(
-                to,
-                U256::ZERO,
-                data,
-                0u8,
-                U256::ZERO,
-                U256::ZERO,
-                U256::ZERO,
-                Address::ZERO,
-                Address::ZERO,
-                Bytes::from(sig_bytes),
-            )
-            .send()
-            .await
-            .map_err(|e| PolyError::Execution(format!("execTransaction send failed: {e}")))?
-            .get_receipt()
-            .await
-            .map_err(|e| PolyError::Execution(format!("Failed to get tx receipt: {e}")))?;
+        // 4. Execute through Safe (with retry)
+        let sig_bytes_for_retry = Bytes::from(sig_bytes);
+        let receipt = with_retry("execTransaction", self, || async {
+            let wallet = EthereumWallet::from(self.signer.clone());
+            let provider = ProviderBuilder::new()
+                .wallet(wallet)
+                .connect_http(parse_rpc_url(self.rpc_url())?);
+            let safe = ISafe::new(safe_addr, &provider);
+            let pending = safe
+                .execTransaction(
+                    to,
+                    U256::ZERO,
+                    data.clone(),
+                    0u8,
+                    U256::ZERO,
+                    U256::ZERO,
+                    U256::ZERO,
+                    Address::ZERO,
+                    Address::ZERO,
+                    sig_bytes_for_retry.clone(),
+                )
+                .send()
+                .await
+                .map_err(|e| PolyError::Execution(format!("execTransaction send failed: {e}")))?;
+            pending.get_receipt().await.map_err(|e| {
+                PolyError::Execution(format!("Failed to get tx receipt: {e}"))
+            })
+        }).await?;
 
         if !receipt.status() {
             return Err(PolyError::Execution(format!(
@@ -358,21 +424,20 @@ impl CtfRedeemer {
         condition_id: FixedBytes<32>,
         token_ids: &[String],
     ) -> Result<(Address, Bytes)> {
-        let provider = ProviderBuilder::new().connect_http(parse_rpc_url(&self.rpc_url)?);
-        let ctf = IConditionalTokens::new(CTF_ADDRESS, &provider);
+        let safe = self.safe_address;
 
         let mut amounts = Vec::with_capacity(token_ids.len());
         for tid in token_ids {
             let token_u256 = tid.parse::<U256>().map_err(|e| {
                 PolyError::Execution(format!("Invalid token_id '{tid}': {e}"))
             })?;
-            let bal = ctf
-                .balanceOf(self.safe_address, token_u256)
-                .call()
-                .await
-                .map_err(|e| {
+            let bal = with_retry("balanceOf", self, || async {
+                let provider = ProviderBuilder::new().connect_http(parse_rpc_url(self.rpc_url())?);
+                let ctf = IConditionalTokens::new(CTF_ADDRESS, &provider);
+                ctf.balanceOf(safe, token_u256).call().await.map_err(|e| {
                     PolyError::Execution(format!("balanceOf({tid}) failed: {e}"))
-                })?;
+                })
+            }).await?;
             amounts.push(bal);
         }
 
@@ -386,6 +451,42 @@ impl CtfRedeemer {
 
         Ok((NEG_RISK_ADAPTER, Bytes::from(data)))
     }
+}
+
+/// Retry an RPC operation with exponential backoff and RPC rotation on rate limits.
+///
+/// Retries up to `MAX_RETRIES` times with 2s/4s/8s delays when rate-limited.
+/// Rotates to the next RPC URL on each rate limit hit.
+async fn with_retry<F, Fut, T>(op_name: &str, redeemer: &CtfRedeemer, f: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    for attempt in 0..MAX_RETRIES {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < MAX_RETRIES - 1 && is_rate_limited(&e) => {
+                let delay = Duration::from_secs(2u64.pow(attempt + 1));
+                redeemer.rotate_rpc();
+                warn!(
+                    op = op_name,
+                    attempt,
+                    delay_secs = delay.as_secs(),
+                    rpc = redeemer.rpc_url(),
+                    "RPC rate limited, retrying"
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+
+/// Check if an error indicates RPC rate limiting.
+fn is_rate_limited(e: &PolyError) -> bool {
+    let s = e.to_string();
+    s.contains("-32090") || s.contains("Too many requests") || s.contains("rate limit")
 }
 
 /// Encode standard (non-neg-risk) CTF redemption calldata.

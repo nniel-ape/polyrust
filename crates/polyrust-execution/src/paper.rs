@@ -1053,4 +1053,191 @@ mod tests {
         assert!(!results[1].success);
         assert!(results[1].message.contains("Insufficient balance"));
     }
+
+    // --- Phase 3: New paper backend tests ---
+
+    #[tokio::test]
+    async fn concurrent_orders_same_token_no_corruption() {
+        let backend = PaperBackend::new(dec!(1000), FillMode::Immediate);
+
+        // Place two buy orders on the same token
+        let r1 = backend
+            .place_order(&buy_order("token1", dec!(0.50), dec!(10)))
+            .await
+            .unwrap();
+        let r2 = backend
+            .place_order(&buy_order("token1", dec!(0.60), dec!(5)))
+            .await
+            .unwrap();
+        assert!(r1.success);
+        assert!(r2.success);
+
+        // Position should be combined: 15 shares, weighted avg price
+        let positions = backend.get_positions().await.unwrap();
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].size, dec!(15));
+        // Weighted avg: (0.50*10 + 0.60*5) / 15 = 8.00/15 ≈ 0.5333...
+        let expected_avg = (dec!(0.50) * dec!(10) + dec!(0.60) * dec!(5)) / dec!(15);
+        assert_eq!(positions[0].entry_price, expected_avg);
+
+        // Balance: 1000 - 5.00 - 3.00 = 992.00
+        let balance = backend.get_balance().await.unwrap();
+        assert_eq!(balance, dec!(992));
+    }
+
+    #[tokio::test]
+    async fn cancel_partially_filled_order_restores_unfilled() {
+        let backend = PaperBackend::new(dec!(100), FillMode::Orderbook);
+
+        // Place buy order for 20 shares at 0.55
+        let result = backend
+            .place_order(&buy_order("token1", dec!(0.55), dec!(20)))
+            .await
+            .unwrap();
+        assert!(result.success);
+        let order_id = result.order_id.unwrap();
+
+        // Partially fill with 8 shares
+        let ob = make_orderbook("token1", vec![], vec![(dec!(0.50), dec!(8))]);
+        let fills = backend.update_orders_with_orderbook("token1", &ob).await;
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].size, dec!(8));
+
+        // Balance was deducted 0.55*20=11.00 upfront. 8 shares filled at 0.50
+        // price improvement refund: (0.55-0.50)*8 = 0.40
+        // balance = 100 - 11.00 + 0.40 = 89.40
+        let balance_before = backend.get_balance().await.unwrap();
+        assert_eq!(balance_before, dec!(89.40));
+
+        // Cancel remaining 12 shares
+        backend.cancel_order(&order_id).await.unwrap();
+
+        // Unfilled = 12 shares at 0.55 → restore 0.55*12 = 6.60
+        let balance_after = backend.get_balance().await.unwrap();
+        assert_eq!(balance_after, dec!(96.00));
+
+        // No open orders
+        assert!(backend.get_open_orders().await.unwrap().is_empty());
+
+        // Position should still have 8 shares
+        let positions = backend.get_positions().await.unwrap();
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].size, dec!(8));
+    }
+
+    #[tokio::test]
+    async fn multi_level_orderbook_matching() {
+        let backend = PaperBackend::new(dec!(100), FillMode::Orderbook);
+
+        // Place buy order for 25 shares at 0.60
+        let result = backend
+            .place_order(&buy_order("token1", dec!(0.60), dec!(25)))
+            .await
+            .unwrap();
+        assert!(result.success);
+
+        // Orderbook with multiple ask levels:
+        // Level 1: 10 shares @ 0.50
+        // Level 2: 10 shares @ 0.55
+        // Level 3: 10 shares @ 0.65 (above order price, won't match)
+        let ob = make_orderbook(
+            "token1",
+            vec![],
+            vec![
+                (dec!(0.50), dec!(10)),
+                (dec!(0.55), dec!(10)),
+                (dec!(0.65), dec!(10)),
+            ],
+        );
+
+        let fills = backend.update_orders_with_orderbook("token1", &ob).await;
+        assert_eq!(fills.len(), 1);
+        // Should fill 20 shares (10@0.50 + 10@0.55), remaining 5 unfilled (0.65 > 0.60)
+        assert_eq!(fills[0].size, dec!(20));
+        // Weighted avg: (10*0.50 + 10*0.55) / 20 = 10.50/20 = 0.525
+        assert_eq!(fills[0].price, dec!(0.525));
+
+        // Order should still be open with 5 remaining
+        let orders = backend.get_open_orders().await.unwrap();
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].filled_size, dec!(20));
+        assert_eq!(orders[0].status, OrderStatus::PartiallyFilled);
+    }
+
+    #[tokio::test]
+    async fn redemption_adds_balance() {
+        let backend = PaperBackend::new(dec!(100), FillMode::Immediate);
+
+        // Buy 20 shares at 0.50 → costs 10.00
+        backend
+            .place_order(&buy_order("token1", dec!(0.50), dec!(20)))
+            .await
+            .unwrap();
+        assert_eq!(backend.get_balance().await.unwrap(), dec!(90));
+
+        // Redeem: winning side pays $1 per share → 20 USDC
+        let request = polyrust_core::execution::RedeemRequest {
+            market_id: "market1".to_string(),
+            condition_id: "cond1".to_string(),
+            token_ids: vec!["token1".to_string()],
+            neg_risk: false,
+        };
+        let result = backend.redeem_positions(&request).await.unwrap();
+        assert!(result.success);
+        assert!(result.message.contains("20"));
+
+        // Balance: 90 + 20 = 110
+        assert_eq!(backend.get_balance().await.unwrap(), dec!(110));
+
+        // Position removed
+        assert!(backend.get_positions().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn redemption_no_positions_returns_failure() {
+        let backend = PaperBackend::new(dec!(100), FillMode::Immediate);
+
+        let request = polyrust_core::execution::RedeemRequest {
+            market_id: "market1".to_string(),
+            condition_id: "cond1".to_string(),
+            token_ids: vec!["nonexistent".to_string()],
+            neg_risk: false,
+        };
+        let result = backend.redeem_positions(&request).await.unwrap();
+        assert!(!result.success);
+        assert!(result.message.contains("No positions found"));
+    }
+
+    #[tokio::test]
+    async fn zero_size_order_rejected() {
+        let backend = PaperBackend::new(dec!(100), FillMode::Immediate);
+
+        let result = backend
+            .place_order(&buy_order("token1", dec!(0.50), dec!(0)))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.message.contains("Invalid size"));
+    }
+
+    #[tokio::test]
+    async fn invalid_price_order_rejected() {
+        let backend = PaperBackend::new(dec!(100), FillMode::Immediate);
+
+        // Price > 1.0
+        let result = backend
+            .place_order(&buy_order("token1", dec!(1.50), dec!(10)))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.message.contains("Invalid price"));
+
+        // Price = 0
+        let result = backend
+            .place_order(&buy_order("token1", dec!(0), dec!(10)))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.message.contains("Invalid price"));
+    }
 }
