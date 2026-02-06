@@ -397,4 +397,7 @@ pub struct OpenLimitOrder {
     pub tick_size: Decimal,
     /// Fee rate in basis points for this market.
     pub fee_rate_bps: u32,
+    /// Whether a cancel request is in flight for this order.
+    /// Prevents duplicate cancel actions on subsequent event cycles.
+    pub cancel_pending: bool,
 }

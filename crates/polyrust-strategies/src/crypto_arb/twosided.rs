@@ -174,6 +174,7 @@ impl TwoSidedStrategy {
                         estimated_fee: pending.estimated_fee,
                         tick_size: pending.tick_size,
                         fee_rate_bps: pending.fee_rate_bps,
+                        cancel_pending: false,
                     },
                 );
             }
@@ -504,6 +505,11 @@ impl Strategy for TwoSidedStrategy {
                         "TwoSided GTC order cancelled"
                     );
                 }
+                vec![]
+            }
+
+            Event::OrderUpdate(OrderEvent::CancelFailed { order_id, reason }) => {
+                self.base.handle_cancel_failed(order_id, reason).await;
                 vec![]
             }
 

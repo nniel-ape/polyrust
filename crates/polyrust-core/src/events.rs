@@ -70,6 +70,10 @@ pub enum OrderEvent {
         remaining_size: Decimal,
     },
     Cancelled(OrderId),
+    CancelFailed {
+        order_id: OrderId,
+        reason: String,
+    },
     Rejected {
         order_id: Option<OrderId>,
         reason: String,

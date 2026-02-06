@@ -657,22 +657,22 @@ async fn check_sustained_direction_up() {
 async fn check_sustained_direction_not_sustained() {
     let base = make_base_no_chainlink();
 
-    // Record prices that cross the reference
+    // Record prices that cross the reference within the window
     let now = Utc::now();
     let reference = dec!(50000);
 
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((now - Duration::seconds(5), dec!(49900), "rtds".to_string())); // Below
-        entries.push_back((now - Duration::seconds(3), dec!(50100), "rtds".to_string())); // Above
+        entries.push_back((now - Duration::seconds(4), dec!(49900), "rtds".to_string())); // Below
+        entries.push_back((now - Duration::seconds(2), dec!(50100), "rtds".to_string())); // Above
         entries.push_back((now - Duration::seconds(1), dec!(50200), "rtds".to_string())); // Above
         history.insert("BTC".to_string(), entries);
     }
 
-    // Should NOT detect sustained up direction (one entry was below)
+    // Should NOT detect sustained up direction (one entry within window was below)
     assert!(
-        !base.check_sustained_direction("BTC", reference, OutcomeSide::Up, 3)
+        !base.check_sustained_direction("BTC", reference, OutcomeSide::Up, 5)
             .await
     );
 }
@@ -738,9 +738,10 @@ fn tailend_config_defaults() {
     assert_eq!(config.time_threshold_secs, 120);
     assert_eq!(config.ask_threshold, dec!(0.90));
     assert_eq!(config.min_reference_quality, ReferenceQualityLevel::Historical);
-    assert_eq!(config.max_spread_bps, dec!(100));
-    assert_eq!(config.min_sustained_secs, 3);
-    assert_eq!(config.max_recent_volatility, dec!(0.01));
+    assert_eq!(config.max_spread_bps, dec!(200));
+    assert_eq!(config.min_sustained_secs, 5);
+    assert_eq!(config.max_recent_volatility, dec!(0.02));
+    assert_eq!(config.stale_ob_secs, 15);
     assert!(!config.dynamic_thresholds.is_empty());
 }
 

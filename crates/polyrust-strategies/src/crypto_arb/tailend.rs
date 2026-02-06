@@ -90,6 +90,7 @@ impl TailEndStrategy {
                 time_remaining = time_remaining,
                 "TailEnd skip: time outside (0, 120) window"
             );
+            self.base.record_tailend_skip("time_window").await;
             return None;
         }
 
@@ -99,6 +100,7 @@ impl TailEndStrategy {
                 market = %market_id,
                 "TailEnd skip: mode auto-disabled by performance tracker"
             );
+            self.base.record_tailend_skip("auto_disabled").await;
             return None;
         }
 
@@ -111,6 +113,7 @@ impl TailEndStrategy {
                 min_quality = ?min_quality,
                 "TailEnd skip: reference quality below threshold"
             );
+            self.base.record_tailend_skip("ref_quality").await;
             return None;
         }
 
@@ -124,6 +127,7 @@ impl TailEndStrategy {
                     reference_price = %market.reference_price,
                     "TailEnd skip: no prediction (price == reference)"
                 );
+                self.base.record_tailend_skip("no_prediction").await;
                 return None;
             }
         };
@@ -152,6 +156,7 @@ impl TailEndStrategy {
                     predicted_side = ?predicted,
                     "TailEnd skip: no ask in orderbook for predicted side"
                 );
+                self.base.record_tailend_skip("no_ask").await;
                 return None;
             }
         };
@@ -181,6 +186,7 @@ impl TailEndStrategy {
                 time_remaining = time_remaining,
                 "TailEnd skip: ask below dynamic threshold"
             );
+            self.base.record_tailend_skip("threshold").await;
             return None;
         }
 
@@ -203,6 +209,7 @@ impl TailEndStrategy {
                     ask = %ask_price,
                     "TailEnd skip: spread too wide (illiquidity filter)"
                 );
+                self.base.record_tailend_skip("spread").await;
                 return None;
             }
         }
@@ -221,6 +228,7 @@ impl TailEndStrategy {
                 min_sustained_secs = min_sustained,
                 "TailEnd skip: price direction not sustained long enough"
             );
+            self.base.record_tailend_skip("sustained").await;
             return None;
         }
 
@@ -238,6 +246,7 @@ impl TailEndStrategy {
                 max_volatility = %max_volatility,
                 "TailEnd skip: recent volatility too high (choppy market)"
             );
+            self.base.record_tailend_skip("volatility").await;
             return None;
         }
 
@@ -349,6 +358,7 @@ impl TailEndStrategy {
                         estimated_fee: pending.estimated_fee,
                         tick_size: pending.tick_size,
                         fee_rate_bps: pending.fee_rate_bps,
+                        cancel_pending: false,
                     },
                 );
             }
@@ -497,6 +507,7 @@ impl Strategy for TailEndStrategy {
                             market = %market_id,
                             "TailEnd skip: FOK rejection cooldown active"
                         );
+                        self.base.record_tailend_skip("fok_cooldown").await;
                         continue;
                     }
 
@@ -506,6 +517,7 @@ impl Strategy for TailEndStrategy {
                             market = %market_id,
                             "TailEnd skip: already have exposure to market"
                         );
+                        self.base.record_tailend_skip("exposure").await;
                         continue;
                     }
 
@@ -515,6 +527,7 @@ impl Strategy for TailEndStrategy {
                             market = %market_id,
                             "TailEnd skip: max positions reached"
                         );
+                        self.base.record_tailend_skip("max_positions").await;
                         break;
                     }
 
@@ -544,17 +557,18 @@ impl Strategy for TailEndStrategy {
                             let md = ctx.market_data.read().await;
                             match md.orderbooks.get(&opp.token_id) {
                                 Some(ob) => {
-                                    // Skip if orderbook snapshot is stale (>2s old)
-                                    // In competitive tail-end windows, 5s is an eternity
+                                    let max_age = self.base.config.tailend.stale_ob_secs;
                                     let age = Utc::now()
                                         .signed_duration_since(ob.timestamp)
                                         .num_seconds();
-                                    if age > 2 {
+                                    if age > max_age {
                                         warn!(
                                             market = %market_id,
                                             age_secs = age,
+                                            max_age_secs = max_age,
                                             "TailEnd skip: stale orderbook"
                                         );
+                                        self.base.record_tailend_skip("stale_ob").await;
                                         continue;
                                     }
                                     // Cumulative depth at all ask levels up to our buy price
@@ -681,12 +695,15 @@ impl Strategy for TailEndStrategy {
                         continue;
                     }
 
-                    // Skip if stop-loss already in flight
+                    // Skip if stop-loss already in flight or in cooldown
                     {
                         let pending_sl = self.base.pending_stop_loss.read().await;
                         if pending_sl.contains_key(&pos.token_id) {
                             continue;
                         }
+                    }
+                    if self.base.is_stop_loss_cooled_down(&pos.token_id).await {
+                        continue;
                     }
 
                     if let Some((action, exit_price)) =
@@ -756,7 +773,7 @@ impl Strategy for TailEndStrategy {
                     .await
             }
 
-            Event::OrderUpdate(OrderEvent::Rejected { token_id, .. }) => {
+            Event::OrderUpdate(OrderEvent::Rejected { token_id, reason, .. }) => {
                 if let Some(token_id) = token_id {
                     // Clear pending buy order if it's ours and record cooldown
                     let mut pending = self.base.pending_orders.write().await;
@@ -777,15 +794,30 @@ impl Strategy for TailEndStrategy {
                         );
                     }
 
-                    // Clear pending stop-loss
-                    let mut pending_sl = self.base.pending_stop_loss.write().await;
-                    if pending_sl.remove(token_id).is_some() {
-                        warn!(
-                            token_id = %token_id,
-                            "TailEnd stop-loss sell rejected"
-                        );
+                    // Handle stop-loss rejection with balance-aware cleanup
+                    if self.base.pending_stop_loss.read().await.contains_key(token_id) {
+                        self.base.handle_stop_loss_rejection(token_id, reason, "TailEnd").await;
                     }
                 }
+                vec![]
+            }
+
+            Event::OrderUpdate(OrderEvent::Cancelled(order_id)) => {
+                let mut limits = self.base.open_limit_orders.write().await;
+                if let Some(lo) = limits.remove(order_id)
+                    && lo.mode == ArbitrageMode::TailEnd
+                {
+                    info!(
+                        order_id = %order_id,
+                        market = %lo.market_id,
+                        "TailEnd GTC order cancelled"
+                    );
+                }
+                vec![]
+            }
+
+            Event::OrderUpdate(OrderEvent::CancelFailed { order_id, reason }) => {
+                self.base.handle_cancel_failed(order_id, reason).await;
                 vec![]
             }
 

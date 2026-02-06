@@ -14,6 +14,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use chrono::Utc;
 use rust_decimal::Decimal;
 
 use polyrust_core::prelude::*;
@@ -563,6 +564,187 @@ impl TailEndDashboard {
             self.base.config.tailend.ask_threshold
         );
         html.push_str("</div></div>");
+
+        // Active markets
+        {
+            let active_markets = self.base.active_markets.read().await;
+            let cached_asks = self.base.cached_asks.read().await;
+            let fee_rate = self.base.config.fee.taker_fee_rate;
+
+            let mut markets_by_time: Vec<_> = active_markets.values().collect();
+            markets_by_time.sort_by_key(|m| m.market.end_date);
+
+            html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+            let _ = write!(
+                html,
+                r#"<h2 class="text-lg font-bold mb-3">Active Markets ({})</h2>"#,
+                markets_by_time.len()
+            );
+
+            if markets_by_time.is_empty() {
+                html.push_str(r#"<p class="text-gray-500">No active markets</p>"#);
+            } else {
+                html.push_str(
+                    r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
+                );
+                html.push_str("<th class=\"text-left py-1\">Market</th>");
+                html.push_str("<th class=\"text-right py-1\">UP</th>");
+                html.push_str("<th class=\"text-right py-1\">DOWN</th>");
+                html.push_str("<th class=\"text-right py-1\">Fee</th>");
+                html.push_str("<th class=\"text-right py-1\">Net</th>");
+                html.push_str("<th class=\"text-right py-1\">Time Left</th>");
+                html.push_str("</tr></thead><tbody>");
+
+                for mwr in &markets_by_time {
+                    let remaining = mwr.market.seconds_remaining().max(0);
+                    let time_str = if remaining > 60 {
+                        format!("{}m {}s", remaining / 60, remaining % 60)
+                    } else {
+                        format!("{}s", remaining)
+                    };
+
+                    let up_ask = cached_asks.get(&mwr.market.token_ids.outcome_a).copied();
+                    let down_ask = cached_asks.get(&mwr.market.token_ids.outcome_b).copied();
+
+                    let up_price = up_ask
+                        .map(fmt_market_price)
+                        .unwrap_or_else(|| "-".to_string());
+                    let down_price = down_ask
+                        .map(fmt_market_price)
+                        .unwrap_or_else(|| "-".to_string());
+
+                    let (fee_str, net_str) = match (up_ask, down_ask) {
+                        (Some(ua), Some(da)) => {
+                            let price = ua.min(da);
+                            let fee = taker_fee(price, fee_rate);
+                            let net = net_profit_margin(price, fee_rate, false);
+                            (
+                                format!("{:.3}", fee.round_dp(3)),
+                                format!("{:.3}", net.round_dp(3)),
+                            )
+                        }
+                        (Some(p), None) | (None, Some(p)) => {
+                            let fee = taker_fee(p, fee_rate);
+                            let net = net_profit_margin(p, fee_rate, false);
+                            (
+                                format!("{:.3}", fee.round_dp(3)),
+                                format!("{:.3}", net.round_dp(3)),
+                            )
+                        }
+                        _ => ("-".to_string(), "-".to_string()),
+                    };
+
+                    let _ = write!(
+                        html,
+                        r#"<tr class="border-b border-gray-800"><td class="py-1">{coin} Up/Down</td><td class="text-right py-1">{up}</td><td class="text-right py-1">{down}</td><td class="text-right py-1">{fee}</td><td class="text-right py-1">{net}</td><td class="text-right py-1">{time}</td></tr>"#,
+                        coin = escape_html(&mwr.coin),
+                        up = up_price,
+                        down = down_price,
+                        fee = fee_str,
+                        net = net_str,
+                        time = time_str,
+                    );
+                }
+                html.push_str("</tbody></table>");
+            }
+            html.push_str("</div>");
+        }
+
+        // Market confidence scores
+        {
+            let active_markets = self.base.active_markets.read().await;
+            let price_history = self.base.price_history.read().await;
+            let cached_asks = self.base.cached_asks.read().await;
+            let now = Utc::now();
+
+            let mut eligible: Vec<_> = active_markets.values().collect();
+            eligible.sort_by(|a, b| a.coin.cmp(&b.coin));
+
+            html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+            let _ = write!(
+                html,
+                r#"<h2 class="text-lg font-bold mb-3">Market Confidence ({})</h2>"#,
+                eligible.len()
+            );
+
+            if eligible.is_empty() {
+                html.push_str(r#"<p class="text-gray-500">No active markets</p>"#);
+            } else {
+                html.push_str(
+                    r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
+                );
+                html.push_str("<th class=\"text-left py-1\">Coin</th>");
+                html.push_str("<th class=\"text-right py-1\">Time Left</th>");
+                html.push_str("<th class=\"text-right py-1\">Ask</th>");
+                html.push_str("<th class=\"text-right py-1\">Confidence</th>");
+                html.push_str("<th class=\"text-right py-1\">Quality</th>");
+                html.push_str("</tr></thead><tbody>");
+
+                for mwr in &eligible {
+                    let time_remaining = mwr.market.seconds_remaining_at(now);
+                    let current_price = price_history
+                        .get(&mwr.coin)
+                        .and_then(|h| h.back().map(|(_, p, _)| *p));
+
+                    let (ask_str, conf_str, conf_class) = match current_price {
+                        Some(cp) => {
+                            let prediction = mwr.predict_winner(cp);
+                            let token_id = match prediction {
+                                Some(OutcomeSide::Up) | Some(OutcomeSide::Yes) => {
+                                    &mwr.market.token_ids.outcome_a
+                                }
+                                _ => &mwr.market.token_ids.outcome_b,
+                            };
+                            let ask = cached_asks.get(token_id).copied();
+                            let ask_display = ask
+                                .map(fmt_market_price)
+                                .unwrap_or_else(|| "-".to_string());
+
+                            match ask {
+                                Some(market_price) => {
+                                    let confidence =
+                                        mwr.get_confidence(cp, market_price, time_remaining);
+                                    let pct = confidence * Decimal::new(100, 0);
+                                    let cls = if confidence >= Decimal::new(90, 2) {
+                                        "text-green-400"
+                                    } else if confidence >= Decimal::new(70, 2) {
+                                        "text-yellow-400"
+                                    } else {
+                                        "text-gray-400"
+                                    };
+                                    (ask_display, format!("{:.1}%", pct), cls)
+                                }
+                                None => (ask_display, "-".to_string(), "text-gray-400"),
+                            }
+                        }
+                        None => ("-".to_string(), "-".to_string(), "text-gray-400"),
+                    };
+
+                    let quality_factor =
+                        mwr.reference_quality.quality_factor() * Decimal::new(100, 0);
+                    let quality_label = match mwr.reference_quality {
+                        ReferenceQuality::Exact => "Exact",
+                        ReferenceQuality::OnChain(_) => "OnChain",
+                        ReferenceQuality::Historical(_) => "Historical",
+                        ReferenceQuality::Current => "Current",
+                    };
+
+                    let _ = write!(
+                        html,
+                        r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="text-right py-1">{time}s</td><td class="text-right py-1">{ask}</td><td class="text-right py-1 {conf_class}">{conf}</td><td class="text-right py-1">{qlabel} ({qfactor:.0}%)</td></tr>"#,
+                        coin = escape_html(&mwr.coin),
+                        time = time_remaining,
+                        ask = ask_str,
+                        conf_class = conf_class,
+                        conf = conf_str,
+                        qlabel = quality_label,
+                        qfactor = quality_factor,
+                    );
+                }
+                html.push_str("</tbody></table>");
+            }
+            html.push_str("</div>");
+        }
 
         // Reference prices (shared context)
         render_reference_prices(&self.base, &mut html).await;

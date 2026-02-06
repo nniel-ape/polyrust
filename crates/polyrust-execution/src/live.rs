@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use polymarket_client_sdk::POLYGON;
 use polymarket_client_sdk::auth::{LocalSigner, Signer};
 use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, OrdersRequest};
-use polymarket_client_sdk::clob::types::{Side as SdkSide, SignatureType};
+use polymarket_client_sdk::clob::types::{OrderStatusType, Side as SdkSide, SignatureType};
 use polymarket_client_sdk::clob::{Client, Config as SdkConfig};
 use polymarket_client_sdk::types::{Address as SdkAddress, U256 as SdkU256};
 use rust_decimal::Decimal;
@@ -103,7 +103,10 @@ impl LiveBackend {
             let rpc_url = &config.polymarket.rpc_urls[0];
             match CtfRedeemer::new(rpc_url, private_key, config.polymarket.safe_address.as_deref().unwrap_or("")) {
                 Ok(redeemer) => {
-                    warn!("CtfRedeemer initialized as STUB — on-chain redemption not yet implemented (RPC: {})", rpc_url);
+                    info!("CtfRedeemer initialized (RPC: {})", rpc_url);
+                    if let Err(e) = redeemer.ensure_approvals().await {
+                        warn!("Token approval check failed: {e} (sells may fail)");
+                    }
                     Some(redeemer)
                 }
                 Err(e) => {
@@ -247,7 +250,10 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
             price,
             size,
             side: order.side,
-            status: Some(format!("{:?}", response.status)),
+            status: Some(match response.status {
+                OrderStatusType::Matched => "Filled".to_string(),
+                other => format!("{:?}", other),
+            }),
             message: response.error_msg.unwrap_or_else(|| "ok".to_string()),
         };
 
@@ -372,16 +378,23 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
     async fn redeem_positions(&self, request: &RedeemRequest) -> Result<RedeemResult> {
         match &self.ctf_redeemer {
             Some(redeemer) => {
-                let tx_hash = redeemer
-                    .redeem(&request.condition_id, request.neg_risk)
-                    .await?;
-
-                Ok(RedeemResult {
-                    market_id: request.market_id.clone(),
-                    tx_hash: format!("{:#x}", tx_hash),
-                    success: true,
-                    message: "Position redeemed successfully".to_string(),
-                })
+                match redeemer
+                    .redeem(&request.condition_id, request.neg_risk, &request.token_ids)
+                    .await?
+                {
+                    Some(tx_hash) => Ok(RedeemResult {
+                        market_id: request.market_id.clone(),
+                        tx_hash: format!("{:#x}", tx_hash),
+                        success: true,
+                        message: "Position redeemed successfully".to_string(),
+                    }),
+                    None => Ok(RedeemResult {
+                        market_id: request.market_id.clone(),
+                        tx_hash: String::new(),
+                        success: true,
+                        message: "No CTF balance".to_string(),
+                    }),
+                }
             }
             None => Err(PolyError::Execution(
                 "CtfRedeemer not initialized (no RPC URL configured)".into(),

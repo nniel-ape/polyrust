@@ -195,6 +195,11 @@ pub struct CryptoArbBase {
     pub last_status_log: RwLock<Option<tokio::time::Instant>>,
     /// FOK rejection cooldowns per market — prevents retry storms.
     pub fok_cooldowns: RwLock<HashMap<MarketId, tokio::time::Instant>>,
+    /// Stop-loss rejection cooldowns per token — prevents retry storms on sell failures.
+    pub stop_loss_cooldowns: RwLock<HashMap<TokenId, tokio::time::Instant>>,
+    /// TailEnd skip-reason counters for diagnostics.
+    /// Logged every 60s in the pipeline status summary.
+    pub tailend_skip_stats: RwLock<HashMap<&'static str, u64>>,
     /// Coins configured for this strategy.
     coins: HashSet<String>,
 }
@@ -227,6 +232,8 @@ impl CryptoArbBase {
             last_dashboard_emit: RwLock::new(None),
             last_status_log: RwLock::new(None),
             fok_cooldowns: RwLock::new(HashMap::new()),
+            stop_loss_cooldowns: RwLock::new(HashMap::new()),
+            tailend_skip_stats: RwLock::new(HashMap::new()),
             coins,
         }
     }
@@ -343,8 +350,13 @@ impl CryptoArbBase {
         // Get all entries within the sustained window
         let window_entries: Vec<_> = entries.iter().filter(|(ts, _, _)| *ts >= cutoff).collect();
 
-        // Need at least 2 entries to establish a direction
-        if window_entries.len() < 2 {
+        // Need at least 1 entry to confirm direction
+        if window_entries.is_empty() {
+            debug!(
+                coin = %coin,
+                min_sustained_secs = min_sustained_secs,
+                "Sustained direction check failed: no entries in window"
+            );
             return false;
         }
 
@@ -1091,31 +1103,136 @@ impl CryptoArbBase {
         }
     }
 
+    /// Record a stop-loss rejection cooldown for a token.
+    pub async fn record_stop_loss_cooldown(&self, token_id: &TokenId, cooldown_secs: u64) {
+        let expires_at =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(cooldown_secs);
+        let mut cooldowns = self.stop_loss_cooldowns.write().await;
+        cooldowns.insert(token_id.clone(), expires_at);
+    }
+
+    /// Check if a token is still in stop-loss rejection cooldown.
+    pub async fn is_stop_loss_cooled_down(&self, token_id: &TokenId) -> bool {
+        let cooldowns = self.stop_loss_cooldowns.read().await;
+        if let Some(expires_at) = cooldowns.get(token_id) {
+            tokio::time::Instant::now() < *expires_at
+        } else {
+            false
+        }
+    }
+
+    /// Handle a rejected stop-loss sell order.
+    ///
+    /// If the reason indicates a permanent balance/allowance issue, removes the stale
+    /// position to prevent retry loops. Otherwise applies a cooldown for transient errors.
+    pub async fn handle_stop_loss_rejection(&self, token_id: &TokenId, reason: &str, mode_name: &str) {
+        let mut pending_sl = self.pending_stop_loss.write().await;
+        pending_sl.remove(token_id);
+
+        if reason.contains("not enough balance") || reason.contains("allowance") {
+            warn!(
+                token_id = %token_id,
+                mode = mode_name,
+                reason = %reason,
+                "Removing stale position: balance/allowance insufficient"
+            );
+            drop(pending_sl);
+            if let Some(pos) = self.remove_position_by_token(token_id).await {
+                info!(
+                    token_id = %token_id,
+                    market = %pos.market_id,
+                    mode = mode_name,
+                    "Stale position removed after stop-loss rejection"
+                );
+            }
+        } else {
+            warn!(
+                token_id = %token_id,
+                mode = mode_name,
+                reason = %reason,
+                "Stop-loss sell rejected (transient), cooldown applied"
+            );
+            drop(pending_sl);
+            self.record_stop_loss_cooldown(token_id, 30).await;
+        }
+    }
+
+    /// Handle a CancelFailed event for a limit order.
+    ///
+    /// If the reason indicates the order is permanently gone (matched/canceled/not found),
+    /// remove it from `open_limit_orders` to prevent retry loops. Otherwise, reset
+    /// `cancel_pending` so the stale-order check can retry later.
+    ///
+    /// Returns `true` if the order was found in our tracking (caller should return
+    /// empty actions vec).
+    pub async fn handle_cancel_failed(&self, order_id: &str, reason: &str) -> bool {
+        let mut limits = self.open_limit_orders.write().await;
+        if let Some(lo) = limits.get_mut(order_id) {
+            let permanently_gone = reason.contains("matched")
+                || reason.contains("canceled")
+                || reason.contains("not found");
+            if permanently_gone {
+                let lo = limits.remove(order_id).unwrap();
+                warn!(
+                    order_id = %order_id,
+                    market = %lo.market_id,
+                    mode = %lo.mode,
+                    reason = %reason,
+                    "Order permanently gone — removed from tracking"
+                );
+            } else {
+                lo.cancel_pending = false;
+                warn!(
+                    order_id = %order_id,
+                    market = %lo.market_id,
+                    mode = %lo.mode,
+                    reason = %reason,
+                    "Cancel failed (transient), will retry"
+                );
+            }
+            return true;
+        }
+        false
+    }
+
     /// Cancel GTC limit orders that have been open longer than `max_age_secs`.
+    ///
+    /// Orders are flagged with `cancel_pending = true` rather than removed from
+    /// the map. This ensures that if the cancel fails (e.g., order was already
+    /// matched), the subsequent `OrderEvent::Filled` can still find the order
+    /// and record the position correctly.
     pub async fn check_stale_limit_orders(&self) -> Vec<Action> {
         let max_age = std::time::Duration::from_secs(self.config.order.max_age_secs);
         let now = tokio::time::Instant::now();
 
         let mut orders = self.open_limit_orders.write().await;
-        let stale_ids: Vec<OrderId> = orders
-            .iter()
-            .filter(|(_, lo)| now.duration_since(lo.placed_at) >= max_age)
-            .map(|(id, _)| id.clone())
-            .collect();
-
         let mut actions = Vec::new();
-        for order_id in stale_ids {
-            if let Some(lo) = orders.remove(&order_id) {
+        for (order_id, lo) in orders.iter_mut() {
+            if lo.cancel_pending {
+                continue; // Already has a cancel in flight
+            }
+            if now.duration_since(lo.placed_at) >= max_age {
                 info!(
                     order_id = %order_id,
                     market = %lo.market_id,
                     age_secs = now.duration_since(lo.placed_at).as_secs(),
                     "Cancelling stale GTC limit order"
                 );
-                actions.push(Action::CancelOrder(order_id));
+                lo.cancel_pending = true;
+                actions.push(Action::CancelOrder(order_id.clone()));
             }
         }
         actions
+    }
+
+    // -------------------------------------------------------------------------
+    // TailEnd skip diagnostics
+    // -------------------------------------------------------------------------
+
+    /// Increment a TailEnd skip reason counter.
+    pub async fn record_tailend_skip(&self, reason: &'static str) {
+        let mut stats = self.tailend_skip_stats.write().await;
+        *stats.entry(reason).or_insert(0) += 1;
     }
 
     // -------------------------------------------------------------------------
@@ -1177,6 +1294,12 @@ impl CryptoArbBase {
             .sum();
         let pending_orders = self.pending_orders.read().await.len();
 
+        // Drain TailEnd skip stats for this period
+        let skip_stats: HashMap<&'static str, u64> = {
+            let mut stats = self.tailend_skip_stats.write().await;
+            std::mem::take(&mut *stats)
+        };
+
         info!(
             active_markets = active_count,
             pending_markets = pending_count,
@@ -1185,5 +1308,16 @@ impl CryptoArbBase {
             pending_orders = pending_orders,
             "Pipeline status summary"
         );
+
+        if !skip_stats.is_empty() {
+            let summary: Vec<String> = skip_stats
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            info!(
+                stats = %summary.join(", "),
+                "TailEnd skip stats (last 60s)"
+            );
+        }
     }
 }

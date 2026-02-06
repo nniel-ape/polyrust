@@ -61,7 +61,8 @@ pub struct TailEndConfig {
     /// Filters out illiquid markets where wide spread masquerades as certainty.
     pub max_spread_bps: Decimal,
     /// Minimum seconds the crypto price must have favored the predicted direction.
-    /// Filters out sudden spikes that immediately reverse. Default: 3 seconds.
+    /// Filters out sudden spikes that immediately reverse. Default: 10 seconds.
+    /// With ~5s RTDS intervals, 10s captures 2-3 ticks to establish direction.
     pub min_sustained_secs: u64,
     /// Maximum recent volatility (price wick) in last 10 seconds.
     /// Filters out choppy/volatile conditions. Default: 0.01 (1%).
@@ -69,6 +70,10 @@ pub struct TailEndConfig {
     /// Cooldown in seconds after a FOK order is rejected before re-evaluating
     /// the same market. Prevents retry storms on every price tick. Default: 15.
     pub fok_cooldown_secs: u64,
+    /// Maximum age in seconds for an orderbook snapshot to be considered fresh.
+    /// Rejects opportunities if the orderbook is older than this.
+    /// Docker adds network latency, so 15s is more realistic than 5s. Default: 15.
+    pub stale_ob_secs: i64,
 }
 
 fn default_time_thresholds() -> Vec<(u64, Decimal)> {
@@ -88,10 +93,11 @@ impl Default for TailEndConfig {
             ask_threshold: Decimal::new(90, 2), // 0.90
             min_reference_quality: ReferenceQualityLevel::Historical, // Default: skip Current quality
             dynamic_thresholds: default_time_thresholds(),
-            max_spread_bps: Decimal::new(100, 0), // 100 bps = 1%
-            min_sustained_secs: 3,
-            max_recent_volatility: Decimal::new(1, 2), // 0.01 = 1%
+            max_spread_bps: Decimal::new(200, 0), // 200 bps = 2%
+            min_sustained_secs: 5,
+            max_recent_volatility: Decimal::new(2, 2), // 0.02 = 2%
             fok_cooldown_secs: 15,
+            stale_ob_secs: 15,
         }
     }
 }
@@ -468,6 +474,26 @@ impl ArbitrageConfig {
             && let Ok(d) = v.parse::<Decimal>()
         {
             self.min_profit_margin = d;
+        }
+        if let Ok(v) = std::env::var("POLY_TAILEND_MIN_SUSTAINED_SECS")
+            && let Ok(secs) = v.parse::<u64>()
+        {
+            self.tailend.min_sustained_secs = secs;
+        }
+        if let Ok(v) = std::env::var("POLY_TAILEND_MAX_VOLATILITY")
+            && let Ok(d) = v.parse::<Decimal>()
+        {
+            self.tailend.max_recent_volatility = d;
+        }
+        if let Ok(v) = std::env::var("POLY_TAILEND_MAX_SPREAD_BPS")
+            && let Ok(d) = v.parse::<Decimal>()
+        {
+            self.tailend.max_spread_bps = d;
+        }
+        if let Ok(v) = std::env::var("POLY_TAILEND_STALE_OB_SECS")
+            && let Ok(secs) = v.parse::<i64>()
+        {
+            self.tailend.stale_ob_secs = secs;
         }
         self
     }

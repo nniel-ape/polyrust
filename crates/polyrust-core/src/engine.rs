@@ -7,6 +7,8 @@ use crate::events::{Event, MarketDataEvent, OrderEvent, SignalEvent, SystemEvent
 use crate::execution::ExecutionBackend;
 use crate::strategy::Strategy;
 use crate::types::{MarketId, MarketInfo, TokenId};
+use chrono::{DateTime, Utc};
+use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
@@ -191,6 +193,12 @@ impl Engine {
             let mut ctx_subscriber = self.event_bus.subscribe();
             let context = self.context.clone();
             tokio::spawn(async move {
+                // Deferred removal: keep expired markets in context for 30s so
+                // in-flight fill responses and ClaimMonitor can still look them up.
+                let mut deferred_removals: StdHashMap<MarketId, DateTime<Utc>> =
+                    StdHashMap::new();
+                const DEFER_SECS: i64 = 30;
+
                 loop {
                     let event = match ctx_subscriber.recv().await {
                         Some(e) => e,
@@ -199,6 +207,28 @@ impl Engine {
                     if matches!(&event, Event::System(SystemEvent::EngineStopping)) {
                         break;
                     }
+
+                    // Flush any deferred removals whose grace period has elapsed
+                    if !deferred_removals.is_empty() {
+                        let now = Utc::now();
+                        let ready: Vec<MarketId> = deferred_removals
+                            .iter()
+                            .filter(|(_, deadline)| now >= **deadline)
+                            .map(|(id, _)| id.clone())
+                            .collect();
+                        if !ready.is_empty() {
+                            let mut md = context.market_data.write().await;
+                            for id in ready {
+                                if let Some(info) = md.markets.remove(&id) {
+                                    md.orderbooks.remove(&info.token_ids.outcome_a);
+                                    md.orderbooks.remove(&info.token_ids.outcome_b);
+                                    debug!(market_id = %id, "Deferred removal: cleaned up expired market and orderbooks");
+                                }
+                                deferred_removals.remove(&id);
+                            }
+                        }
+                    }
+
                     match &event {
                         Event::MarketData(MarketDataEvent::ExternalPrice {
                             symbol, price, ..
@@ -213,12 +243,25 @@ impl Engine {
                             md.markets.insert(info.id.clone(), info.clone());
                         }
                         Event::MarketData(MarketDataEvent::MarketExpired(id)) => {
+                            // Defer removal: keep market in context for DEFER_SECS
+                            // so ClaimMonitor and in-flight fills can still look it up.
                             let mut md = context.market_data.write().await;
-                            if let Some(info) = md.markets.remove(id) {
-                                md.orderbooks.remove(&info.token_ids.outcome_a);
-                                md.orderbooks.remove(&info.token_ids.outcome_b);
-                                debug!(market_id = %id, "Removed expired market and orderbooks from context");
+                            // Remove orderbooks immediately (no longer needed), but keep the market entry
+                            if let Some(info) = md.markets.get(id) {
+                                let token_a = info.token_ids.outcome_a.clone();
+                                let token_b = info.token_ids.outcome_b.clone();
+                                md.orderbooks.remove(&token_a);
+                                md.orderbooks.remove(&token_b);
                             }
+                            drop(md);
+                            let deadline =
+                                Utc::now() + chrono::Duration::seconds(DEFER_SECS);
+                            deferred_removals.insert(id.clone(), deadline);
+                            debug!(
+                                market_id = %id,
+                                defer_secs = DEFER_SECS,
+                                "Deferred market removal from context"
+                            );
                         }
                         Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot)) => {
                             let mut md = context.market_data.write().await;
@@ -360,6 +403,11 @@ pub async fn find_market_id_for_token(
             return Some(market_id.clone());
         }
     }
+    debug!(
+        token_id = %token_id,
+        market_count = market_data.markets.len(),
+        "No market found for token_id"
+    );
     None
 }
 
@@ -516,14 +564,28 @@ async fn execute_action(
             }
         }
         Action::CancelOrder(id) => {
-            execution.cancel_order(id).await?;
-            if let Ok(balance) = execution.get_balance().await {
-                let mut bal = context.balance.write().await;
-                bal.available_usdc = balance;
-            } else {
-                warn!("Failed to sync balance after order cancellation - shared context may have stale data");
+            match execution.cancel_order(id).await {
+                Ok(()) => {
+                    if let Ok(balance) = execution.get_balance().await {
+                        let mut bal = context.balance.write().await;
+                        bal.available_usdc = balance;
+                    } else {
+                        warn!("Failed to sync balance after order cancellation - shared context may have stale data");
+                    }
+                    event_bus.publish(Event::OrderUpdate(OrderEvent::Cancelled(id.clone())));
+                }
+                Err(e) => {
+                    warn!(
+                        order_id = %id,
+                        error = %e,
+                        "Cancel order failed (order may have been matched)"
+                    );
+                    event_bus.publish(Event::OrderUpdate(OrderEvent::CancelFailed {
+                        order_id: id.clone(),
+                        reason: e.to_string(),
+                    }));
+                }
             }
-            event_bus.publish(Event::OrderUpdate(OrderEvent::Cancelled(id.clone())));
         }
         Action::CancelAllOrders => {
             execution.cancel_all_orders().await?;

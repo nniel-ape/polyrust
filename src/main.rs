@@ -192,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
             config.auto_claim.clone(),
             engine.event_bus().clone(),
             engine.execution(),
+            engine.context().clone(),
         ));
         tokio::spawn(async move {
             if let Err(e) = claim_monitor.run().await {

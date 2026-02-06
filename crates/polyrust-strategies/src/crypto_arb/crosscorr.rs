@@ -310,6 +310,7 @@ impl CrossCorrStrategy {
                         estimated_fee: pending.estimated_fee,
                         tick_size: pending.tick_size,
                         fee_rate_bps: pending.fee_rate_bps,
+                        cancel_pending: false,
                     },
                 );
             }
@@ -592,12 +593,15 @@ impl Strategy for CrossCorrStrategy {
                         continue;
                     }
 
-                    // Skip if stop-loss already in flight
+                    // Skip if stop-loss already in flight or in cooldown
                     {
                         let pending_sl = self.base.pending_stop_loss.read().await;
                         if pending_sl.contains_key(&pos.token_id) {
                             continue;
                         }
+                    }
+                    if self.base.is_stop_loss_cooled_down(&pos.token_id).await {
+                        continue;
                     }
 
                     if let Some((action, exit_price)) =
@@ -666,7 +670,12 @@ impl Strategy for CrossCorrStrategy {
                 vec![]
             }
 
-            Event::OrderUpdate(OrderEvent::Rejected { token_id, .. }) => {
+            Event::OrderUpdate(OrderEvent::CancelFailed { order_id, reason }) => {
+                self.base.handle_cancel_failed(order_id, reason).await;
+                vec![]
+            }
+
+            Event::OrderUpdate(OrderEvent::Rejected { token_id, reason, .. }) => {
                 if let Some(token_id) = token_id {
                     // Clear pending buy order if it's ours
                     let mut pending = self.base.pending_orders.write().await;
@@ -680,13 +689,9 @@ impl Strategy for CrossCorrStrategy {
                         );
                     }
 
-                    // Clear pending stop-loss
-                    let mut pending_sl = self.base.pending_stop_loss.write().await;
-                    if pending_sl.remove(token_id).is_some() {
-                        warn!(
-                            token_id = %token_id,
-                            "CrossCorr stop-loss sell rejected"
-                        );
+                    // Handle stop-loss rejection with balance-aware cleanup
+                    if self.base.pending_stop_loss.read().await.contains_key(token_id) {
+                        self.base.handle_stop_loss_rejection(token_id, reason, "CrossCorr").await;
                     }
                 }
                 vec![]

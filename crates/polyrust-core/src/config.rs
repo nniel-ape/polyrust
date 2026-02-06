@@ -205,6 +205,8 @@ pub struct AutoClaimConfig {
     pub max_retries: u32,
     #[serde(default = "default_retry_backoff")]
     pub retry_backoff_secs: u64,
+    #[serde(default = "default_gas_pause_duration")]
+    pub gas_pause_duration_secs: u64,
 }
 
 impl Default for AutoClaimConfig {
@@ -214,6 +216,7 @@ impl Default for AutoClaimConfig {
             poll_interval_secs: default_poll_interval(),
             max_retries: default_max_retries(),
             retry_backoff_secs: default_retry_backoff(),
+            gas_pause_duration_secs: default_gas_pause_duration(),
         }
     }
 }
@@ -229,6 +232,9 @@ fn default_max_retries() -> u32 {
 }
 fn default_retry_backoff() -> u64 {
     60 // 1 minute
+}
+fn default_gas_pause_duration() -> u64 {
+    900 // 15 minutes
 }
 
 impl Config {
