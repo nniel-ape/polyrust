@@ -84,7 +84,6 @@ async fn main() -> anyhow::Result<()> {
         data_db_path: "backtest_data.db".to_string(),
         fees: Default::default(),
         market_duration_secs: None,
-        max_trades_per_market: Some(2_000),
         fetch_concurrency: 10,
         offline: false,
     };
@@ -106,8 +105,6 @@ async fn main() -> anyhow::Result<()> {
     // Initialize data fetcher (in a real backtest, you'd fetch data first)
     let fetch_config = DataFetchConfig {
         fidelity_secs: config.data_fidelity_secs,
-        clob_recent_days: 7,
-        max_trades_per_market: config.max_trades_per_market,
     };
     let _data_fetcher = DataFetcher::new(Arc::clone(&data_store), fetch_config)?;
     tracing::info!("Initialized data fetcher (note: this example uses existing cached data)");

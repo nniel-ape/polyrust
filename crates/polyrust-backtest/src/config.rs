@@ -28,10 +28,6 @@ pub struct BacktestConfig {
     /// Example: 900 for 15-minute markets, 3600 for 1-hour markets
     #[serde(default)]
     pub market_duration_secs: Option<u64>,
-    /// Maximum trades to fetch per market (caps pagination to avoid 100k+ trade fetches).
-    /// Default: 2,000. Set to 0 or "none" (via env) for unlimited.
-    #[serde(default = "default_max_trades")]
-    pub max_trades_per_market: Option<usize>,
     /// Number of markets to fetch concurrently (default: 10).
     #[serde(default = "default_fetch_concurrency")]
     pub fetch_concurrency: usize,
@@ -64,10 +60,6 @@ fn default_data_db_path() -> String {
     "backtest_data.db".to_string()
 }
 
-fn default_max_trades() -> Option<usize> {
-    Some(2_000)
-}
-
 fn default_fetch_concurrency() -> usize {
     10
 }
@@ -84,7 +76,7 @@ impl Default for BacktestConfig {
             data_db_path: "backtest_data.db".to_string(),
             fees: FeeConfig::default(),
             market_duration_secs: None,
-            max_trades_per_market: Some(2_000),
+
             fetch_concurrency: 10,
             offline: false,
         }
@@ -141,15 +133,6 @@ impl BacktestConfig {
             let lower = v.trim().to_lowercase();
             self.offline = matches!(lower.as_str(), "1" | "true" | "yes");
         }
-        if let Ok(v) = std::env::var("POLY_BACKTEST_MAX_TRADES_PER_MARKET") {
-            let lower = v.trim().to_lowercase();
-            if lower == "none" || lower == "0" {
-                self.max_trades_per_market = None;
-            } else if let Ok(n) = v.parse::<usize>() {
-                self.max_trades_per_market = Some(n);
-            }
-        }
-
         // Validate fidelity
         if self.data_fidelity_secs == 0 {
             return Err(polyrust_core::error::PolyError::Config(
@@ -214,7 +197,7 @@ mod tests {
                 taker_fee_rate: dec!(0.02),
             },
             market_duration_secs: None,
-            max_trades_per_market: Some(2_000),
+
             fetch_concurrency: 10,
             offline: false,
         };

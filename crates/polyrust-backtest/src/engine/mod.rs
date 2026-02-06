@@ -464,8 +464,8 @@ impl BacktestEngine {
             }
         }
 
-        // For sub-minute fidelity, synthesize PriceChange events from trades
-        if self.config.data_fidelity_secs < 60 {
+        // Synthesize PriceChange events from trades at configured fidelity
+        {
             let trade_events: Vec<_> = events
                 .iter()
                 .filter(|e| matches!(&e.event, Event::MarketData(MarketDataEvent::Trade { .. })))
@@ -891,7 +891,7 @@ mod tests {
                 taker_fee_rate: dec!(0.01),
             },
             market_duration_secs: None,
-            max_trades_per_market: Some(2_000),
+
             fetch_concurrency: 10,
             offline: false,
         };
@@ -971,7 +971,7 @@ mod tests {
                 taker_fee_rate: dec!(0.01),
             },
             market_duration_secs: None,
-            max_trades_per_market: Some(2_000),
+
             fetch_concurrency: 10,
             offline: false,
         };
@@ -1017,7 +1017,7 @@ mod tests {
                 taker_fee_rate: dec!(0.01),
             },
             market_duration_secs: None,
-            max_trades_per_market: Some(2_000),
+
             fetch_concurrency: 10,
             offline: false,
         };
@@ -1208,7 +1208,7 @@ mod tests {
                 taker_fee_rate: dec!(0.01),
             },
             market_duration_secs: None,
-            max_trades_per_market: Some(2_000),
+
             fetch_concurrency: 10,
             offline: false,
         };

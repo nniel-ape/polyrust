@@ -246,7 +246,6 @@ retry_backoff_secs = 60       # Wait 1 minute between retry attempts
 # initial_balance = 1000.00               # Starting USDC balance for backtest
 # data_fidelity_secs = 60                 # Price granularity in seconds (60 = 1min, 300 = 5min, 3600 = 1hr)
 # data_db_path = "backtest_data.db"       # Persistent historical data cache (reused across runs)
-# max_trades_per_market = 2000            # Cap trades fetched per market (default 2000, 0 = unlimited)
 # fetch_concurrency = 10                  # Markets fetched in parallel (default 10)
 
 # Fee model (matches strategy config for realistic P&L)

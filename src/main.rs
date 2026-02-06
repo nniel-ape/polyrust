@@ -410,8 +410,6 @@ async fn run_backtest() -> anyhow::Result<()> {
     // Initialize DataFetcher
     let fetch_config = DataFetchConfig {
         fidelity_secs: backtest_config.data_fidelity_secs,
-        clob_recent_days: 7,
-        max_trades_per_market: backtest_config.max_trades_per_market,
     };
     let data_fetcher = DataFetcher::new(Arc::clone(&data_store), fetch_config)?;
 

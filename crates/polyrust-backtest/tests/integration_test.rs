@@ -162,7 +162,7 @@ async fn test_full_backtest_pipeline() {
         data_db_path: ":memory:".to_string(),
         fees: Default::default(),
         market_duration_secs: None,
-        max_trades_per_market: Some(2_000),
+
         fetch_concurrency: 10,
         offline: false,
     };
@@ -173,8 +173,7 @@ async fn test_full_backtest_pipeline() {
     // Initialize data fetcher
     let fetch_config = DataFetchConfig {
         fidelity_secs: 60,
-        clob_recent_days: 7,
-        max_trades_per_market: Some(2_000),
+
     };
     let data_fetcher =
         DataFetcher::new(Arc::clone(&data_store), fetch_config).expect("Failed to create fetcher");
@@ -242,7 +241,7 @@ async fn test_backtest_with_no_data() {
         data_db_path: ":memory:".to_string(),
         fees: Default::default(),
         market_duration_secs: None,
-        max_trades_per_market: Some(2_000),
+
         fetch_concurrency: 10,
         offline: false,
     };
@@ -313,8 +312,7 @@ async fn test_data_fetcher_integration() {
     // Test DataFetcher
     let fetch_config = DataFetchConfig {
         fidelity_secs: 60,
-        clob_recent_days: 7,
-        max_trades_per_market: Some(2_000),
+
     };
     let fetcher = DataFetcher::new(data_store, fetch_config).expect("Failed to create fetcher");
     let cached = fetcher
