@@ -12,7 +12,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use rust_decimal::Decimal;
 use tracing::{debug, info, warn};
 
@@ -367,6 +366,7 @@ impl TailEndStrategy {
         }
 
         // FOK fallback path (stop-loss sells still use FOK)
+        let now = self.base.event_time().await;
         let position = ArbitragePosition {
             market_id: pending.market_id.clone(),
             token_id: pending.token_id,
@@ -376,7 +376,7 @@ impl TailEndStrategy {
             reference_price: pending.reference_price,
             coin: pending.coin,
             order_id: result.order_id.clone(),
-            entry_time: Utc::now(),
+            entry_time: now,
             kelly_fraction: pending.kelly_fraction,
             peak_bid: pending.price,
             mode: pending.mode.clone(),
@@ -428,6 +428,7 @@ impl TailEndStrategy {
             "TailEnd GTC order filled"
         );
 
+        let now = self.base.event_time().await;
         let position = ArbitragePosition {
             market_id: lo.market_id.clone(),
             token_id: lo.token_id,
@@ -437,7 +438,7 @@ impl TailEndStrategy {
             reference_price: lo.reference_price,
             coin: lo.coin,
             order_id: Some(order_id.to_string()),
-            entry_time: Utc::now(),
+            entry_time: now,
             kelly_fraction: lo.kelly_fraction,
             peak_bid: price,
             mode: lo.mode,
@@ -471,6 +472,8 @@ impl Strategy for TailEndStrategy {
     }
 
     async fn on_event(&mut self, event: &Event, ctx: &StrategyContext) -> Result<Vec<Action>> {
+        self.base.update_event_time(ctx).await;
+
         let mut actions = match event {
             Event::MarketData(MarketDataEvent::MarketDiscovered(market)) => {
                 self.base.on_market_discovered(market, ctx).await
@@ -756,7 +759,7 @@ impl Strategy for TailEndStrategy {
 
                     // Post-entry confirmation: exit if price drops significantly
                     // within 10 seconds of entry (catches false signals immediately)
-                    let seconds_since_entry = Utc::now()
+                    let seconds_since_entry = self.base.event_time().await
                         .signed_duration_since(pos.entry_time)
                         .num_seconds();
                     if seconds_since_entry <= 10
@@ -882,7 +885,7 @@ impl Strategy for TailEndStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use chrono::{Duration, Utc};
     use rust_decimal_macros::dec;
 
     use crate::crypto_arb::config::ArbitrageConfig;

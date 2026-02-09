@@ -11,3 +11,4 @@ docker-compose.override.yml
 # ralphex progress logs
 progress*.txt
 .DS_Store
+backtest_output.txt

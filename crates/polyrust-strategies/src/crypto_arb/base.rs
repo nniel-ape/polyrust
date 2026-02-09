@@ -194,7 +194,8 @@ pub struct CryptoArbBase {
     pub pending_stop_loss: RwLock<HashMap<TokenId, Decimal>>,
     /// Markets discovered before prices were available, keyed by coin.
     /// Promoted to active_markets once a price arrives for the coin.
-    pub pending_discovery: RwLock<HashMap<String, MarketInfo>>,
+    /// Vec allows multiple markets per coin (e.g. multiple BTC windows at backtest start).
+    pub pending_discovery: RwLock<HashMap<String, Vec<MarketInfo>>>,
     /// Recent spike events for display and analysis.
     pub spike_events: RwLock<VecDeque<SpikeEvent>>,
     /// Per-mode performance statistics (wins, losses, P&L).
@@ -222,6 +223,10 @@ pub struct CryptoArbBase {
     pub coin_nearest_expiry: RwLock<HashMap<String, DateTime<Utc>>>,
     /// Coins configured for this strategy.
     coins: HashSet<String>,
+    /// Last event timestamp from the strategy context (simulated or real).
+    /// Updated at the start of each on_event call so internal methods
+    /// (on_order_placed, on_order_filled) can use it without access to ctx.
+    pub last_event_time: RwLock<DateTime<Utc>>,
 }
 
 impl CryptoArbBase {
@@ -257,7 +262,20 @@ impl CryptoArbBase {
             tailend_skip_stats: std::sync::Mutex::new(HashMap::new()),
             coin_nearest_expiry: RwLock::new(HashMap::new()),
             coins,
+            last_event_time: RwLock::new(Utc::now()),
         }
+    }
+
+    /// Update the cached event time from the strategy context.
+    /// Should be called at the start of each on_event handler.
+    pub async fn update_event_time(&self, ctx: &StrategyContext) {
+        let now = ctx.now().await;
+        *self.last_event_time.write().await = now;
+    }
+
+    /// Get the last cached event time.
+    pub async fn event_time(&self) -> DateTime<Utc> {
+        *self.last_event_time.read().await
     }
 
     // -------------------------------------------------------------------------
@@ -329,11 +347,11 @@ impl CryptoArbBase {
             }
             // Prune old boundary snapshots
             drop(boundaries);
-            self.prune_boundary_snapshots(symbol).await;
+            self.prune_boundary_snapshots(symbol, now).await;
         }
 
         // Promote any pending markets for this coin
-        let promote_actions = self.promote_pending_markets(symbol, price).await;
+        let promote_actions = self.promote_pending_markets(symbol, price, now).await;
 
         // Spike detection
         let spike = self.detect_spike(symbol, price, now).await;
@@ -605,8 +623,8 @@ impl CryptoArbBase {
     }
 
     /// Remove boundary snapshots older than 4 windows (1 hour) for a given coin.
-    async fn prune_boundary_snapshots(&self, coin: &str) {
-        let now_ts = Utc::now().timestamp();
+    async fn prune_boundary_snapshots(&self, coin: &str, now: DateTime<Utc>) {
+        let now_ts = now.timestamp();
         let cutoff = now_ts - (WINDOW_SECS * 4);
         let prefix = format!("{coin}-");
         let mut boundaries = self.boundary_prices.write().await;
@@ -680,13 +698,14 @@ impl CryptoArbBase {
                 );
                 drop(md);
                 let mut pending = self.pending_discovery.write().await;
-                pending.insert(coin, market.clone());
+                pending.entry(coin).or_default().push(market.clone());
                 return vec![];
             }
         };
         drop(md);
 
-        self.activate_market(market, &coin, current_price).await
+        let now = ctx.now().await;
+        self.activate_market(market, &coin, current_price, now).await
     }
 
     /// Handle a market expiration. Removes from active markets, resolves open positions.
@@ -760,14 +779,21 @@ impl CryptoArbBase {
         &self,
         symbol: &str,
         current_price: Decimal,
+        now: DateTime<Utc>,
     ) -> Vec<Action> {
-        let market = {
+        let markets = {
             let mut pending = self.pending_discovery.write().await;
             pending.remove(symbol)
         };
 
-        match market {
-            Some(m) => self.activate_market(&m, symbol, current_price).await,
+        match markets {
+            Some(market_list) => {
+                let mut actions = Vec::new();
+                for m in market_list {
+                    actions.extend(self.activate_market(&m, symbol, current_price, now).await);
+                }
+                actions
+            }
             None => vec![],
         }
     }
@@ -779,8 +805,9 @@ impl CryptoArbBase {
         market: &MarketInfo,
         coin: &str,
         current_price: Decimal,
+        now: DateTime<Utc>,
     ) -> Vec<Action> {
-        let now_ts = Utc::now().timestamp();
+        let now_ts = now.timestamp();
         let boundary_ts = now_ts - (now_ts % WINDOW_SECS);
 
         let window_ts = market
@@ -797,7 +824,7 @@ impl CryptoArbBase {
             market: market.clone(),
             reference_price,
             reference_quality,
-            discovery_time: Utc::now(),
+            discovery_time: now,
             coin: coin.to_string(),
         };
 

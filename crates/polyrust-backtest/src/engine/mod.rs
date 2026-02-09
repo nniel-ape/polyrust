@@ -202,6 +202,11 @@ pub struct BacktestEngine {
     market_tokens: HashMap<String, (String, String)>,
     /// Reverse mapping: token_id -> market_id (for fill events)
     token_to_market: HashMap<String, String>,
+    // --- Funnel instrumentation counters ---
+    markets_discovered: usize,
+    orders_submitted: usize,
+    orders_filled: usize,
+    orders_rejected: usize,
 }
 
 impl BacktestEngine {
@@ -243,6 +248,10 @@ impl BacktestEngine {
             position_entries: HashMap::new(),
             market_tokens: HashMap::new(),
             token_to_market: HashMap::new(),
+            markets_discovered: 0,
+            orders_submitted: 0,
+            orders_filled: 0,
+            orders_rejected: 0,
         }
     }
 
@@ -324,6 +333,11 @@ impl BacktestEngine {
                 _ => {}
             }
 
+            // Count market discoveries
+            if matches!(&historical_event.event, Event::MarketData(MarketDataEvent::MarketDiscovered(_))) {
+                self.markets_discovered += 1;
+            }
+
             // Advance simulated clock before strategy sees the event
             {
                 let mut clock = self.ctx.simulated_clock.write().await;
@@ -340,10 +354,12 @@ impl BacktestEngine {
             for action in actions {
                 match action {
                     Action::PlaceOrder(order_req) => {
+                        self.orders_submitted += 1;
                         trades.extend(self.execute_and_notify(order_req).await?);
                     }
                     Action::PlaceBatchOrder(orders) => {
                         for order in orders {
+                            self.orders_submitted += 1;
                             trades.extend(self.execute_and_notify(order).await?);
                         }
                     }
@@ -421,6 +437,24 @@ impl BacktestEngine {
         }
 
         // MarketExpired events are injected per-market in load_events at their actual end_date.
+
+        // Count filled/rejected from executed trades
+        let buy_count = trades.iter().filter(|t| t.side == OrderSide::Buy).count();
+        let sell_count = trades.iter().filter(|t| t.side == OrderSide::Sell).count();
+        self.orders_filled = buy_count + sell_count;
+        self.orders_rejected = self.orders_submitted.saturating_sub(self.orders_filled);
+
+        // Log funnel summary
+        info!(
+            markets_discovered = self.markets_discovered,
+            total_events = total_events,
+            orders_submitted = self.orders_submitted,
+            orders_filled = self.orders_filled,
+            orders_rejected = self.orders_rejected,
+            trades_buy = buy_count,
+            trades_sell = sell_count,
+            "Backtest funnel summary"
+        );
 
         // Force-close remaining positions at end of backtest (markets that expire after end_date)
         let remaining_tokens: Vec<(String, Decimal)> = self
@@ -509,6 +543,50 @@ impl BacktestEngine {
     async fn load_events(&mut self) -> Result<Vec<HistoricalEvent>> {
         let mut events = Vec::new();
 
+        // Pre-load crypto kline data indexed by coin for discovery price lookup.
+        // This replaces hardcoded prices (BTC=$100K, ETH=$3K, SOL=$200) with
+        // actual historical prices at each market's discovery timestamp.
+        let mut coin_klines: HashMap<String, Vec<(i64, Decimal)>> = HashMap::new();
+        for coin in &["BTC", "ETH", "SOL", "XRP"] {
+            let prices = self
+                .data_store
+                .get_crypto_prices(coin, self.config.start_date, self.config.end_date)
+                .await
+                .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
+            if !prices.is_empty() {
+                let mut sorted: Vec<(i64, Decimal)> = prices
+                    .iter()
+                    .map(|p| (p.timestamp.timestamp(), p.close))
+                    .collect();
+                sorted.sort_by_key(|(ts, _)| *ts);
+                info!(
+                    coin,
+                    count = sorted.len(),
+                    "Pre-loaded klines for discovery price lookup"
+                );
+                coin_klines.insert(coin.to_string(), sorted);
+            }
+        }
+
+        // Helper closure: find closest kline price at a given timestamp
+        let find_kline_price = |coin: &str, target_ts: i64| -> Option<Decimal> {
+            let klines = coin_klines.get(coin)?;
+            if klines.is_empty() {
+                return None;
+            }
+            let idx = klines.partition_point(|(ts, _)| *ts <= target_ts);
+            // Check both the entry at idx-1 (last <= target) and idx (first > target)
+            let candidates: Vec<_> = [idx.checked_sub(1), Some(idx)]
+                .into_iter()
+                .flatten()
+                .filter(|&i| i < klines.len())
+                .collect();
+            candidates
+                .into_iter()
+                .min_by_key(|&i| (klines[i].0 - target_ts).unsigned_abs())
+                .map(|i| klines[i].1)
+        };
+
         // For each market_id, load prices and trades for both tokens,
         // and inject MarketDiscovered/MarketExpired lifecycle events.
         for market_id in &self.config.market_ids {
@@ -561,19 +639,35 @@ impl BacktestEngine {
                 });
 
                 // Inject an immediate ExternalPrice event right after discovery so
-                // the pending market gets promoted before the next MarketDiscovered
-                // for the same coin overwrites it in pending_discovery (HashMap<coin, market>).
+                // the pending market gets promoted. Uses actual kline price at
+                // discover_ts when available, falls back to hardcoded base prices.
                 let slug_lower = m.slug.to_lowercase();
                 let coin_symbol = if slug_lower.starts_with("btc") {
-                    Some(("BTC", Decimal::new(100_000, 0)))
+                    Some("BTC")
                 } else if slug_lower.starts_with("eth") {
-                    Some(("ETH", Decimal::new(3_000, 0)))
+                    Some("ETH")
                 } else if slug_lower.starts_with("sol") {
-                    Some(("SOL", Decimal::new(200, 0)))
+                    Some("SOL")
                 } else {
                     None
                 };
-                if let Some((coin, base_price)) = coin_symbol {
+                if let Some(coin) = coin_symbol {
+                    let discover_unix = discover_ts.timestamp();
+                    let price = find_kline_price(coin, discover_unix).unwrap_or_else(|| {
+                        let fallback = match coin {
+                            "BTC" => Decimal::new(100_000, 0),
+                            "ETH" => Decimal::new(3_000, 0),
+                            "SOL" => Decimal::new(200, 0),
+                            _ => Decimal::new(100, 0),
+                        };
+                        warn!(
+                            coin,
+                            market_id = %m.market_id,
+                            fallback = %fallback,
+                            "No kline data at discovery time, using hardcoded fallback"
+                        );
+                        fallback
+                    });
                     // Use discover_ts + 1ns to sort after the MarketDiscovered event
                     let price_ts = discover_ts + chrono::Duration::nanoseconds(1);
                     events.push(HistoricalEvent {
@@ -581,7 +675,7 @@ impl BacktestEngine {
                         token_id: coin.to_string(),
                         event: Event::MarketData(MarketDataEvent::ExternalPrice {
                             symbol: coin.to_string(),
-                            price: base_price,
+                            price,
                             source: "backtest-discovery".to_string(),
                             timestamp: price_ts,
                         }),
@@ -612,17 +706,21 @@ impl BacktestEngine {
                     .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
 
                 for price in prices {
+                    // Apply realistic spread (1 tick = 0.01) to cached prices,
+                    // matching the synthesizer's spread logic
+                    let best_bid = (price.price - Decimal::new(1, 2)).max(Decimal::new(1, 2));
+                    let best_ask = price.price + Decimal::new(1, 2);
                     events.push(HistoricalEvent {
                         timestamp: price.timestamp,
                         token_id: price.token_id.clone(),
                         event: Event::MarketData(MarketDataEvent::PriceChange {
                             token_id: price.token_id,
                             price: price.price,
-                            side: OrderSide::Buy, // Simplified: not tracking side in cache
-                        best_bid: price.price,
-                        best_ask: price.price,
-                    }),
-                });
+                            side: OrderSide::Buy,
+                            best_bid,
+                            best_ask,
+                        }),
+                    });
                 }
 
                 // Load trade history for this token

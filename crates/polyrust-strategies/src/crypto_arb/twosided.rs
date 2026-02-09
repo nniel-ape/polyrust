@@ -9,7 +9,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use rust_decimal::Decimal;
 use tracing::{info, warn};
 
@@ -182,6 +181,7 @@ impl TwoSidedStrategy {
         }
 
         // FOK orders fill immediately
+        let now = self.base.event_time().await;
         let position = ArbitragePosition {
             market_id: pending.market_id.clone(),
             token_id: pending.token_id,
@@ -191,7 +191,7 @@ impl TwoSidedStrategy {
             reference_price: pending.reference_price,
             coin: pending.coin,
             order_id: result.order_id.clone(),
-            entry_time: Utc::now(),
+            entry_time: now,
             kelly_fraction: pending.kelly_fraction,
             peak_bid: pending.price,
             mode: pending.mode.clone(),
@@ -241,6 +241,7 @@ impl TwoSidedStrategy {
             "TwoSided GTC order filled"
         );
 
+        let now = self.base.event_time().await;
         let position = ArbitragePosition {
             market_id: lo.market_id.clone(),
             token_id: lo.token_id,
@@ -250,7 +251,7 @@ impl TwoSidedStrategy {
             reference_price: lo.reference_price,
             coin: lo.coin,
             order_id: Some(order_id.to_string()),
-            entry_time: Utc::now(),
+            entry_time: now,
             kelly_fraction: lo.kelly_fraction,
             peak_bid: price,
             mode: lo.mode,
@@ -284,6 +285,8 @@ impl Strategy for TwoSidedStrategy {
     }
 
     async fn on_event(&mut self, event: &Event, ctx: &StrategyContext) -> Result<Vec<Action>> {
+        self.base.update_event_time(ctx).await;
+
         let mut actions = match event {
             Event::MarketData(MarketDataEvent::MarketDiscovered(market)) => {
                 self.base.on_market_discovered(market, ctx).await
@@ -561,7 +564,7 @@ impl Strategy for TwoSidedStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use chrono::{Duration, Utc};
     use rust_decimal_macros::dec;
 
     use crate::crypto_arb::config::ArbitrageConfig;

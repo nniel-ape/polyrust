@@ -11,7 +11,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use rust_decimal::Decimal;
 use tracing::{info, warn};
 
@@ -323,6 +322,7 @@ impl CrossCorrStrategy {
         }
 
         // FOK orders fill immediately
+        let now = self.base.event_time().await;
         let position = ArbitragePosition {
             market_id: pending.market_id.clone(),
             token_id: pending.token_id,
@@ -332,7 +332,7 @@ impl CrossCorrStrategy {
             reference_price: pending.reference_price,
             coin: pending.coin,
             order_id: result.order_id.clone(),
-            entry_time: Utc::now(),
+            entry_time: now,
             kelly_fraction: pending.kelly_fraction,
             peak_bid: pending.price,
             mode: pending.mode.clone(),
@@ -382,6 +382,7 @@ impl CrossCorrStrategy {
             "CrossCorr GTC order filled"
         );
 
+        let now = self.base.event_time().await;
         let position = ArbitragePosition {
             market_id: lo.market_id.clone(),
             token_id: lo.token_id,
@@ -391,7 +392,7 @@ impl CrossCorrStrategy {
             reference_price: lo.reference_price,
             coin: lo.coin,
             order_id: Some(order_id.to_string()),
-            entry_time: Utc::now(),
+            entry_time: now,
             kelly_fraction: lo.kelly_fraction,
             peak_bid: price,
             mode: lo.mode,
@@ -431,6 +432,8 @@ impl Strategy for CrossCorrStrategy {
             return Ok(vec![]);
         }
 
+        self.base.update_event_time(ctx).await;
+
         let mut actions = match event {
             Event::MarketData(MarketDataEvent::MarketDiscovered(market)) => {
                 self.base.on_market_discovered(market, ctx).await
@@ -464,10 +467,11 @@ impl Strategy for CrossCorrStrategy {
 
                 // Record spike event
                 {
+                    let event_now = self.base.event_time().await;
                     let from_price = {
                         let history = self.base.price_history.read().await;
                         history.get(symbol).and_then(|h| {
-                            let cutoff = Utc::now()
+                            let cutoff = event_now
                                 - chrono::Duration::seconds(
                                     self.base.config.spike.window_secs as i64,
                                 );
@@ -482,7 +486,7 @@ impl Strategy for CrossCorrStrategy {
                     self.base
                         .record_spike(SpikeEvent {
                             coin: symbol.to_string(),
-                            timestamp: Utc::now(),
+                            timestamp: event_now,
                             change_pct,
                             from_price,
                             to_price: *price,
@@ -733,7 +737,7 @@ impl Strategy for CrossCorrStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use chrono::{Duration, Utc};
     use rust_decimal_macros::dec;
 
     use crate::crypto_arb::config::ArbitrageConfig;
