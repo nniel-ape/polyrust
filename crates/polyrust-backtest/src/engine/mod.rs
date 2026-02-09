@@ -8,7 +8,7 @@ use uuid::Uuid;
 use polyrust_core::actions::Action;
 use polyrust_core::context::{BalanceState, StrategyContext};
 use polyrust_core::error::Result;
-use polyrust_core::events::{Event, MarketDataEvent};
+use polyrust_core::events::{Event, MarketDataEvent, OrderEvent};
 use polyrust_core::strategy::Strategy;
 use polyrust_core::types::*;
 use polyrust_store::Store;
@@ -24,6 +24,17 @@ pub struct HistoricalEvent {
     pub event: Event,
 }
 
+/// How a closing trade (sell) was triggered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CloseReason {
+    /// Strategy issued the sell order
+    Strategy,
+    /// Market expired, binary resolution ($1/$0)
+    Settlement,
+    /// Backtest ended, position still open — binary settlement applied
+    ForceClose,
+}
+
 /// A completed backtest trade with realized P&L.
 #[derive(Debug, Clone)]
 pub struct BacktestTrade {
@@ -33,6 +44,16 @@ pub struct BacktestTrade {
     pub price: Decimal,
     pub size: Decimal,
     pub realized_pnl: Option<Decimal>,
+    /// None for buys, Some(reason) for sells
+    pub close_reason: Option<CloseReason>,
+}
+
+/// Per-bucket trade aggregation tracking last buy and sell prices.
+struct BucketAgg {
+    token_id: String,
+    last_price: Decimal,
+    last_buy: Option<Decimal>,
+    last_sell: Option<Decimal>,
 }
 
 /// Synthesize PriceChange events from trade data by bucketing trades into N-second windows.
@@ -41,23 +62,26 @@ pub struct BacktestTrade {
 /// The last trade's price in each bucket becomes a PriceChange event, timestamped
 /// at the bucket's end (bucket_start + fidelity_secs).
 ///
-/// This enables sub-minute price resolution when `data_fidelity_secs < 60`,
-/// since the CLOB `/prices-history` API only supports minute-level granularity.
+/// Produces realistic bid/ask spread from actual buy/sell trade prices within each bucket.
+///
+/// Accepts the full event list and filters for Trade events internally
+/// (avoids cloning all trades into a separate Vec).
 fn synthesize_price_events_from_trades(
-    trades: &[HistoricalEvent],
+    events: &[HistoricalEvent],
     fidelity_secs: u64,
 ) -> Vec<HistoricalEvent> {
-    if trades.is_empty() || fidelity_secs == 0 {
+    if events.is_empty() || fidelity_secs == 0 {
         return Vec::new();
     }
 
     let fidelity = fidelity_secs as i64;
+    let default_spread = Decimal::new(1, 2); // 0.01 (1 tick)
 
     // Group trades by token_id, then bucket by time window
     // BTreeMap ensures deterministic ordering of buckets
-    let mut token_buckets: HashMap<String, BTreeMap<i64, (String, Decimal)>> = HashMap::new();
+    let mut token_buckets: HashMap<String, BTreeMap<i64, BucketAgg>> = HashMap::new();
 
-    for event in trades {
+    for event in events {
         if let Event::MarketData(MarketDataEvent::Trade {
             token_id, price, ..
         }) = &event.event
@@ -65,31 +89,86 @@ fn synthesize_price_events_from_trades(
             let ts = event.timestamp.timestamp();
             let bucket_start = (ts / fidelity) * fidelity;
 
-            token_buckets
+            // Determine trade side from the HistoricalEvent's associated trade data.
+            // We need to find the corresponding HistoricalTrade side info.
+            // Since trades come from the subgraph with side encoded, we look at
+            // the surrounding context. For synthesized events, default to mid-price.
+
+            let bucket = token_buckets
                 .entry(token_id.clone())
                 .or_default()
-                .insert(bucket_start, (token_id.clone(), *price));
+                .entry(bucket_start)
+                .or_insert(BucketAgg {
+                    token_id: token_id.clone(),
+                    last_price: *price,
+                    last_buy: None,
+                    last_sell: None,
+                });
+
+            bucket.last_price = *price;
+        }
+    }
+
+    // Second pass: capture buy/sell sides from the raw historical trade data
+    // The Trade events don't carry side info in the Event enum, but the
+    // HistoricalTrade records in the DB do. We approximate by tracking the
+    // last price change direction: price increase → buy, decrease → sell.
+    let mut prev_prices: HashMap<String, Decimal> = HashMap::new();
+    for event in events {
+        if let Event::MarketData(MarketDataEvent::Trade {
+            token_id, price, ..
+        }) = &event.event
+        {
+            let ts = event.timestamp.timestamp();
+            let bucket_start = (ts / fidelity) * fidelity;
+
+            // Infer side from price movement
+            let prev = prev_prices.get(token_id).copied();
+            let is_buy = prev.is_none_or(|p| *price >= p);
+            prev_prices.insert(token_id.clone(), *price);
+
+            if let Some(bucket) = token_buckets
+                .get_mut(token_id)
+                .and_then(|b| b.get_mut(&bucket_start))
+            {
+                if is_buy {
+                    bucket.last_buy = Some(*price);
+                } else {
+                    bucket.last_sell = Some(*price);
+                }
+            }
         }
     }
 
     let mut synthetic_events = Vec::new();
 
     for buckets in token_buckets.values() {
-        for (&bucket_start, (token_id, price)) in buckets {
+        for (&bucket_start, agg) in buckets {
             let bucket_end = bucket_start + fidelity;
             let timestamp = DateTime::from_timestamp(bucket_end, 0).unwrap_or_else(|| {
                 Utc::now() // Fallback; shouldn't happen with valid trade timestamps
             });
 
+            // Derive bid/ask from actual buy/sell sides
+            let (best_bid, best_ask) = match (agg.last_sell, agg.last_buy) {
+                (Some(sell), Some(buy)) => (sell, buy),
+                (Some(sell), None) => (sell, sell + default_spread),
+                (None, Some(buy)) => ((buy - default_spread).max(Decimal::new(1, 2)), buy),
+                (None, None) => (
+                    (agg.last_price - default_spread).max(Decimal::new(1, 2)),
+                    agg.last_price + default_spread,
+                ),
+            };
+
             synthetic_events.push(HistoricalEvent {
                 timestamp,
-                token_id: token_id.clone(),
+                token_id: agg.token_id.clone(),
                 event: Event::MarketData(MarketDataEvent::PriceChange {
-                    token_id: token_id.clone(),
-                    price: *price,
+                    token_id: agg.token_id.clone(),
+                    price: agg.last_price,
                     side: OrderSide::Buy,
-                    best_bid: *price,
-                    best_ask: *price,
+                    best_bid,
+                    best_ask,
                 }),
             });
         }
@@ -119,6 +198,10 @@ pub struct BacktestEngine {
     token_prices: HashMap<String, Decimal>,
     /// Track entry prices for P&L calculation: token_id -> (size, avg_entry_price)
     position_entries: HashMap<String, (Decimal, Decimal)>,
+    /// Market-level token mapping: market_id -> (token_a, token_b)
+    market_tokens: HashMap<String, (String, String)>,
+    /// Reverse mapping: token_id -> market_id (for fill events)
+    token_to_market: HashMap<String, String>,
 }
 
 impl BacktestEngine {
@@ -158,6 +241,8 @@ impl BacktestEngine {
             current_time,
             token_prices: HashMap::new(),
             position_entries: HashMap::new(),
+            market_tokens: HashMap::new(),
+            token_to_market: HashMap::new(),
         }
     }
 
@@ -191,28 +276,59 @@ impl BacktestEngine {
         let mut trades = Vec::new();
 
         // Replay events in chronological order
-        for historical_event in events {
+        // Pre-acquire simulated clock once (single-threaded replay — no contention)
+        let total_events = events.len();
+        let log_interval = (total_events / 20).max(1); // Log every 5%
+
+        for (i, historical_event) in events.into_iter().enumerate() {
             self.current_time = historical_event.timestamp;
 
-            // Advance simulated clock so strategies see correct time
-            {
-                let mut clock = self.ctx.simulated_clock.write().await;
-                *clock = Some(self.current_time);
-            }
-
-            // Update token price cache if this is a price/trade event
+            // Update token price cache for price events
             match &historical_event.event {
-                Event::MarketData(MarketDataEvent::PriceChange { token_id, price, .. }) => {
+                Event::MarketData(MarketDataEvent::PriceChange {
+                    token_id,
+                    price,
+                    best_bid,
+                    best_ask,
+                    ..
+                }) => {
                     self.token_prices.insert(token_id.clone(), *price);
+                    // Populate orderbook so strategies can read best ask/bid
+                    let mut md = self.ctx.market_data.write().await;
+                    md.orderbooks.insert(
+                        token_id.clone(),
+                        OrderbookSnapshot {
+                            token_id: token_id.clone(),
+                            bids: vec![OrderbookLevel {
+                                price: *best_bid,
+                                size: Decimal::new(1000, 0),
+                            }],
+                            asks: vec![OrderbookLevel {
+                                price: *best_ask,
+                                size: Decimal::new(1000, 0),
+                            }],
+                            timestamp: self.current_time,
+                        },
+                    );
                 }
-                Event::MarketData(MarketDataEvent::Trade { token_id, price, .. }) => {
-                    self.token_prices.insert(token_id.clone(), *price);
+                Event::MarketData(MarketDataEvent::ExternalPrice { symbol, price, .. }) => {
+                    // Store in external_prices keyed by coin symbol (used by strategy discovery)
+                    self.token_prices.insert(symbol.clone(), *price);
+                    self.ctx
+                        .market_data
+                        .write()
+                        .await
+                        .external_prices
+                        .insert(symbol.clone(), *price);
                 }
                 _ => {}
             }
 
-            // Update market data state (so strategy can access latest prices)
-            self.update_market_data_state(&historical_event.event).await;
+            // Advance simulated clock before strategy sees the event
+            {
+                let mut clock = self.ctx.simulated_clock.write().await;
+                *clock = Some(self.current_time);
+            }
 
             // Call strategy.on_event
             let actions = self
@@ -220,21 +336,163 @@ impl BacktestEngine {
                 .on_event(&historical_event.event, &self.ctx)
                 .await?;
 
-            // Execute actions
+            // Execute actions and feed fill events back to strategy
             for action in actions {
-                if let Some(trade) = self.execute_action(action).await? {
-                    trades.push(trade);
+                match action {
+                    Action::PlaceOrder(order_req) => {
+                        trades.extend(self.execute_and_notify(order_req).await?);
+                    }
+                    Action::PlaceBatchOrder(orders) => {
+                        for order in orders {
+                            trades.extend(self.execute_and_notify(order).await?);
+                        }
+                    }
+                    other => {
+                        if let Some(trade) = self.execute_action(other).await? {
+                            trades.push(trade);
+                        }
+                    }
                 }
+            }
+
+            // Settle positions on market expiry (binary resolution: winner→$1, loser→$0)
+            if let Event::MarketData(MarketDataEvent::MarketExpired(market_id)) =
+                &historical_event.event
+                && let Some((token_a, token_b)) = self.market_tokens.get(market_id).cloned()
+            {
+                for token_id in [token_a, token_b] {
+                    if let Some((size, _entry)) = self.position_entries.get(&token_id).cloned()
+                        && size > Decimal::ZERO
+                    {
+                        let last_price = self
+                            .token_prices
+                            .get(&token_id)
+                            .copied()
+                            .unwrap_or(Decimal::ZERO);
+                        // Binary resolution: price > 0.5 means winning token → $1
+                        let settlement_price = if last_price > Decimal::new(5, 1) {
+                            Decimal::ONE
+                        } else {
+                            Decimal::ZERO
+                        };
+
+                        info!(
+                            market_id,
+                            token_id = %token_id,
+                            size = %size,
+                            last_price = %last_price,
+                            settlement_price = %settlement_price,
+                            "Settling position at market expiry"
+                        );
+
+                        // Always record the sell — $1 for winners, $0 for losers.
+                        // $0 sells correctly record the loss as realized_pnl = -cost_basis.
+                        self.token_prices.insert(token_id.clone(), settlement_price);
+
+                        let sell = OrderRequest::new(
+                            token_id,
+                            settlement_price,
+                            size,
+                            OrderSide::Sell,
+                            OrderType::Gtc,
+                            false,
+                        );
+                        let mut settled = self.execute_and_notify(sell).await?;
+                        for t in &mut settled {
+                            if t.side == OrderSide::Sell {
+                                t.close_reason = Some(CloseReason::Settlement);
+                            }
+                        }
+                        trades.extend(settled);
+                    }
+                }
+            }
+
+            // Progress logging
+            if (i + 1) % log_interval == 0 {
+                info!(
+                    progress = format!("{:.0}%", ((i + 1) as f64 / total_events as f64) * 100.0),
+                    events_processed = i + 1,
+                    total = total_events,
+                    trades = trades.len(),
+                    "Backtest progress"
+                );
             }
         }
 
         // MarketExpired events are injected per-market in load_events at their actual end_date.
 
+        // Force-close remaining positions at end of backtest (markets that expire after end_date)
+        let remaining_tokens: Vec<(String, Decimal)> = self
+            .position_entries
+            .iter()
+            .filter(|(_, (size, _))| *size > Decimal::ZERO)
+            .map(|(token, (size, _))| (token.clone(), *size))
+            .collect();
+
+        if !remaining_tokens.is_empty() {
+            info!(
+                remaining = remaining_tokens.len(),
+                "Force-closing remaining positions at end of backtest"
+            );
+        }
+
+        for (token_id, size) in remaining_tokens {
+            let last_price = self
+                .token_prices
+                .get(&token_id)
+                .copied()
+                .unwrap_or(Decimal::ZERO);
+            // Binary settlement: same as market expiry resolution
+            let settlement_price = if last_price > Decimal::new(5, 1) {
+                Decimal::ONE
+            } else {
+                Decimal::ZERO
+            };
+
+            info!(
+                token_id = %token_id,
+                size = %size,
+                last_price = %last_price,
+                settlement_price = %settlement_price,
+                "Force-closing position with binary settlement"
+            );
+
+            self.token_prices.insert(token_id.clone(), settlement_price);
+            let sell = OrderRequest::new(
+                token_id,
+                settlement_price,
+                size,
+                OrderSide::Sell,
+                OrderType::Gtc,
+                false,
+            );
+            let mut force_closed = self.execute_and_notify(sell).await?;
+            for t in &mut force_closed {
+                if t.side == OrderSide::Sell {
+                    t.close_reason = Some(CloseReason::ForceClose);
+                }
+            }
+            trades.extend(force_closed);
+        }
+
         // Call strategy.on_stop
         let final_actions = self.strategy.on_stop(&self.ctx).await?;
         for action in final_actions {
-            if let Some(trade) = self.execute_action(action).await? {
-                trades.push(trade);
+            match action {
+                Action::PlaceOrder(order_req) => {
+                    trades.extend(self.execute_and_notify(order_req).await?);
+                }
+                Action::PlaceBatchOrder(orders) => {
+                    for order in orders {
+                        trades.extend(self.execute_and_notify(order).await?);
+                    }
+                }
+                other => {
+                    if let Some(trade) = self.execute_action(other).await? {
+                        trades.push(trade);
+                    }
+                }
             }
         }
 
@@ -248,7 +506,7 @@ impl BacktestEngine {
     }
 
     /// Load historical events from the data store.
-    async fn load_events(&self) -> Result<Vec<HistoricalEvent>> {
+    async fn load_events(&mut self) -> Result<Vec<HistoricalEvent>> {
         let mut events = Vec::new();
 
         // For each market_id, load prices and trades for both tokens,
@@ -262,6 +520,14 @@ impl BacktestEngine {
                 .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
 
             let token_ids = if let Some(ref m) = market {
+                // Build market_id -> (token_a, token_b) mapping for settlement
+                self.market_tokens
+                    .insert(m.market_id.clone(), (m.token_a.clone(), m.token_b.clone()));
+                // Build reverse mapping: token_id -> market_id (for fill events)
+                self.token_to_market
+                    .insert(m.token_a.clone(), m.market_id.clone());
+                self.token_to_market
+                    .insert(m.token_b.clone(), m.market_id.clone());
                 vec![m.token_a.clone(), m.token_b.clone()]
             } else {
                 // Market not found in cache - assume market_id IS a token_id for backwards compatibility
@@ -385,21 +651,12 @@ impl BacktestEngine {
             } // end token_ids loop
         } // end market_ids loop
 
-        // Synthesize ExternalPrice events from Up-token (outcome_a) trades.
-        // Strategy needs external crypto prices to activate markets and evaluate
-        // opportunities. We derive synthetic prices: base_price * (1 + scale * (p - 0.5))
-        // where p is the Up token's trade probability.
+        // Load real crypto prices from Binance klines (historical_crypto_prices table).
+        // If no klines are available, fall back to synthetic prices from market probability.
         {
-            let nominal_bases: HashMap<&str, Decimal> = [
-                ("btc", Decimal::new(100_000, 0)),
-                ("eth", Decimal::new(3_000, 0)),
-                ("sol", Decimal::new(200, 0)),
-                ("xrp", Decimal::new(1, 0)),
-            ]
-            .into();
-
-            // Build up_token -> coin map from market metadata
-            let mut up_token_to_coin: HashMap<String, String> = HashMap::new();
+            // Determine which coins are in the backtest from market slugs
+            let coin_prefixes = ["btc", "eth", "sol", "xrp"];
+            let mut coins_in_backtest: Vec<String> = Vec::new();
             for market_id in &self.config.market_ids {
                 if let Ok(Some(m)) = self
                     .data_store
@@ -408,71 +665,130 @@ impl BacktestEngine {
                     .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))
                 {
                     let slug_lower = m.slug.to_lowercase();
-                    for prefix in nominal_bases.keys() {
+                    for prefix in &coin_prefixes {
                         if slug_lower.starts_with(prefix) {
-                            up_token_to_coin
-                                .insert(m.token_a.clone(), prefix.to_uppercase());
+                            let coin = prefix.to_uppercase();
+                            if !coins_in_backtest.contains(&coin) {
+                                coins_in_backtest.push(coin);
+                            }
                             break;
                         }
                     }
                 }
             }
 
-            let scale = Decimal::new(1, 1); // 0.1 = 10% price swing for full 0->1 move
+            let mut total_crypto_events = 0usize;
 
-            // For each trade on an Up token, emit a synthetic ExternalPrice
-            let trade_events: Vec<_> = events
-                .iter()
-                .filter_map(|e| {
-                    if let Event::MarketData(MarketDataEvent::Trade {
-                        token_id, price, ..
-                    }) = &e.event
-                    {
-                        up_token_to_coin.get(token_id).map(|coin| {
-                            let coin_lower = coin.to_lowercase();
-                            let base = nominal_bases
-                                .get(coin_lower.as_str())
-                                .copied()
-                                .unwrap_or(Decimal::new(100, 0));
-                            let half = Decimal::new(5, 1); // 0.5
-                            let synthetic_price = base * (Decimal::ONE + scale * (*price - half));
-                            (e.timestamp, coin.clone(), synthetic_price)
-                        })
-                    } else {
-                        None
+            for coin in &coins_in_backtest {
+                // Try loading real Binance klines first
+                let prices = self
+                    .data_store
+                    .get_crypto_prices(coin, self.config.start_date, self.config.end_date)
+                    .await
+                    .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
+
+                if !prices.is_empty() {
+                    info!(
+                        coin,
+                        count = prices.len(),
+                        "Loaded real Binance klines for ExternalPrice events"
+                    );
+                    for p in prices {
+                        events.push(HistoricalEvent {
+                            timestamp: p.timestamp,
+                            token_id: coin.clone(),
+                            event: Event::MarketData(MarketDataEvent::ExternalPrice {
+                                symbol: coin.clone(),
+                                price: p.close,
+                                source: p.source,
+                                timestamp: p.timestamp,
+                            }),
+                        });
+                        total_crypto_events += 1;
                     }
-                })
-                .collect();
+                } else {
+                    // Fallback: synthesize from market probability (original behavior)
+                    warn!(
+                        coin,
+                        "No Binance klines found, falling back to synthetic ExternalPrice from market probability"
+                    );
+
+                    let nominal_bases: HashMap<&str, Decimal> = [
+                        ("BTC", Decimal::new(100_000, 0)),
+                        ("ETH", Decimal::new(3_000, 0)),
+                        ("SOL", Decimal::new(200, 0)),
+                        ("XRP", Decimal::new(1, 0)),
+                    ]
+                    .into();
+
+                    let base = nominal_bases
+                        .get(coin.as_str())
+                        .copied()
+                        .unwrap_or(Decimal::new(100, 0));
+                    let scale = Decimal::new(1, 1); // 0.1
+                    let half = Decimal::new(5, 1); // 0.5
+
+                    // Build up_token -> coin map for this coin
+                    let mut up_tokens: Vec<String> = Vec::new();
+                    for market_id in &self.config.market_ids {
+                        if let Ok(Some(m)) = self
+                            .data_store
+                            .get_historical_market(market_id)
+                            .await
+                            .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))
+                            && m.slug.to_lowercase().starts_with(&coin.to_lowercase())
+                        {
+                            up_tokens.push(m.token_a.clone());
+                        }
+                    }
+
+                    let trade_events: Vec<_> = events
+                        .iter()
+                        .filter_map(|e| {
+                            if let Event::MarketData(MarketDataEvent::Trade {
+                                token_id, price, ..
+                            }) = &e.event
+                            {
+                                if up_tokens.contains(token_id) {
+                                    let synthetic_price =
+                                        base * (Decimal::ONE + scale * (*price - half));
+                                    Some((e.timestamp, coin.clone(), synthetic_price))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    for (ts, sym, price) in trade_events {
+                        events.push(HistoricalEvent {
+                            timestamp: ts,
+                            token_id: sym.clone(),
+                            event: Event::MarketData(MarketDataEvent::ExternalPrice {
+                                symbol: sym,
+                                price,
+                                source: "backtest-synthetic".to_string(),
+                                timestamp: ts,
+                            }),
+                        });
+                        total_crypto_events += 1;
+                    }
+                }
+            }
 
             info!(
-                external_price_events = trade_events.len(),
-                coins_mapped = up_token_to_coin.len(),
-                "Synthesized ExternalPrice events from Up-token trades"
+                coins = ?coins_in_backtest,
+                total_crypto_events,
+                "ExternalPrice events loaded for backtest"
             );
-
-            for (ts, coin, price) in trade_events {
-                events.push(HistoricalEvent {
-                    timestamp: ts,
-                    token_id: coin.clone(),
-                    event: Event::MarketData(MarketDataEvent::ExternalPrice {
-                        symbol: coin,
-                        price,
-                        source: "backtest-synthetic".to_string(),
-                        timestamp: ts,
-                    }),
-                });
-            }
         }
 
         // Synthesize PriceChange events from trades at configured fidelity
         {
-            let trade_events: Vec<_> = events
-                .iter()
-                .filter(|e| matches!(&e.event, Event::MarketData(MarketDataEvent::Trade { .. })))
-                .cloned()
-                .collect();
             let synthetic = synthesize_price_events_from_trades(
-                &trade_events,
+                &events,
                 self.config.data_fidelity_secs,
             );
             info!(
@@ -483,31 +799,25 @@ impl BacktestEngine {
             events.extend(synthetic);
         }
 
+        // Remove raw Trade events — they've already been consumed by ExternalPrice
+        // and PriceChange synthesis above. Replaying them through the strategy is
+        // wasteful (the engine's token_prices cache gets the same data from synthesized
+        // events). This typically cuts event count by ~65% (e.g. 9.7M -> 3.4M).
+        let before = events.len();
+        events.retain(|e| !matches!(&e.event, Event::MarketData(MarketDataEvent::Trade { .. })));
+        info!(
+            before = before,
+            after = events.len(),
+            removed = before - events.len(),
+            "Filtered raw Trade events (consumed by synthesis)"
+        );
+
         // Sort events chronologically
         events.sort_by_key(|e| e.timestamp);
 
         Ok(events)
     }
 
-    /// Update the market data state based on an event.
-    async fn update_market_data_state(&self, event: &Event) {
-        let mut market_data = self.ctx.market_data.write().await;
-
-        match event {
-            Event::MarketData(MarketDataEvent::PriceChange { token_id, price, .. }) => {
-                // Update external_prices as a simple cache
-                market_data
-                    .external_prices
-                    .insert(token_id.clone(), *price);
-            }
-            Event::MarketData(MarketDataEvent::Trade { token_id, price, .. }) => {
-                market_data
-                    .external_prices
-                    .insert(token_id.clone(), *price);
-            }
-            _ => {}
-        }
-    }
 
     /// Execute a single action from the strategy.
     ///
@@ -547,6 +857,63 @@ impl BacktestEngine {
         }
     }
 
+    /// Execute an order and feed Placed+Filled events back to the strategy.
+    ///
+    /// Returns the primary trade plus any secondary trades triggered by the strategy
+    /// reacting to the fill events (e.g. stop-loss exits).
+    async fn execute_and_notify(
+        &mut self,
+        order: OrderRequest,
+    ) -> Result<Vec<BacktestTrade>> {
+        let mut trades = Vec::new();
+        if let Some(trade) = self.execute_order(order).await? {
+            let order_id = Uuid::new_v4().to_string();
+            let market_id = self
+                .token_to_market
+                .get(&trade.token_id)
+                .cloned()
+                .unwrap_or_default();
+
+            // 1. Feed OrderEvent::Placed to strategy
+            let placed_event = Event::OrderUpdate(OrderEvent::Placed(OrderResult {
+                success: true,
+                order_id: Some(order_id.clone()),
+                token_id: trade.token_id.clone(),
+                price: trade.price,
+                size: trade.size,
+                side: trade.side,
+                status: Some("Filled".to_string()),
+                message: "backtest-fill".to_string(),
+            }));
+            let placed_actions = self.strategy.on_event(&placed_event, &self.ctx).await?;
+            for action in placed_actions {
+                if let Some(t) = self.execute_action(action).await? {
+                    trades.push(t);
+                }
+            }
+
+            // 2. Feed OrderEvent::Filled to strategy
+            let filled_event = Event::OrderUpdate(OrderEvent::Filled {
+                order_id,
+                market_id,
+                token_id: trade.token_id.clone(),
+                side: trade.side,
+                price: trade.price,
+                size: trade.size,
+                strategy_name: self.strategy.name().to_string(),
+            });
+            let filled_actions = self.strategy.on_event(&filled_event, &self.ctx).await?;
+            for action in filled_actions {
+                if let Some(t) = self.execute_action(action).await? {
+                    trades.push(t);
+                }
+            }
+
+            trades.push(trade);
+        }
+        Ok(trades)
+    }
+
     /// Execute an order immediately at the current market price.
     ///
     /// This is a simplified "Immediate fill mode" implementation.
@@ -559,7 +926,12 @@ impl BacktestEngine {
             .unwrap_or(order.price);
 
         // Validate price and size
-        if order.price <= Decimal::ZERO || order.price > Decimal::ONE {
+        // Allow price == 0 for sells (expired worthless positions)
+        let price_invalid = match order.side {
+            OrderSide::Buy => order.price <= Decimal::ZERO || order.price > Decimal::ONE,
+            OrderSide::Sell => order.price < Decimal::ZERO || order.price > Decimal::ONE,
+        };
+        if price_invalid {
             warn!(
                 token_id = %order.token_id,
                 price = %order.price,
@@ -581,9 +953,16 @@ impl BacktestEngine {
 
         match order.side {
             OrderSide::Buy => {
-                // Calculate cost (price * size) + fee
+                // Calculate cost (price * size) + dynamic fee
+                // Fee depends on order type: FOK = taker fee, GTC/GTD = maker (0%)
                 let cost = current_price * order.size;
-                let fee = cost * self.config.fees.taker_fee_rate;
+                let fee = match order.order_type {
+                    OrderType::Fok => {
+                        Decimal::TWO * current_price * (Decimal::ONE - current_price)
+                            * self.config.fees.taker_fee_rate * order.size
+                    }
+                    _ => Decimal::ZERO, // GTC/GTD = maker = 0% fee
+                };
                 let total_cost = cost + fee;
 
                 if balance.available_usdc < total_cost {
@@ -601,7 +980,14 @@ impl BacktestEngine {
 
                 // Update position entry tracking
                 // Include fees in the effective entry price for accurate P&L calculation
-                let effective_buy_price = current_price * (Decimal::ONE + self.config.fees.taker_fee_rate);
+                let fee_per_share = match order.order_type {
+                    OrderType::Fok => {
+                        Decimal::TWO * current_price * (Decimal::ONE - current_price)
+                            * self.config.fees.taker_fee_rate
+                    }
+                    _ => Decimal::ZERO,
+                };
+                let effective_buy_price = current_price + fee_per_share;
 
                 let (cur_size, cur_entry) = self
                     .position_entries
@@ -688,6 +1074,7 @@ impl BacktestEngine {
                     price: current_price,
                     size: order.size,
                     realized_pnl: None,
+                    close_reason: None,
                 }))
             }
             OrderSide::Sell => {
@@ -708,9 +1095,16 @@ impl BacktestEngine {
                     return Ok(None);
                 }
 
-                // Calculate revenue (price * size) - fee
+                // Calculate revenue (price * size) - dynamic fee
+                // Fee depends on order type: FOK = taker fee, GTC/GTD = maker (0%)
                 let revenue = current_price * order.size;
-                let fee = revenue * self.config.fees.taker_fee_rate;
+                let fee = match order.order_type {
+                    OrderType::Fok => {
+                        Decimal::TWO * current_price * (Decimal::ONE - current_price)
+                            * self.config.fees.taker_fee_rate * order.size
+                    }
+                    _ => Decimal::ZERO, // GTC/GTD = maker = 0% fee
+                };
                 let net_revenue = revenue - fee;
 
                 // Calculate realized P&L
@@ -784,6 +1178,7 @@ impl BacktestEngine {
                     price: current_price,
                     size: order.size,
                     realized_pnl: Some(realized_pnl),
+                    close_reason: Some(CloseReason::Strategy),
                 }))
             }
         }
@@ -802,9 +1197,9 @@ mod tests {
     use polyrust_core::strategy::Strategy;
     use rust_decimal_macros::dec;
 
-    // Simple test strategy that buys on first event, sells on second
+    // Simple test strategy that buys on first PriceChange, sells on second
     struct TestStrategy {
-        event_count: usize,
+        price_event_count: usize,
     }
 
     #[async_trait]
@@ -818,12 +1213,11 @@ mod tests {
         }
 
         async fn on_event(&mut self, event: &Event, _ctx: &StrategyContext) -> Result<Vec<Action>> {
-            self.event_count += 1;
-
             match event {
                 Event::MarketData(MarketDataEvent::PriceChange { token_id, .. }) => {
-                    if self.event_count == 1 {
-                        // First event: BUY
+                    self.price_event_count += 1;
+                    if self.price_event_count == 1 {
+                        // First PriceChange: BUY
                         Ok(vec![Action::PlaceOrder(OrderRequest::new(
                             token_id.clone(),
                             dec!(0.50),
@@ -832,8 +1226,8 @@ mod tests {
                             OrderType::Gtc,
                             false,
                         ))])
-                    } else if self.event_count == 2 {
-                        // Second event: SELL
+                    } else if self.price_event_count == 2 {
+                        // Second PriceChange: SELL
                         Ok(vec![Action::PlaceOrder(OrderRequest::new(
                             token_id.clone(),
                             dec!(0.60),
@@ -896,7 +1290,7 @@ mod tests {
             offline: false,
         };
 
-        let strategy = Box::new(TestStrategy { event_count: 0 });
+        let strategy = Box::new(TestStrategy { price_event_count: 0 });
 
         let mut engine = BacktestEngine::new(config, strategy, data_store, store.clone()).await;
 
@@ -916,13 +1310,13 @@ mod tests {
         assert_eq!(trades[1].size, dec!(10));
 
         // Check realized P&L on SELL trade
-        // Buy cost: 0.50 * 10 = 5.00 + 1% fee = 5.05
-        // Sell revenue: 0.60 * 10 = 6.00 - 1% fee = 5.94
-        // Realized P&L = 5.94 - 5.00 = 0.94
+        // GTC = maker = 0% fee, so:
+        // BUY at 0.50, no fee → effective entry = 0.50
+        // SELL at 0.60, no fee → net revenue = 6.00
+        // P&L = 6.00 - 5.00 = 1.00
         assert!(trades[1].realized_pnl.is_some());
         let pnl = trades[1].realized_pnl.unwrap();
-        // Expected: (0.60 * 10 * 0.99) - (0.50 * 10) = 5.94 - 5.00 = 0.94
-        assert!(pnl > dec!(0.8) && pnl < dec!(1.0)); // Rough check due to fees
+        assert_eq!(pnl, dec!(1.0)); // Exact 1.00 with 0% maker fee
 
         // Verify trades were recorded in Store
         let stored_trades = store.list_trades(Some("test-strategy"), 10).await.unwrap();
@@ -976,7 +1370,7 @@ mod tests {
             offline: false,
         };
 
-        let strategy = Box::new(TestStrategy { event_count: 0 });
+        let strategy = Box::new(TestStrategy { price_event_count: 0 });
         let mut engine = BacktestEngine::new(config, strategy, data_store, store).await;
 
         let trades = engine.run().await.unwrap();
@@ -1022,7 +1416,7 @@ mod tests {
             offline: false,
         };
 
-        let strategy = Box::new(TestStrategy { event_count: 0 });
+        let strategy = Box::new(TestStrategy { price_event_count: 0 });
         let mut engine = BacktestEngine::new(config, strategy, data_store, store).await;
 
         let trades = engine.run().await.unwrap();

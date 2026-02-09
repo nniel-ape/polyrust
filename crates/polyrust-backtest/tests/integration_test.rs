@@ -199,12 +199,13 @@ async fn test_full_backtest_pipeline() {
     )
     .await;
 
-    let _trades = engine.run().await.expect("Backtest failed");
+    let trades = engine.run().await.expect("Backtest failed");
 
     // Generate report
     use polyrust_backtest::BacktestReport;
     let report = BacktestReport::from_engine_results(
         Arc::clone(&results_store),
+        trades,
         initial_balance,
         start_time,
         end_time,

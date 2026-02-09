@@ -1,12 +1,14 @@
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::data::{
-    GammaFetcher, HistoricalDataStore, HistoricalMarket, HistoricalPrice,
+    GammaFetcher, HistoricalCryptoPrice, HistoricalDataStore, HistoricalMarket, HistoricalPrice,
     HistoricalTrade, SubgraphFetcher,
 };
-use crate::error::BacktestResult;
+use crate::data::store::DataFetchLog;
+use crate::error::{BacktestError, BacktestResult};
 
 /// Configuration for data fetching behavior.
 #[derive(Debug, Clone)]
@@ -35,7 +37,7 @@ pub struct CachedMarketData {
 /// Cache-aware: checks `data_fetch_log` before fetching, avoids re-fetching cached ranges.
 pub struct DataFetcher {
     store: Arc<HistoricalDataStore>,
-    gamma_fetcher: GammaFetcher,
+    gamma_fetcher: Arc<GammaFetcher>,
     subgraph_fetcher: SubgraphFetcher,
     _config: DataFetchConfig,
 }
@@ -46,7 +48,7 @@ impl DataFetcher {
         store: Arc<HistoricalDataStore>,
         config: DataFetchConfig,
     ) -> BacktestResult<Self> {
-        let gamma_fetcher = GammaFetcher::new(Arc::clone(&store))?;
+        let gamma_fetcher = Arc::new(GammaFetcher::new(Arc::clone(&store))?);
         let subgraph_fetcher = SubgraphFetcher::new(Arc::clone(&store))?;
 
         Ok(Self {
@@ -57,65 +59,47 @@ impl DataFetcher {
         })
     }
 
-    /// Fetch market data for a single token within a date range.
-    /// All trade data comes from the Goldsky subgraph.
+    /// Fetch market data for a market within a date range.
+    /// Looks up market metadata (token_a, token_b) from the store,
+    /// then batch-fetches trades for both tokens from the orderbook subgraph.
     /// PriceChange events are synthesized from trades in the backtest engine.
     ///
     /// # Arguments
-    /// * `token_id` - Token ID to fetch data for
+    /// * `market_id` - Market condition ID (maps to token_a + token_b)
     /// * `start` - Start of date range
     /// * `end` - End of date range
     pub async fn fetch_market_data(
         &self,
-        token_id: &str,
+        market_id: &str,
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> BacktestResult<CachedMarketData> {
-        info!(token_id, ?start, ?end, "Fetching market data from subgraph");
+        // Look up market to get both token IDs
+        let market = self.store.get_historical_market(market_id).await?;
+
+        let token_ids: Vec<String> = match market {
+            Some(m) => vec![m.token_a, m.token_b],
+            None => {
+                // Fallback: treat market_id as a single token ID (backwards compat)
+                info!(market_id, "Market not found in store, using as token_id directly");
+                vec![market_id.to_string()]
+            }
+        };
+
+        let token_refs: Vec<&str> = token_ids.iter().map(|s| s.as_str()).collect();
+        info!(market_id, ?token_refs, ?start, ?end, "Fetching market data from orderbook subgraph");
 
         let trades = self
             .subgraph_fetcher
-            .fetch_subgraph_trades(token_id, start.timestamp(), end.timestamp())
+            .fetch_trades_batch(&token_refs, start.timestamp(), end.timestamp())
             .await?;
 
-        info!(token_id, trades = trades.len(), "Market data fetched");
+        info!(market_id, trades = trades.len(), "Market data fetched");
 
         Ok(CachedMarketData {
             prices: Vec::new(),
             trades,
         })
-    }
-
-    /// Bulk fetch and cache data for multiple tokens over a date range.
-    /// Use this for backtest preparation — fetches everything needed, stores in DB.
-    ///
-    /// # Arguments
-    /// * `token_ids` - List of token IDs to fetch
-    /// * `start` - Start of date range
-    /// * `end` - End of date range
-    pub async fn fetch_and_cache(
-        &self,
-        token_ids: &[String],
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> BacktestResult<()> {
-        info!(tokens = token_ids.len(), ?start, ?end, "Bulk fetching and caching market data");
-
-        for (idx, token_id) in token_ids.iter().enumerate() {
-            info!(progress = format!("{}/{}", idx + 1, token_ids.len()), token_id, "Fetching token data");
-
-            match self.fetch_market_data(token_id, start, end).await {
-                Ok(_data) => {
-                    debug!(token_id, "Successfully fetched and cached");
-                }
-                Err(e) => {
-                    warn!(token_id, error = %e, "Failed to fetch token data, continuing");
-                }
-            }
-        }
-
-        info!(tokens = token_ids.len(), "Bulk fetch complete");
-        Ok(())
     }
 
     /// Retrieve cached data for a token from the database.
@@ -163,6 +147,247 @@ impl DataFetcher {
     ) -> BacktestResult<Vec<HistoricalMarket>> {
         self.gamma_fetcher.fetch_expired_markets(coin, start, end, duration_filter).await
     }
+
+    /// Fetch historical crypto prices (Binance 1m klines) for the given coins.
+    ///
+    /// Fetches both spot and futures klines. Cache-aware: checks `data_fetch_log`
+    /// before fetching to avoid duplicate API calls.
+    pub async fn fetch_crypto_prices(
+        &self,
+        coins: &[String],
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> BacktestResult<()> {
+        let client = reqwest::Client::new();
+
+        for coin in coins {
+            let symbol = format!("{}USDT", coin.to_uppercase());
+
+            // Fetch spot klines
+            let spot_source = format!("binance-spot-klines-{}", coin.to_uppercase());
+            if !self.is_fetched(&spot_source, coin, start, end).await? {
+                let count = fetch_binance_klines(KlinesFetchParams {
+                    client: &client,
+                    store: &self.store,
+                    base_url: &format!("https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m"),
+                    coin,
+                    source: "binance-spot",
+                    start,
+                    end,
+                    page_limit: 1000,
+                })
+                .await?;
+
+                self.store
+                    .insert_fetch_log(DataFetchLog {
+                        id: None,
+                        source: spot_source,
+                        token_id: coin.to_uppercase(),
+                        start_ts: start,
+                        end_ts: end,
+                        fetched_at: Utc::now(),
+                        row_count: count as i64,
+                    })
+                    .await?;
+            } else {
+                info!(coin, source = "binance-spot", "Crypto klines already cached, skipping");
+            }
+
+            // Fetch futures klines
+            let futures_source = format!("binance-futures-klines-{}", coin.to_uppercase());
+            if !self.is_fetched(&futures_source, coin, start, end).await? {
+                let count = fetch_binance_klines(KlinesFetchParams {
+                    client: &client,
+                    store: &self.store,
+                    base_url: &format!("https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=1m"),
+                    coin,
+                    source: "binance-futures",
+                    start,
+                    end,
+                    page_limit: 1500,
+                })
+                .await?;
+
+                self.store
+                    .insert_fetch_log(DataFetchLog {
+                        id: None,
+                        source: futures_source,
+                        token_id: coin.to_uppercase(),
+                        start_ts: start,
+                        end_ts: end,
+                        fetched_at: Utc::now(),
+                        row_count: count as i64,
+                    })
+                    .await?;
+            } else {
+                info!(coin, source = "binance-futures", "Crypto klines already cached, skipping");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if data for a given source/coin/range has already been fetched.
+    async fn is_fetched(
+        &self,
+        source: &str,
+        coin: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> BacktestResult<bool> {
+        let logs = self.store.get_fetch_log(source, &coin.to_uppercase()).await?;
+        // Consider fetched if any log entry covers the entire requested range
+        Ok(logs.iter().any(|log| log.start_ts <= start && log.end_ts >= end))
+    }
+}
+
+/// Parameters for a Binance klines fetch request.
+struct KlinesFetchParams<'a> {
+    client: &'a reqwest::Client,
+    store: &'a Arc<HistoricalDataStore>,
+    base_url: &'a str,
+    coin: &'a str,
+    source: &'a str,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    page_limit: u32,
+}
+
+/// Fetch Binance klines from a REST endpoint, paginating and storing to DB.
+///
+/// Returns the total number of klines fetched.
+async fn fetch_binance_klines(params: KlinesFetchParams<'_>) -> BacktestResult<usize> {
+    let KlinesFetchParams {
+        client,
+        store,
+        base_url,
+        coin,
+        source,
+        start,
+        end,
+        page_limit,
+    } = params;
+    let mut current_start_ms = start.timestamp_millis();
+    let end_ms = end.timestamp_millis();
+    let mut total = 0usize;
+
+    info!(
+        coin,
+        source,
+        start = %start,
+        end = %end,
+        "Fetching Binance klines"
+    );
+
+    loop {
+        if current_start_ms >= end_ms {
+            break;
+        }
+
+        let url = format!(
+            "{base_url}&startTime={current_start_ms}&endTime={end_ms}&limit={page_limit}"
+        );
+
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| BacktestError::DataFetch(format!("Binance klines request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            warn!(
+                coin,
+                source,
+                status = %status,
+                body = %body,
+                "Binance klines API error"
+            );
+            // Rate limit — wait and retry
+            if status.as_u16() == 429 {
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                continue;
+            }
+            return Err(BacktestError::DataFetch(format!(
+                "Binance klines API error: {status}"
+            )));
+        }
+
+        let klines: Vec<Vec<serde_json::Value>> = resp
+            .json()
+            .await
+            .map_err(|e| BacktestError::DataFetch(format!("Failed to parse klines response: {e}")))?;
+
+        if klines.is_empty() {
+            break;
+        }
+
+        let mut batch = Vec::with_capacity(klines.len());
+        let mut last_close_time_ms = current_start_ms;
+
+        for kline in &klines {
+            // Binance kline format: [open_time, open, high, low, close, volume, close_time, ...]
+            if kline.len() < 7 {
+                continue;
+            }
+
+            let open_time_ms = kline[0].as_i64().unwrap_or(0);
+            let close_time_ms = kline[6].as_i64().unwrap_or(0);
+
+            let parse_dec = |v: &serde_json::Value| -> Option<Decimal> {
+                v.as_str().and_then(|s| s.parse().ok())
+            };
+
+            let Some(open) = parse_dec(&kline[1]) else { continue };
+            let Some(high) = parse_dec(&kline[2]) else { continue };
+            let Some(low) = parse_dec(&kline[3]) else { continue };
+            let Some(close) = parse_dec(&kline[4]) else { continue };
+            let Some(volume) = parse_dec(&kline[5]) else { continue };
+
+            let timestamp = DateTime::from_timestamp_millis(open_time_ms);
+            let Some(ts) = timestamp else { continue };
+
+            batch.push(HistoricalCryptoPrice {
+                symbol: coin.to_uppercase(),
+                timestamp: ts,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                source: source.to_string(),
+            });
+
+            last_close_time_ms = close_time_ms;
+        }
+
+        let batch_size = batch.len();
+        store.insert_crypto_prices(batch).await?;
+        total += batch_size;
+
+        info!(
+            coin,
+            source,
+            batch_size,
+            total,
+            "Fetched Binance klines page"
+        );
+
+        // Advance past the last candle's close time
+        current_start_ms = last_close_time_ms + 1;
+
+        // If we got fewer than the limit, we've exhausted the data
+        if batch_size < page_limit as usize {
+            break;
+        }
+
+        // Respect rate limits — small delay between pages
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    info!(coin, source, total, "Binance klines fetch complete");
+    Ok(total)
 }
 
 #[cfg(test)]

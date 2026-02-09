@@ -7,12 +7,12 @@ use polyrust_backtest::{BacktestConfig, BacktestEngine, DataFetcher, HistoricalD
 use polyrust_core::prelude::*;
 use polyrust_dashboard::Dashboard;
 use polyrust_execution::{FillMode, LiveBackend, PaperBackend};
-use polyrust_market::{ClobFeed, DiscoveryConfig, DiscoveryFeed, MarketDataFeed, PriceFeed};
+use polyrust_market::{BinanceFeed, ClobFeed, DiscoveryConfig, DiscoveryFeed, MarketDataFeed, PriceFeed};
 use polyrust_store::Store;
 use polyrust_strategies::{
     ArbitrageConfig, ConfirmedDashboard, ConfirmedStrategy, CrossCorrDashboard, CrossCorrStrategy,
-    CryptoArbBase, CryptoArbDashboard, TailEndDashboard, TailEndStrategy, TwoSidedDashboard,
-    TwoSidedStrategy,
+    CryptoArbBase, CryptoArbDashboard, ReferenceQualityLevel, TailEndDashboard, TailEndStrategy,
+    TwoSidedDashboard, TwoSidedStrategy,
 };
 use serde::Deserialize;
 
@@ -243,6 +243,15 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Start direct Binance feed (spot + futures) alongside RTDS
+    let mut binance_feed = BinanceFeed::new(arb_config.coins.clone());
+    let binance_bus = event_bus.clone();
+    tokio::spawn(async move {
+        if let Err(e) = binance_feed.start(binance_bus).await {
+            error!("Binance feed failed to start: {e}");
+        }
+    });
+
     // Start trade persistence task
     let persistence_store = Arc::clone(&store);
     let persistence_bus = event_bus.clone();
@@ -370,7 +379,7 @@ async fn run_backtest() -> anyhow::Result<()> {
     use polyrust_backtest::DataFetchConfig;
 
     // Load backtest configuration
-    let (mut backtest_config, arb_config) = match std::fs::read_to_string("config.toml") {
+    let (mut backtest_config, mut arb_config) = match std::fs::read_to_string("config.toml") {
         Ok(contents) => {
             let wrapper: ConfigWrapper = toml::from_str(&contents)
                 .map_err(|e| warn!("failed to parse config: {e}"))
@@ -529,6 +538,29 @@ async fn run_backtest() -> anyhow::Result<()> {
     // Update backtest config with discovered/configured market_ids
     backtest_config.market_ids = market_ids;
 
+    // Fetch historical Binance klines for real crypto prices
+    // In online mode: fetch from Binance API and cache to DB
+    // In offline mode: skip (engine will use whatever is already cached)
+    if !backtest_config.offline {
+        info!("Fetching historical Binance klines for configured coins");
+        let crypto_fetcher = DataFetcher::new(
+            Arc::clone(&data_store),
+            DataFetchConfig { fidelity_secs: backtest_config.data_fidelity_secs },
+        )?;
+        crypto_fetcher
+            .fetch_crypto_prices(
+                &arb_config.coins,
+                backtest_config.start_date,
+                backtest_config.end_date,
+            )
+            .await?;
+    } else {
+        info!("Offline mode: skipping Binance klines fetch (will use cached data if available)");
+    }
+
+    // Backtest can't produce Historical quality (record_price uses wall clock)
+    arb_config.tailend.min_reference_quality = ReferenceQualityLevel::Current;
+
     // Instantiate strategy based on strategy_name
     let strategy: Box<dyn Strategy> = match backtest_config.strategy_name.as_str() {
         "crypto-arb-tailend" => {
@@ -567,12 +599,12 @@ async fn run_backtest() -> anyhow::Result<()> {
     .await;
 
     info!("Running backtest simulation");
-    let _trades = engine.run().await?;
+    let trades = engine.run().await?;
 
     // Generate report from stored results
     use polyrust_backtest::BacktestReport;
     let report =
-        BacktestReport::from_engine_results(results_store, initial_balance, start_time, end_time)
+        BacktestReport::from_engine_results(results_store, trades, initial_balance, start_time, end_time)
             .await?;
 
     // Print report summary

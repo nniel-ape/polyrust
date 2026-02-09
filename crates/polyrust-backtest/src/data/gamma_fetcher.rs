@@ -3,6 +3,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use crate::data::{HistoricalDataStore, HistoricalMarket};
@@ -15,6 +16,9 @@ const REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// 15-minute window in seconds.
 const WINDOW_SECS: i64 = 900;
+
+/// Default concurrency limit for slug enumeration fallback.
+const DEFAULT_DISCOVERY_CONCURRENCY: usize = 20;
 
 /// Slug prefixes for supported coins' 15-minute Up/Down markets.
 /// Must match the live DiscoveryFeed's COIN_SLUGS.
@@ -59,9 +63,11 @@ fn parse_slug_timestamp(slug: &str) -> Option<DateTime<Utc>> {
 }
 
 /// HTTP client for Gamma API (market discovery and metadata).
+/// Wrap in `Arc` for concurrent access from JoinSet tasks.
 pub struct GammaFetcher {
     client: Client,
     store: Arc<HistoricalDataStore>,
+    discovery_concurrency: usize,
 }
 
 impl GammaFetcher {
@@ -72,7 +78,17 @@ impl GammaFetcher {
             .build()
             .map_err(|e| BacktestError::Network(e.to_string()))?;
 
-        Ok(Self { client, store })
+        Ok(Self {
+            client,
+            store,
+            discovery_concurrency: DEFAULT_DISCOVERY_CONCURRENCY,
+        })
+    }
+
+    /// Set the concurrency limit for slug enumeration fallback.
+    pub fn with_discovery_concurrency(mut self, concurrency: usize) -> Self {
+        self.discovery_concurrency = concurrency;
+        self
     }
 
     /// Fetch markets matching a slug pattern.
@@ -97,7 +113,7 @@ impl GammaFetcher {
 
         let mut historical_markets = Vec::new();
         for market in markets {
-            if let Some(hist_market) = self.convert_to_historical_market(market)? {
+            if let Some(hist_market) = Self::convert_to_historical_market(market)? {
                 historical_markets.push(hist_market);
             }
         }
@@ -126,7 +142,7 @@ impl GammaFetcher {
             .await
             .map_err(|e| BacktestError::Network(format!("Failed to parse market response: {}", e)))?;
 
-        let historical_market = self.convert_to_historical_market(market)?;
+        let historical_market = Self::convert_to_historical_market(market)?;
 
         // Cache if we got a valid market
         if let Some(ref hist_market) = historical_market {
@@ -137,9 +153,10 @@ impl GammaFetcher {
     }
 
     /// Fetch expired markets for a specific coin and date range.
-    /// Uses deterministic slug-based lookup (same as live DiscoveryFeed):
-    /// enumerates all 15-minute windows in the range and looks up each
-    /// slug via `GET /markets/slug/{prefix}-{timestamp}`.
+    ///
+    /// Strategy: tries batch `slug_contains` query first (single HTTP call),
+    /// then filters locally by date range. Falls back to concurrent slug
+    /// enumeration if batch returns 0 results (API may paginate/truncate).
     ///
     /// # Arguments
     /// * `coin` - Coin symbol (e.g., "BTC", "ETH", "SOL")
@@ -147,7 +164,7 @@ impl GammaFetcher {
     /// * `end_date` - End of date range
     /// * `_duration_filter` - Ignored (slug-based lookup always returns 15-min markets)
     pub async fn fetch_expired_markets(
-        &self,
+        self: &Arc<Self>,
         coin: &str,
         start_date: DateTime<Utc>,
         end_date: DateTime<Utc>,
@@ -166,46 +183,140 @@ impl GammaFetcher {
                 ))
             })?;
 
-        // Enumerate all 15-min window timestamps in the date range
+        // Try batch approach first: single slug_contains query + local filtering
+        info!(coin, prefix, "Trying batch market discovery via slug_contains");
+        let batch_markets = self.fetch_expired_markets_batch(prefix, start_date, end_date).await?;
+
+        // Estimate expected markets: one per 15-min window in the date range
+        let expected_count = (end_date - start_date).num_seconds() / 900;
+        let is_likely_complete = expected_count <= 0
+            || batch_markets.len() as i64 >= (expected_count * 4 / 5); // >= 80% of expected
+
+        if !batch_markets.is_empty() && is_likely_complete {
+            info!(
+                coin,
+                found = batch_markets.len(),
+                expected = expected_count,
+                "Batch discovery succeeded"
+            );
+            return Ok(batch_markets);
+        }
+
+        // Fallback: concurrent slug enumeration (batch empty or likely truncated)
+        info!(
+            coin,
+            prefix,
+            batch_count = batch_markets.len(),
+            expected = expected_count,
+            "Batch may be truncated, falling back to concurrent slug enumeration"
+        );
+        self.fetch_expired_markets_concurrent(coin, prefix, start_date, end_date).await
+    }
+
+    /// Batch discovery: fetch all markets matching the slug prefix in one call,
+    /// then filter locally by date range.
+    async fn fetch_expired_markets_batch(
+        &self,
+        prefix: &str,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
+    ) -> BacktestResult<Vec<HistoricalMarket>> {
+        let all_markets = self.fetch_markets_by_slug(prefix).await?;
+
+        let filtered: Vec<_> = all_markets
+            .into_iter()
+            .filter(|m| m.end_date >= start_date && m.end_date <= end_date)
+            .collect();
+
+        info!(
+            prefix,
+            filtered = filtered.len(),
+            "Batch discovery filtered by date range"
+        );
+
+        Ok(filtered)
+    }
+
+    /// Concurrent slug enumeration fallback.
+    /// Enumerates all 15-minute windows in the range and fetches each slug
+    /// concurrently, bounded by `discovery_concurrency`.
+    async fn fetch_expired_markets_concurrent(
+        self: &Arc<Self>,
+        coin: &str,
+        prefix: &str,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
+    ) -> BacktestResult<Vec<HistoricalMarket>> {
+        // Collect all slugs for the date range
         let mut ts = (start_date.timestamp() / WINDOW_SECS) * WINDOW_SECS;
         let end_ts = end_date.timestamp();
         let total_windows = ((end_ts - ts) / WINDOW_SECS).max(0);
 
+        let mut slugs = Vec::with_capacity(total_windows as usize);
+        while ts <= end_ts {
+            slugs.push(format!("{prefix}-{ts}"));
+            ts += WINDOW_SECS;
+        }
+
         info!(
             coin,
             prefix,
-            ?start_date,
-            ?end_date,
-            total_windows,
-            "Discovering markets via slug enumeration"
+            total_windows = slugs.len(),
+            concurrency = self.discovery_concurrency,
+            "Discovering markets via concurrent slug enumeration"
         );
 
         let mut markets = Vec::new();
         let mut found = 0u64;
         let mut missed = 0u64;
 
-        while ts <= end_ts {
-            let slug = format!("{prefix}-{ts}");
-            match self.fetch_single_market_by_slug(&slug).await {
-                Ok(Some(market)) => {
-                    if let Some(hist) = self.convert_to_historical_market(market)? {
-                        self.store.insert_historical_market(hist.clone()).await?;
-                        markets.push(hist);
-                        found += 1;
+        // Process slugs in batches bounded by concurrency limit
+        for chunk in slugs.chunks(self.discovery_concurrency) {
+            let mut join_set = JoinSet::new();
+
+            for slug in chunk {
+                let fetcher = Arc::clone(self);
+                let slug = slug.clone();
+                join_set.spawn(async move {
+                    let result = fetcher.fetch_single_market_by_slug(&slug).await;
+                    (slug, result)
+                });
+            }
+
+            while let Some(result) = join_set.join_next().await {
+                match result {
+                    Ok((slug, Ok(Some(market)))) => {
+                        match Self::convert_to_historical_market(market) {
+                            Ok(Some(hist)) => {
+                                self.store.insert_historical_market(hist.clone()).await?;
+                                markets.push(hist);
+                                found += 1;
+                            }
+                            Ok(None) => {
+                                missed += 1;
+                            }
+                            Err(e) => {
+                                debug!(slug, error = %e, "Failed to convert market");
+                                missed += 1;
+                            }
+                        }
+                    }
+                    Ok((_, Ok(None))) => {
+                        missed += 1;
+                    }
+                    Ok((slug, Err(e))) => {
+                        debug!(slug, error = %e, "Failed to fetch market by slug");
+                        missed += 1;
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Task panicked during slug fetch");
+                        missed += 1;
                     }
                 }
-                Ok(None) => {
-                    missed += 1;
-                }
-                Err(e) => {
-                    debug!(slug, error = %e, "Failed to fetch market by slug");
-                    missed += 1;
-                }
             }
-            ts += WINDOW_SECS;
 
-            // Log progress every 100 windows
-            if (found + missed) > 0 && (found + missed).is_multiple_of(100) {
+            // Log progress after each batch
+            if (found + missed) > 0 {
                 info!(
                     coin,
                     found,
@@ -245,7 +356,7 @@ impl GammaFetcher {
 
     /// Convert Gamma API market to HistoricalMarket struct.
     /// Falls back to parsing start_date from slug timestamp if missing from API.
-    fn convert_to_historical_market(&self, market: GammaMarket) -> BacktestResult<Option<HistoricalMarket>> {
+    fn convert_to_historical_market(market: GammaMarket) -> BacktestResult<Option<HistoricalMarket>> {
         // Parse start_date: API field → slug timestamp fallback
         let start_date = match market.start_date {
             Some(ref date_str) => DateTime::parse_from_rfc3339(date_str)
@@ -366,9 +477,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_convert_valid_market() {
-        let store = setup_store().await;
-        let fetcher = GammaFetcher::new(store).unwrap();
-
         let gamma_market = GammaMarket {
             condition_id: "0x123".to_string(),
             slug: "btc-up-15min".to_string(),
@@ -379,7 +487,7 @@ mod tests {
             neg_risk: Some(false),
         };
 
-        let result = fetcher.convert_to_historical_market(gamma_market).unwrap();
+        let result = GammaFetcher::convert_to_historical_market(gamma_market).unwrap();
         assert!(result.is_some());
 
         let market = result.unwrap();
@@ -392,9 +500,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_convert_market_missing_dates() {
-        let store = setup_store().await;
-        let fetcher = GammaFetcher::new(store).unwrap();
-
         let gamma_market = GammaMarket {
             condition_id: "0x123".to_string(),
             slug: "btc-up-15min".to_string(),
@@ -405,15 +510,12 @@ mod tests {
             neg_risk: Some(false),
         };
 
-        let result = fetcher.convert_to_historical_market(gamma_market).unwrap();
+        let result = GammaFetcher::convert_to_historical_market(gamma_market).unwrap();
         assert!(result.is_none()); // Should skip market with missing start_date
     }
 
     #[tokio::test]
     async fn test_convert_market_wrong_token_count() {
-        let store = setup_store().await;
-        let fetcher = GammaFetcher::new(store).unwrap();
-
         let gamma_market = GammaMarket {
             condition_id: "0x123".to_string(),
             slug: "btc-up-15min".to_string(),
@@ -424,7 +526,7 @@ mod tests {
             neg_risk: Some(false),
         };
 
-        let result = fetcher.convert_to_historical_market(gamma_market).unwrap();
+        let result = GammaFetcher::convert_to_historical_market(gamma_market).unwrap();
         assert!(result.is_none()); // Should skip market with wrong token count
     }
 
@@ -535,7 +637,7 @@ mod tests {
     #[ignore]
     async fn test_fetch_expired_markets_live() {
         let store = setup_store().await;
-        let fetcher = GammaFetcher::new(store).unwrap();
+        let fetcher = Arc::new(GammaFetcher::new(store).unwrap());
 
         // Fetch BTC markets that expired in the last 7 days
         let end_date = Utc::now();

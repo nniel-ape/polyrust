@@ -1,6 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use polyrust_core::types::OrderSide;
@@ -19,14 +20,29 @@ pub struct BacktestReport {
     pub max_drawdown: Decimal,
     pub sharpe_ratio: Option<Decimal>,
     pub total_trades: usize,
+    pub opening_trades: usize,
+    pub closing_trades: usize,
     pub winning_trades: usize,
     pub losing_trades: usize,
+    pub expired_worthless: usize,
+    pub strategy_exits: usize,
+    pub strategy_wins: usize,
+    pub strategy_losses: usize,
+    pub settled_trades: usize,
+    pub settled_wins: usize,
+    pub settled_worthless: usize,
+    pub force_closed_trades: usize,
+    pub force_closed_wins: usize,
+    pub force_closed_worthless: usize,
+    pub markets_traded: usize,
     pub start_balance: Decimal,
     pub end_balance: Decimal,
     pub duration: Duration,
     pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
 }
+
+pub use crate::engine::CloseReason;
 
 /// A trade record from the backtest with P&L information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,35 +53,54 @@ pub struct BacktestTrade {
     pub price: Decimal,
     pub size: Decimal,
     pub realized_pnl: Option<Decimal>,
+    /// None for buys, Some(reason) for sells
+    pub close_reason: Option<CloseReason>,
 }
 
 impl BacktestReport {
     /// Create a backtest report from engine results.
     ///
-    /// Extracts trades from the Store, computes all metrics, and returns
-    /// a comprehensive report.
+    /// `engine_trades` are the trades returned by `BacktestEngine::run()` which
+    /// carry `close_reason` metadata not stored in the DB.
     pub async fn from_engine_results(
         store: Arc<Store>,
+        engine_trades: Vec<crate::engine::BacktestTrade>,
         start_balance: Decimal,
         start_time: DateTime<Utc>,
         end_time: DateTime<Utc>,
     ) -> BacktestResult<Self> {
-        // Query all trades from Store
+        // Query all trades from Store (canonical source for prices/pnl)
         let stored_trades = store
             .list_trades(None, 10000)
             .await
             .map_err(|e| crate::error::BacktestError::Database(e.to_string()))?;
 
+        // Build a lookup for close_reason from engine trades
+        // Key: "token_id|side|timestamp" to avoid Hash requirement on OrderSide
+        use std::collections::HashMap;
+        let mut reason_lookup: HashMap<String, CloseReason> = HashMap::new();
+        for et in &engine_trades {
+            if let Some(reason) = et.close_reason {
+                let key = format!("{}|{:?}|{}", et.token_id, et.side, et.timestamp.timestamp());
+                reason_lookup.insert(key, reason);
+            }
+        }
+
         // Convert to BacktestTrade format
         let trades: Vec<BacktestTrade> = stored_trades
             .iter()
-            .map(|t| BacktestTrade {
-                timestamp: t.timestamp,
-                token_id: t.token_id.clone(),
-                side: t.side,
-                price: t.price,
-                size: t.size,
-                realized_pnl: t.realized_pnl,
+            .map(|t| {
+                let key = format!("{}|{:?}|{}", t.token_id, t.side, t.timestamp.timestamp());
+                let close_reason = reason_lookup.get(&key).copied();
+                BacktestTrade {
+                    timestamp: t.timestamp,
+                    token_id: t.token_id.clone(),
+                    side: t.side,
+                    price: t.price,
+                    size: t.size,
+                    realized_pnl: t.realized_pnl,
+                    close_reason,
+                }
             })
             .collect();
 
@@ -80,19 +115,66 @@ impl BacktestReport {
 
         let total_pnl = realized_pnl + unrealized_pnl;
 
-        // Compute win/loss statistics (only for closing trades with realized P&L)
-        let winning_trades = trades
+        // Compute trade breakdown
+        let total_trades = trades.len();
+        let opening_trades = trades.iter().filter(|t| t.side == OrderSide::Buy).count();
+        let closing_trades_list: Vec<_> = trades
+            .iter()
+            .filter(|t| t.side == OrderSide::Sell)
+            .collect();
+
+        let closing_trades = closing_trades_list.len();
+        let winning_trades = closing_trades_list
             .iter()
             .filter(|t| t.realized_pnl.unwrap_or(Decimal::ZERO) > Decimal::ZERO)
             .count();
+        let losing_trades = closing_trades_list
+            .iter()
+            .filter(|t| t.realized_pnl.unwrap_or(Decimal::ZERO) < Decimal::ZERO)
+            .count();
+        // Expired worthless = sell at price $0 (total loss on loser token)
+        let expired_worthless = closing_trades_list
+            .iter()
+            .filter(|t| t.price == Decimal::ZERO)
+            .count();
 
-        let losing_trades = trades
+        // Per close-reason breakdown
+        let is_win = |t: &&BacktestTrade| t.realized_pnl.unwrap_or(Decimal::ZERO) > Decimal::ZERO;
+        let is_worthless = |t: &&BacktestTrade| t.price == Decimal::ZERO;
+
+        let strategy_list: Vec<_> = closing_trades_list
+            .iter()
+            .filter(|t| t.close_reason == Some(CloseReason::Strategy))
+            .collect();
+        let strategy_exits = strategy_list.len();
+        let strategy_wins = strategy_list.iter().filter(|t| is_win(t)).count();
+        let strategy_losses = strategy_list
             .iter()
             .filter(|t| t.realized_pnl.unwrap_or(Decimal::ZERO) < Decimal::ZERO)
             .count();
 
-        let total_trades = trades.len();
-        let closing_trades = winning_trades + losing_trades;
+        let settled_list: Vec<_> = closing_trades_list
+            .iter()
+            .filter(|t| t.close_reason == Some(CloseReason::Settlement))
+            .collect();
+        let settled_trades = settled_list.len();
+        let settled_wins = settled_list.iter().filter(|t| is_win(t)).count();
+        let settled_worthless = settled_list.iter().filter(|t| is_worthless(t)).count();
+
+        let force_list: Vec<_> = closing_trades_list
+            .iter()
+            .filter(|t| t.close_reason == Some(CloseReason::ForceClose))
+            .collect();
+        let force_closed_trades = force_list.len();
+        let force_closed_wins = force_list.iter().filter(|t| is_win(t)).count();
+        let force_closed_worthless = force_list.iter().filter(|t| is_worthless(t)).count();
+
+        // Count unique token_ids traded
+        let markets_traded = trades
+            .iter()
+            .map(|t| &t.token_id)
+            .collect::<HashSet<_>>()
+            .len();
 
         let win_rate = if closing_trades > 0 {
             Decimal::from(winning_trades as u64) / Decimal::from(closing_trades as u64)
@@ -120,8 +202,21 @@ impl BacktestReport {
             max_drawdown,
             sharpe_ratio,
             total_trades,
+            opening_trades,
+            closing_trades,
             winning_trades,
             losing_trades,
+            expired_worthless,
+            strategy_exits,
+            strategy_wins,
+            strategy_losses,
+            settled_trades,
+            settled_wins,
+            settled_worthless,
+            force_closed_trades,
+            force_closed_wins,
+            force_closed_worthless,
+            markets_traded,
             start_balance,
             end_balance,
             duration,
@@ -213,26 +308,40 @@ impl BacktestReport {
         s.push('\n');
 
         s.push_str("--- Balance ---\n");
-        s.push_str(&format!("Start balance: ${}\n", self.start_balance));
-        s.push_str(&format!("End balance:   ${}\n", self.end_balance));
+        s.push_str(&format!("Start balance: ${:.2}\n", self.start_balance));
+        s.push_str(&format!("End balance:   ${:.2}\n", self.end_balance));
 
         let pnl_pct = if self.start_balance > Decimal::ZERO {
             format!("{:.2}%", self.total_pnl / self.start_balance * Decimal::from(100))
         } else {
             "N/A".to_string()
         };
-        s.push_str(&format!("Total P&L:     ${} ({})\n",
+        s.push_str(&format!("Total P&L:     ${:.2} ({})\n",
             self.total_pnl,
             pnl_pct));
-        s.push_str(&format!("Realized P&L:  ${}\n", self.realized_pnl));
-        s.push_str(&format!("Unrealized P&L: ${}\n", self.unrealized_pnl));
+        s.push_str(&format!("Realized P&L:  ${:.2}\n", self.realized_pnl));
+        s.push_str(&format!("Unrealized P&L: ${:.2}\n", self.unrealized_pnl));
         s.push('\n');
 
         s.push_str("--- Trade Statistics ---\n");
-        s.push_str(&format!("Total trades:   {}\n", self.total_trades));
-        s.push_str(&format!("Winning trades: {}\n", self.winning_trades));
-        s.push_str(&format!("Losing trades:  {}\n", self.losing_trades));
-        s.push_str(&format!("Win rate:       {:.2}%\n", self.win_rate * Decimal::from(100)));
+        s.push_str(&format!("Total orders:     {}  ({} buys, {} sells)\n",
+            self.total_trades, self.opening_trades, self.closing_trades));
+        s.push_str(&format!("Closing trades:   {}  ({} wins, {} losses, {} expired worthless)\n",
+            self.closing_trades, self.winning_trades, self.losing_trades, self.expired_worthless));
+        if self.strategy_exits > 0 {
+            s.push_str(&format!("  Strategy exits: {}  ({} wins, {} losses)\n",
+                self.strategy_exits, self.strategy_wins, self.strategy_losses));
+        }
+        if self.settled_trades > 0 {
+            s.push_str(&format!("  Settled (expiry): {}  ({} wins, {} expired worthless)\n",
+                self.settled_trades, self.settled_wins, self.settled_worthless));
+        }
+        if self.force_closed_trades > 0 {
+            s.push_str(&format!("  Force-closed:   {}  ({} wins, {} expired worthless)\n",
+                self.force_closed_trades, self.force_closed_wins, self.force_closed_worthless));
+        }
+        s.push_str(&format!("Win rate:         {:.2}%\n", self.win_rate * Decimal::from(100)));
+        s.push_str(&format!("Markets traded:   {}\n", self.markets_traded));
         s.push('\n');
 
         s.push_str("--- Risk Metrics ---\n");
@@ -292,6 +401,7 @@ mod tests {
                 price: dec!(0.6),
                 size: dec!(10),
                 realized_pnl: Some(dec!(10)), // Balance: 1000 + 10 = 1010 (peak)
+                close_reason: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(2000, 0).unwrap(),
@@ -300,6 +410,7 @@ mod tests {
                 price: dec!(0.5),
                 size: dec!(10),
                 realized_pnl: Some(dec!(-30)), // Balance: 1010 - 30 = 980 (trough)
+                close_reason: None,
             },
         ];
 
@@ -319,6 +430,7 @@ mod tests {
                 price: dec!(0.6),
                 size: dec!(10),
                 realized_pnl: Some(dec!(10)),
+                close_reason: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(2000, 0).unwrap(),
@@ -327,6 +439,7 @@ mod tests {
                 price: dec!(0.7),
                 size: dec!(10),
                 realized_pnl: Some(dec!(15)),
+                close_reason: None,
             },
         ];
 
@@ -344,6 +457,7 @@ mod tests {
                 price: dec!(0.6),
                 size: dec!(10),
                 realized_pnl: Some(dec!(10)),
+                close_reason: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(2000, 0).unwrap(),
@@ -352,6 +466,7 @@ mod tests {
                 price: dec!(0.7),
                 size: dec!(10),
                 realized_pnl: Some(dec!(15)),
+                close_reason: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(3000, 0).unwrap(),
@@ -360,6 +475,7 @@ mod tests {
                 price: dec!(0.65),
                 size: dec!(10),
                 realized_pnl: Some(dec!(12)),
+                close_reason: None,
             },
         ];
 
@@ -381,6 +497,7 @@ mod tests {
                 price: dec!(0.6),
                 size: dec!(10),
                 realized_pnl: Some(dec!(10)),
+                close_reason: None,
             },
         ];
 
@@ -398,6 +515,7 @@ mod tests {
                 price: dec!(0.6),
                 size: dec!(10),
                 realized_pnl: Some(dec!(10)),
+                close_reason: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(2000, 0).unwrap(),
@@ -406,6 +524,7 @@ mod tests {
                 price: dec!(0.6),
                 size: dec!(10),
                 realized_pnl: Some(dec!(10)),
+                close_reason: None,
             },
         ];
 
@@ -452,6 +571,7 @@ mod tests {
 
         let report = BacktestReport::from_engine_results(
             store,
+            vec![],
             dec!(1000),
             start_time,
             end_time,
@@ -463,10 +583,11 @@ mod tests {
 
         // Check key summary components
         assert!(summary.contains("Backtest Report"));
-        assert!(summary.contains("Start balance: $1000"));
-        assert!(summary.contains("End balance:   $1005.5"));
-        assert!(summary.contains("Total P&L:     $5.5"));
-        assert!(summary.contains("Total trades:   1"));
+        assert!(summary.contains("Start balance: $1000.00"));
+        assert!(summary.contains("End balance:   $1005.50"));
+        assert!(summary.contains("Total P&L:     $5.50"));
+        assert!(summary.contains("Total orders:     1"));
+        assert!(summary.contains("Closing trades:   1"));
         assert!(summary.contains("Win rate:"));
     }
 
@@ -479,6 +600,7 @@ mod tests {
 
         let report = BacktestReport::from_engine_results(
             store,
+            vec![],
             dec!(1000),
             start_time,
             end_time,

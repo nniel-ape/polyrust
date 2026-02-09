@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use libsql::{params, Builder, Connection, Database};
 use rust_decimal::Decimal;
+use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::error::{BacktestError, BacktestResult};
@@ -48,11 +49,27 @@ pub struct DataFetchLog {
     pub row_count: i64,
 }
 
+/// Historical crypto price from Binance klines (OHLCV).
+#[derive(Debug, Clone)]
+pub struct HistoricalCryptoPrice {
+    pub symbol: String,          // "BTC", "ETH"
+    pub timestamp: DateTime<Utc>,
+    pub open: Decimal,
+    pub high: Decimal,
+    pub low: Decimal,
+    pub close: Decimal,
+    pub volume: Decimal,
+    pub source: String,          // "binance-spot", "binance-futures"
+}
+
 /// Persistent historical data cache using libsql/Turso.
 /// Separate from live Store; reused across backtest runs.
+/// Write operations are serialized via `write_lock` to prevent
+/// transaction interleaving from concurrent async tasks.
 pub struct HistoricalDataStore {
     _db: Database,
     conn: Connection,
+    write_lock: Mutex<()>,
 }
 
 impl HistoricalDataStore {
@@ -68,7 +85,7 @@ impl HistoricalDataStore {
             .connect()
             .map_err(|e| BacktestError::Database(e.to_string()))?;
 
-        let store = Self { _db: db, conn };
+        let store = Self { _db: db, conn, write_lock: Mutex::new(()) };
         store.run_migrations().await?;
         info!(path, "HistoricalDataStore initialized");
         Ok(store)
@@ -82,6 +99,20 @@ impl HistoricalDataStore {
     /// Run all schema migrations (idempotent).
     async fn run_migrations(&self) -> BacktestResult<()> {
         let conn = self.conn();
+
+        // Performance PRAGMAs — WAL enables concurrent reads during writes,
+        // NORMAL sync is safe with WAL, larger cache and in-memory temp tables.
+        // Use execute_batch because journal_mode returns a result row that
+        // execute() rejects with "Execute returned rows".
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA cache_size=-64000;
+             PRAGMA temp_store=MEMORY;"
+        )
+        .await
+        .map_err(|e| BacktestError::Database(e.to_string()))?;
+
         let stmts = [
             // Price timeseries table
             "CREATE TABLE IF NOT EXISTS historical_prices (
@@ -125,6 +156,19 @@ impl HistoricalDataStore {
                 row_count INTEGER NOT NULL
             )",
             "CREATE INDEX IF NOT EXISTS idx_fetch_log_source_token ON data_fetch_log(source, token_id)",
+            // Historical crypto prices (Binance klines)
+            "CREATE TABLE IF NOT EXISTS historical_crypto_prices (
+                symbol TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                open TEXT NOT NULL,
+                high TEXT NOT NULL,
+                low TEXT NOT NULL,
+                close TEXT NOT NULL,
+                volume TEXT NOT NULL,
+                source TEXT NOT NULL,
+                PRIMARY KEY (symbol, timestamp, source)
+            )",
+            "CREATE INDEX IF NOT EXISTS idx_crypto_prices_symbol_ts ON historical_crypto_prices(symbol, timestamp)",
         ];
 
         for stmt in stmts {
@@ -139,57 +183,68 @@ impl HistoricalDataStore {
     // Insert methods
 
     /// Insert multiple historical prices (batch operation).
+    /// Uses `execute_batch` to send all INSERTs in one call per chunk.
     pub async fn insert_historical_prices(&self, prices: Vec<HistoricalPrice>) -> BacktestResult<()> {
         if prices.is_empty() {
             return Ok(());
         }
 
+        let _guard = self.write_lock.lock().await;
         let conn = self.conn();
-        for price in prices {
-            conn.execute(
-                "INSERT OR REPLACE INTO historical_prices (token_id, timestamp, price, source) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    price.token_id,
-                    price.timestamp.timestamp(),
-                    price.price.to_string(),
-                    price.source,
-                ],
-            )
-            .await
-            .map_err(|e| BacktestError::Database(e.to_string()))?;
+
+        for chunk in prices.chunks(500) {
+            let mut sql = String::with_capacity(chunk.len() * 120);
+            for p in chunk {
+                let token_id = p.token_id.replace('\'', "''");
+                let ts = p.timestamp.timestamp();
+                let price = p.price;
+                let source = p.source.replace('\'', "''");
+                sql.push_str(&format!(
+                    "INSERT OR REPLACE INTO historical_prices (token_id, timestamp, price, source) VALUES ('{token_id}', {ts}, '{price}', '{source}');\n"
+                ));
+            }
+            conn.execute_batch(&sql)
+                .await
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
         }
 
         Ok(())
     }
 
     /// Insert multiple historical trades (batch operation).
+    /// Uses `execute_batch` to send all INSERTs in one call per chunk.
     pub async fn insert_historical_trades(&self, trades: Vec<HistoricalTrade>) -> BacktestResult<()> {
         if trades.is_empty() {
             return Ok(());
         }
 
+        let _guard = self.write_lock.lock().await;
         let conn = self.conn();
-        for trade in trades {
-            conn.execute(
-                "INSERT OR REPLACE INTO historical_trades (id, token_id, timestamp, price, size, side, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    trade.id,
-                    trade.token_id,
-                    trade.timestamp.timestamp(),
-                    trade.price.to_string(),
-                    trade.size.to_string(),
-                    trade.side,
-                    trade.source,
-                ],
-            )
-            .await
-            .map_err(|e| BacktestError::Database(e.to_string()))?;
+
+        for chunk in trades.chunks(500) {
+            let mut sql = String::with_capacity(chunk.len() * 180);
+            for t in chunk {
+                let id = t.id.replace('\'', "''");
+                let token_id = t.token_id.replace('\'', "''");
+                let ts = t.timestamp.timestamp();
+                let price = t.price;
+                let size = t.size;
+                let side = t.side.replace('\'', "''");
+                let source = t.source.replace('\'', "''");
+                sql.push_str(&format!(
+                    "INSERT OR REPLACE INTO historical_trades (id, token_id, timestamp, price, size, side, source) VALUES ('{id}', '{token_id}', {ts}, '{price}', '{size}', '{side}', '{source}');\n"
+                ));
+            }
+            conn.execute_batch(&sql)
+                .await
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
         }
 
         Ok(())
     }
 
     /// Insert a single historical market.
+    /// No write_lock needed — WAL mode handles concurrent single-statement writes.
     pub async fn insert_historical_market(&self, market: HistoricalMarket) -> BacktestResult<()> {
         let conn = self.conn();
         conn.execute(
@@ -212,6 +267,7 @@ impl HistoricalDataStore {
     }
 
     /// Log a data fetch operation.
+    /// No write_lock needed — WAL mode handles concurrent single-statement writes.
     pub async fn insert_fetch_log(&self, log: DataFetchLog) -> BacktestResult<()> {
         let conn = self.conn();
         conn.execute(
@@ -431,6 +487,84 @@ impl HistoricalDataStore {
         }
 
         Ok(logs)
+    }
+
+    // Historical crypto price methods (Binance klines)
+
+    /// Insert multiple historical crypto prices (batch operation).
+    pub async fn insert_crypto_prices(&self, prices: Vec<HistoricalCryptoPrice>) -> BacktestResult<()> {
+        if prices.is_empty() {
+            return Ok(());
+        }
+
+        let _guard = self.write_lock.lock().await;
+        let conn = self.conn();
+
+        for chunk in prices.chunks(500) {
+            let mut sql = String::with_capacity(chunk.len() * 200);
+            for p in chunk {
+                let symbol = p.symbol.replace('\'', "''");
+                let ts = p.timestamp.timestamp();
+                let source = p.source.replace('\'', "''");
+                sql.push_str(&format!(
+                    "INSERT OR REPLACE INTO historical_crypto_prices (symbol, timestamp, open, high, low, close, volume, source) VALUES ('{symbol}', {ts}, '{}', '{}', '{}', '{}', '{}', '{source}');\n",
+                    p.open, p.high, p.low, p.close, p.volume
+                ));
+            }
+            conn.execute_batch(&sql)
+                .await
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    /// Get historical crypto prices for a symbol within a time range.
+    pub async fn get_crypto_prices(
+        &self,
+        symbol: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> BacktestResult<Vec<HistoricalCryptoPrice>> {
+        let conn = self.conn();
+        let mut rows = conn
+            .query(
+                "SELECT symbol, timestamp, open, high, low, close, volume, source FROM historical_crypto_prices WHERE symbol = ?1 AND timestamp >= ?2 AND timestamp <= ?3 ORDER BY timestamp ASC",
+                params![symbol, start.timestamp(), end.timestamp()],
+            )
+            .await
+            .map_err(|e| BacktestError::Database(e.to_string()))?;
+
+        let mut prices = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| BacktestError::Database(e.to_string()))? {
+            let symbol: String = row.get(0).map_err(|e| BacktestError::Database(e.to_string()))?;
+            let timestamp: i64 = row.get(1).map_err(|e| BacktestError::Database(e.to_string()))?;
+            let open_str: String = row.get(2).map_err(|e| BacktestError::Database(e.to_string()))?;
+            let high_str: String = row.get(3).map_err(|e| BacktestError::Database(e.to_string()))?;
+            let low_str: String = row.get(4).map_err(|e| BacktestError::Database(e.to_string()))?;
+            let close_str: String = row.get(5).map_err(|e| BacktestError::Database(e.to_string()))?;
+            let volume_str: String = row.get(6).map_err(|e| BacktestError::Database(e.to_string()))?;
+            let source: String = row.get(7).map_err(|e| BacktestError::Database(e.to_string()))?;
+
+            let parse = |s: &str, field: &str| -> BacktestResult<Decimal> {
+                s.parse::<Decimal>()
+                    .map_err(|e| BacktestError::Database(format!("Failed to parse {field}: {e}")))
+            };
+
+            prices.push(HistoricalCryptoPrice {
+                symbol,
+                timestamp: DateTime::from_timestamp(timestamp, 0)
+                    .ok_or_else(|| BacktestError::Database("Invalid timestamp".to_string()))?,
+                open: parse(&open_str, "open")?,
+                high: parse(&high_str, "high")?,
+                low: parse(&low_str, "low")?,
+                close: parse(&close_str, "close")?,
+                volume: parse(&volume_str, "volume")?,
+                source,
+            });
+        }
+
+        Ok(prices)
     }
 }
 

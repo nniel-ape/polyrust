@@ -270,7 +270,7 @@ pub struct ArbitrageConfig {
 
 The backtesting system (`crates/polyrust-backtest`) allows strategy evaluation on historical data before live/paper trading. It consists of two subsystems:
 
-1. **Historical data pipeline** — fetch/cache market data from Polymarket APIs and Goldsky subgraphs
+1. **Historical data pipeline** — fetch/cache trade data from Goldsky subgraph, market metadata from Gamma API
 2. **Backtest engine** — deterministic event replay through strategies with simulated fills
 
 ### Architecture
@@ -281,19 +281,19 @@ Two isolated databases:
 
 ### Data Sources
 
-- **CLOB API** (`/prices-history`, `/trades`) — last ~7 days, high-fidelity price timeseries
 - **Gamma API** (`/markets`) — market discovery and metadata
 - **Goldsky activity subgraph** — unlimited historical trade data via GraphQL
 
-Smart routing: recent data (last 7 days) uses CLOB API, older data uses Goldsky subgraph. DataFetcher checks `data_fetch_log` before fetching to avoid duplicate API calls.
+All trade data comes from the Goldsky subgraph (no CLOB API dependency). DataFetcher checks `data_fetch_log` before fetching to avoid duplicate API calls. PriceChange events are synthesized from trade data by the engine at configured `data_fidelity_secs` granularity.
 
 ### Backtest Engine
 
 Synchronous deterministic event replay:
-1. Load cached historical data from `backtest_data.db` for configured market_ids and date range
-2. Sort all events chronologically (prices + trades)
-3. For each event: advance simulated clock, update market data, call `strategy.on_event()`, execute actions with immediate fills at current market price
-4. After replay: finalize results, generate `BacktestReport` with P&L metrics
+1. Load cached trade data from `backtest_data.db` for configured market_ids and date range
+2. Synthesize PriceChange events from trades at `data_fidelity_secs` granularity (bucketed by time window)
+3. Sort all events chronologically (trades + synthetic prices + lifecycle events)
+4. For each event: advance simulated clock, update market data, call `strategy.on_event()`, execute actions with immediate fills at current market price
+5. After replay: finalize results, generate `BacktestReport` with P&L metrics
 
 Fill mode: Immediate only (historical orderbook depth not available from Polymarket APIs). Fills simulate at historical trade price with configurable fee model.
 

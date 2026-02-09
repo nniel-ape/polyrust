@@ -124,11 +124,11 @@ async fn main() -> anyhow::Result<()> {
     .await;
 
     tracing::info!("Running backtest simulation");
-    let _trades = engine.run().await?;
+    let trades = engine.run().await?;
 
     // Generate report from results
     let report =
-        BacktestReport::from_engine_results(results_store, initial_balance, start_time, end_time)
+        BacktestReport::from_engine_results(results_store, trades, initial_balance, start_time, end_time)
             .await?;
 
     // Print results

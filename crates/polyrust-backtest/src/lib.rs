@@ -6,9 +6,9 @@ pub mod report;
 
 pub use config::{BacktestConfig, FeeConfig};
 pub use data::{
-    DataFetchConfig, DataFetcher, HistoricalDataStore, HistoricalMarket, HistoricalPrice,
-    HistoricalTrade,
+    DataFetchConfig, DataFetcher, HistoricalCryptoPrice, HistoricalDataStore, HistoricalMarket,
+    HistoricalPrice, HistoricalTrade,
 };
-pub use engine::BacktestEngine;
+pub use engine::{BacktestEngine, BacktestTrade, CloseReason};
 pub use error::{BacktestError, BacktestResult};
 pub use report::BacktestReport;

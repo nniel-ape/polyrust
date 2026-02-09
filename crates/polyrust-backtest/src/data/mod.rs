@@ -6,6 +6,7 @@ pub mod subgraph_fetcher;
 pub use fetcher::{CachedMarketData, DataFetchConfig, DataFetcher};
 pub use gamma_fetcher::GammaFetcher;
 pub use store::{
-    DataFetchLog, HistoricalDataStore, HistoricalMarket, HistoricalPrice, HistoricalTrade,
+    DataFetchLog, HistoricalCryptoPrice, HistoricalDataStore, HistoricalMarket, HistoricalPrice,
+    HistoricalTrade,
 };
 pub use subgraph_fetcher::SubgraphFetcher;
