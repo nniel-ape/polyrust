@@ -216,9 +216,10 @@ impl TailEndStrategy {
 
         // Check sustained price direction (momentum filter)
         let min_sustained = self.base.config.tailend.min_sustained_secs;
+        let now = ctx.now().await;
         let sustained = self
             .base
-            .check_sustained_direction(&market.coin, market.reference_price, predicted, min_sustained)
+            .check_sustained_direction(&market.coin, market.reference_price, predicted, min_sustained, now)
             .await;
 
         if !sustained {
@@ -236,7 +237,7 @@ impl TailEndStrategy {
         let max_volatility = self.base.config.tailend.max_recent_volatility;
         if let Some(volatility) = self
             .base
-            .max_recent_volatility(&market.coin, market.reference_price, 10)
+            .max_recent_volatility(&market.coin, market.reference_price, 10, now)
             .await
             && volatility > max_volatility
         {
@@ -486,9 +487,24 @@ impl Strategy for TailEndStrategy {
                 ..
             }) => {
                 // Record price and promote any pending markets
+                let now = ctx.now().await;
                 let (_, promote_actions) =
-                    self.base.record_price(symbol, *price, source).await;
+                    self.base.record_price(symbol, *price, source, now).await;
                 let mut result = promote_actions;
+
+                // Fast pre-filter: skip coins where no market is near expiration.
+                // This avoids acquiring active_markets lock + iterating for 99%+ of events.
+                {
+                    let nearest = self.base.coin_nearest_expiry.read().await;
+                    if let Some(expiry) = nearest.get(symbol.as_str()) {
+                        let now = ctx.now().await;
+                        let secs_remaining = (*expiry - now).num_seconds();
+                        if secs_remaining > self.base.config.tailend.time_threshold_secs as i64 {
+                            self.base.record_tailend_skip("coin_not_near_expiry").await;
+                            return Ok(result);
+                        }
+                    }
+                }
 
                 // Find active markets for this coin
                 let market_ids: Vec<MarketId> = {
@@ -568,7 +584,9 @@ impl Strategy for TailEndStrategy {
                             match md.orderbooks.get(&opp.token_id) {
                                 Some(ob) => {
                                     let max_age = self.base.config.tailend.stale_ob_secs;
-                                    let age = Utc::now()
+                                    let age = ctx
+                                        .now()
+                                        .await
                                         .signed_duration_since(ob.timestamp)
                                         .num_seconds();
                                     if age > max_age {
@@ -831,8 +849,9 @@ impl Strategy for TailEndStrategy {
             }
 
             Event::OrderUpdate(OrderEvent::CancelFailed { order_id, reason }) => {
-                self.base.handle_cancel_failed(order_id, reason).await;
-                vec![]
+                let (_found, fill_actions) =
+                    self.base.handle_cancel_failed(order_id, reason).await;
+                fill_actions
             }
 
             _ => vec![],

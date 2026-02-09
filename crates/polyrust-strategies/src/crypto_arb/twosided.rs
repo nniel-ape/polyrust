@@ -300,8 +300,9 @@ impl Strategy for TwoSidedStrategy {
                 ..
             }) => {
                 // Record price and promote any pending markets
+                let now = ctx.now().await;
                 let (_, promote_actions) =
-                    self.base.record_price(symbol, *price, source).await;
+                    self.base.record_price(symbol, *price, source, now).await;
                 let mut result = promote_actions;
 
                 // Find active markets for this coin
@@ -514,8 +515,9 @@ impl Strategy for TwoSidedStrategy {
             }
 
             Event::OrderUpdate(OrderEvent::CancelFailed { order_id, reason }) => {
-                self.base.handle_cancel_failed(order_id, reason).await;
-                vec![]
+                let (_found, fill_actions) =
+                    self.base.handle_cancel_failed(order_id, reason).await;
+                fill_actions
             }
 
             Event::OrderUpdate(OrderEvent::Rejected { token_id, .. }) => {

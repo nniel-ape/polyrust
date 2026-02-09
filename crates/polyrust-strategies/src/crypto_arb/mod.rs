@@ -20,7 +20,8 @@ mod types;
 pub use base::CryptoArbBase;
 pub use config::{
     ArbitrageConfig, ConfirmedConfig, CorrelationConfig, FeeConfig, OrderConfig, PerformanceConfig,
-    SizingConfig, SpikeConfig, StopLossConfig, TailEndConfig, TwoSidedConfig,
+    ReferenceQualityLevel, SizingConfig, SpikeConfig, StopLossConfig, TailEndConfig,
+    TwoSidedConfig,
 };
 pub use confirmed::ConfirmedStrategy;
 pub use crosscorr::CrossCorrStrategy;

@@ -447,8 +447,9 @@ impl Strategy for CrossCorrStrategy {
                 ..
             }) => {
                 // Record price, promote pending markets, and check for spike
+                let now = ctx.now().await;
                 let (spike, promote_actions) =
-                    self.base.record_price(symbol, *price, source).await;
+                    self.base.record_price(symbol, *price, source, now).await;
 
                 // Only process if spike exceeds correlation threshold
                 let change_pct = match spike {
@@ -680,8 +681,9 @@ impl Strategy for CrossCorrStrategy {
             }
 
             Event::OrderUpdate(OrderEvent::CancelFailed { order_id, reason }) => {
-                self.base.handle_cancel_failed(order_id, reason).await;
-                vec![]
+                let (_found, fill_actions) =
+                    self.base.handle_cancel_failed(order_id, reason).await;
+                fill_actions
             }
 
             Event::OrderUpdate(OrderEvent::Rejected { token_id, reason, .. }) => {

@@ -2,7 +2,7 @@ use crate::config::AutoClaimConfig;
 use crate::context::StrategyContext;
 use crate::error::Result;
 use crate::event_bus::EventBus;
-use crate::events::{Event, MarketDataEvent, OrderEvent};
+use crate::events::{Event, MarketDataEvent, OrderEvent, SignalEvent};
 use crate::execution::{ExecutionBackend, RedeemRequest, RedeemResult};
 use crate::types::MarketId;
 use chrono::{DateTime, Duration, Utc};
@@ -116,6 +116,35 @@ impl ClaimMonitor {
             while let Some(event) = expiry_events.recv().await {
                 if let Event::MarketData(MarketDataEvent::MarketExpired(market_id)) = event {
                     self_expiry.on_market_expired(market_id).await;
+                }
+            }
+        });
+
+        // Spawn matched-fill signal listener — detects GTC orders filled by counterparties
+        let mut signal_events = self.event_bus.subscribe_topics(&["signal"]);
+        let self_signals = self.clone();
+        tokio::spawn(async move {
+            while let Some(event) = signal_events.recv().await {
+                if let Event::Signal(SignalEvent {
+                    signal_type,
+                    payload,
+                    ..
+                }) = event
+                    && signal_type == "matched-fill"
+                    && let Some(market_id) =
+                        payload.get("market_id").and_then(|v| v.as_str())
+                {
+                    let is_new = self_signals
+                        .traded_markets
+                        .write()
+                        .await
+                        .insert(market_id.to_string());
+                    if is_new {
+                        info!(
+                            market_id = %market_id,
+                            "Recorded matched fill for claim tracking"
+                        );
+                    }
                 }
             }
         });
@@ -295,11 +324,10 @@ impl ClaimMonitor {
                     }
                 }
                 Ok(false) => {
-                    // Not yet resolved, schedule next check
-                    debug!("Market {} not yet resolved", market_id);
-                    if self.handle_retry(claim) {
-                        to_remove.push(market_id.clone());
-                    }
+                    // Not yet resolved — reschedule without burning a retry
+                    debug!("Market {} not yet resolved, will recheck", market_id);
+                    claim.next_check =
+                        now + Duration::seconds(self.config.poll_interval_secs as i64);
                 }
                 Err(e) => {
                     let err_str = e.to_string();

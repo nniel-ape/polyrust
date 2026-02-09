@@ -425,10 +425,10 @@ async fn base_record_price_and_detect_spike() {
     let base = make_base_no_chainlink();
 
     // Record initial price
-    let _ = base.record_price("BTC", dec!(50000), "binance").await;
+    let _ = base.record_price("BTC", dec!(50000), "binance", Utc::now()).await;
 
     // Small move - no spike
-    let (spike, _) = base.record_price("BTC", dec!(50100), "binance").await;
+    let (spike, _) = base.record_price("BTC", dec!(50100), "binance", Utc::now()).await;
     assert!(spike.is_none());
 
     // Big move - spike detected
@@ -443,7 +443,7 @@ async fn base_record_price_and_detect_spike() {
         );
     }
 
-    let spike = base.detect_spike("TEST", dec!(50500)).await;
+    let spike = base.detect_spike("TEST", dec!(50500), Utc::now()).await;
     // 500/50000 = 1% > 0.5% threshold
     assert!(spike.is_some());
     assert!(spike.unwrap().abs() >= dec!(0.005));
@@ -643,12 +643,12 @@ async fn check_sustained_direction_up() {
 
     // Should detect sustained up direction when looking back 5 seconds
     assert!(
-        base.check_sustained_direction("BTC", reference, OutcomeSide::Up, 5)
+        base.check_sustained_direction("BTC", reference, OutcomeSide::Up, 5, Utc::now())
             .await
     );
     // Should NOT detect sustained down direction
     assert!(
-        !base.check_sustained_direction("BTC", reference, OutcomeSide::Down, 5)
+        !base.check_sustained_direction("BTC", reference, OutcomeSide::Down, 5, Utc::now())
             .await
     );
 }
@@ -672,7 +672,7 @@ async fn check_sustained_direction_not_sustained() {
 
     // Should NOT detect sustained up direction (one entry within window was below)
     assert!(
-        !base.check_sustained_direction("BTC", reference, OutcomeSide::Up, 5)
+        !base.check_sustained_direction("BTC", reference, OutcomeSide::Up, 5, Utc::now())
             .await
     );
 }
@@ -694,7 +694,7 @@ async fn max_recent_volatility_no_wick() {
         history.insert("BTC".to_string(), entries);
     }
 
-    let volatility = base.max_recent_volatility("BTC", reference, 10).await;
+    let volatility = base.max_recent_volatility("BTC", reference, 10, Utc::now()).await;
     assert!(volatility.is_some());
     // Max price was 50200, reference is 50000
     // Volatility = (50200 - 50000) / 50000 = 0.004
@@ -718,7 +718,7 @@ async fn max_recent_volatility_with_wick() {
         history.insert("BTC".to_string(), entries);
     }
 
-    let volatility = base.max_recent_volatility("BTC", reference, 10).await;
+    let volatility = base.max_recent_volatility("BTC", reference, 10, Utc::now()).await;
     assert!(volatility.is_some());
     // Max price was 51000, reference is 50000
     // Volatility = (51000 - 50000) / 50000 = 0.02
