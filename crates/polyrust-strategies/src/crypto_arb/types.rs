@@ -133,8 +133,6 @@ impl MarketWithReference {
 /// Each mode represents a different market condition or signal type:
 /// - **TailEnd**: Highest confidence, market near certainty + time urgency
 /// - **TwoSided**: Risk-free arbitrage when both outcomes mispriced
-/// - **Confirmed**: Standard directional bet with dynamic confidence model
-/// - **CrossCorrelated**: Correlation-based signal from leader coin spike
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ArbitrageMode {
     /// Tail-end mode: < 2 min remaining, market price >= 90%.
@@ -143,28 +141,6 @@ pub enum ArbitrageMode {
     /// Two-sided mode: both outcomes priced below combined $0.98.
     /// Guaranteed profit regardless of outcome. Uses batch GTC orders.
     TwoSided,
-    /// Confirmed mode: standard directional with dynamic confidence.
-    /// Uses GTC maker orders to avoid taker fees.
-    Confirmed,
-    /// Cross-market correlation: follower coin triggered by leader spike.
-    /// Confidence discounted by correlation factor for uncertainty.
-    CrossCorrelated {
-        /// The leader coin that spiked (e.g. "BTC").
-        leader: String,
-    },
-}
-
-impl ArbitrageMode {
-    /// Get the canonical mode variant for performance tracking.
-    /// Strips the leader field from CrossCorrelated to unify stats across all leaders.
-    pub fn canonical(&self) -> Self {
-        match self {
-            ArbitrageMode::CrossCorrelated { .. } => ArbitrageMode::CrossCorrelated {
-                leader: String::new(),
-            },
-            other => other.clone(),
-        }
-    }
 }
 
 impl std::fmt::Display for ArbitrageMode {
@@ -172,8 +148,6 @@ impl std::fmt::Display for ArbitrageMode {
         match self {
             ArbitrageMode::TailEnd => write!(f, "TailEnd"),
             ArbitrageMode::TwoSided => write!(f, "TwoSided"),
-            ArbitrageMode::Confirmed => write!(f, "Confirmed"),
-            ArbitrageMode::CrossCorrelated { leader } => write!(f, "Cross({})", leader),
         }
     }
 }
@@ -417,8 +391,10 @@ pub struct OpenLimitOrder {
     pub reference_price: Decimal,
     /// Coin symbol (e.g. "BTC").
     pub coin: String,
-    /// Instant when order was placed (for staleness check).
-    pub placed_at: tokio::time::Instant,
+    /// Timestamp when order was placed (for staleness check).
+    /// Uses `DateTime<Utc>` instead of `tokio::time::Instant` so that
+    /// backtests with simulated time can correctly detect stale orders.
+    pub placed_at: DateTime<Utc>,
     /// Trading mode that generated this order.
     pub mode: ArbitrageMode,
     /// Kelly fraction used for sizing (None if fixed).

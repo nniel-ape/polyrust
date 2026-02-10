@@ -1002,8 +1002,20 @@ impl BacktestEngine {
                 }
                 Ok(None)
             }
+            Action::CancelOrder(order_id) => {
+                // Feed OrderEvent::Cancelled back to the strategy so it can
+                // clean up open_limit_orders and unblock has_market_exposure.
+                let cancelled_event =
+                    Event::OrderUpdate(OrderEvent::Cancelled(order_id.clone()));
+                let actions = self.strategy.on_event(&cancelled_event, &self.ctx).await?;
+                for action in actions {
+                    // Use Box::pin to avoid infinite future size from recursion
+                    Box::pin(self.execute_action(action)).await?;
+                }
+                Ok(None)
+            }
             _ => {
-                // Other actions (CancelOrder, EmitSignal, etc.) are not simulated in backtest
+                // Other actions (EmitSignal, etc.) are not simulated in backtest
                 debug!("Ignoring action: {:?}", action);
                 Ok(None)
             }

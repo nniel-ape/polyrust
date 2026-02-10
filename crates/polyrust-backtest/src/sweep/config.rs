@@ -88,6 +88,10 @@ pub struct TailEndSweepParams {
     /// Values are threshold ranges for each bucket.
     /// time_threshold_secs is auto-derived as max bucket time.
     pub dynamic_thresholds: Option<DynamicThresholdsSweep>,
+    /// Post-entry exit drop threshold sweep.
+    pub post_entry_exit_drop: Option<ParamRange>,
+    /// Post-entry window seconds sweep.
+    pub post_entry_window_secs: Option<IntParamRange>,
 }
 
 /// Sweep parameters for sizing config fields.
@@ -107,6 +111,8 @@ pub struct StopLossSweepParams {
     pub reversal_pct: Option<ParamRange>,
     pub min_drop: Option<ParamRange>,
     pub trailing_distance: Option<ParamRange>,
+    /// Minimum seconds remaining for stop-loss to be active.
+    pub min_remaining_secs: Option<IntParamRange>,
 }
 
 /// Top-level sweep configuration.

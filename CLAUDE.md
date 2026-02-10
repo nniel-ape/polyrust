@@ -105,7 +105,7 @@ Copy `config.example.toml` → `config.toml` and customize. Environment variable
 Paper mode: `[paper] enabled = true` or `POLY_PAPER_TRADING=true`
 Docker deployment: Set `POLY_DASHBOARD_HOST=0.0.0.0` in `docker-compose.yml` to allow access from host machine.
 
-Strategy configuration: Add `[arbitrage]` section (and nested `[arbitrage.tailend]`, `[arbitrage.twosided]`, `[arbitrage.confirmed]`, `[arbitrage.correlation]`) to `config.toml`. All trading modes are disabled by default and must be explicitly enabled with `enabled = true`. See `config.example.toml` for the complete reference.
+Strategy configuration: Add `[arbitrage]` section (and nested `[arbitrage.tailend]`, `[arbitrage.twosided]`) to `config.toml`. All trading modes are disabled by default and must be explicitly enabled with `enabled = true`. See `config.example.toml` for the complete reference.
 
 Backtest configuration: Add `[backtest]` section to `config.toml` or use env overrides (`POLY_BACKTEST_START`, `POLY_BACKTEST_END`, etc.). Backtesting evaluates strategies on historical data without live/paper trading. See `config.example.toml` for the complete reference.
 
@@ -182,11 +182,9 @@ See `examples/simple_strategy.rs` for a complete runnable example.
 
 ## Reference Strategy: Crypto Arbitrage
 
-Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-minute Up/Down crypto markets with four modes:
+Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-minute Up/Down crypto markets with two modes:
 1. **Tail-End** (<2 min remaining, market >= 90%) — highest confidence
 2. **Two-Sided** (both outcomes < $1 combined) — guaranteed profit
-3. **Confirmed** (dynamic confidence model) — standard directional trading
-4. **Cross-Correlated** (follower coin triggered by leader spike) — correlation-based signals
 
 ### Strategy Configuration
 
@@ -194,8 +192,6 @@ The crypto arbitrage strategy is configured via the `[arbitrage]` section in `co
 
 - `TailEndStrategy` — high-confidence trades near expiration
 - `TwoSidedStrategy` — risk-free arbitrage
-- `ConfirmedStrategy` — directional trades with confidence model
-- `CrossCorrStrategy` — correlation-based signals
 
 Each mode is conditionally registered with the engine based on its `enabled` flag.
 
@@ -212,8 +208,6 @@ pub struct ArbitrageConfig {
     // Per-mode configs (each mode disabled by default)
     pub tailend: TailEndConfig,       // TailEnd mode (enabled, time_threshold_secs, ask_threshold)
     pub twosided: TwoSidedConfig,     // TwoSided mode (enabled, combined_threshold)
-    pub confirmed: ConfirmedConfig,   // Confirmed mode (enabled, min_confidence, min_margin)
-    pub correlation: CorrelationConfig, // Cross-market correlation pairs
 
     // Shared configs (all with #[serde(default)])
     pub fee: FeeConfig,           // Taker fee model (default 3.15% at 50/50)
@@ -229,12 +223,10 @@ pub struct ArbitrageConfig {
 
 - **TailEndConfig**: Per-mode toggle (`enabled`), `time_threshold_secs` (120), `ask_threshold` (0.90)
 - **TwoSidedConfig**: Per-mode toggle (`enabled`), `combined_threshold` (0.98)
-- **ConfirmedConfig**: Per-mode toggle (`enabled`), `min_confidence` (0.50), `min_margin` (0.02)
-- **CorrelationConfig**: Per-mode toggle (`enabled`), cross-market pairs, `discount_factor` (0.7)
 - **FeeConfig**: Taker fee rate for net profit margin calculation
 - **SpikeConfig**: Price spike detection (threshold_pct, window_secs, history_size)
 - **OrderConfig**: Hybrid order mode (hybrid_mode, limit_offset, max_age_secs)
-  - GTC maker orders for Confirmed/TwoSided modes (0% fee)
+  - GTC maker orders for TwoSided mode (0% fee)
   - FOK taker orders for TailEnd mode (speed matters)
 - **SizingConfig**: Kelly criterion sizing (base_size, kelly_multiplier, min/max_size, use_kelly)
   - Scales position size with confidence and edge
@@ -245,7 +237,7 @@ pub struct ArbitrageConfig {
   - trailing_enabled, trailing_distance: lock in profits as bid rises
   - time_decay: tighten stops near expiration
 - **PerformanceConfig**: Per-mode tracking and auto-disable
-  - Tracks win rate, P&L per mode (TailEnd, TwoSided, Confirmed, CrossCorrelated)
+  - Tracks win rate, P&L per mode (TailEnd, TwoSided)
   - Auto-disable modes with low win rate after min_trades
 
 ### Key Features
@@ -256,7 +248,6 @@ pub struct ArbitrageConfig {
 - **Spike detection**: Pre-filters small moves, triggers evaluation only on significant price changes or when delta exceeds fee+margin threshold
 - **Trailing stop-loss**: Locks in profits as position moves favorably, with optional time decay near expiration
 - **Batch order API**: TwoSided mode places both legs in a single API call for atomic execution
-- **Cross-market correlation**: Leader coin spikes (BTC) generate signals for follower coins (ETH, SOL)
 - **Performance tracking**: Per-mode statistics with optional auto-disable for underperforming modes
 
 ## Polymarket API Endpoints

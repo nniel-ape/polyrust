@@ -10,9 +10,8 @@ use polyrust_execution::{FillMode, LiveBackend, PaperBackend};
 use polyrust_market::{BinanceFeed, ClobFeed, DiscoveryConfig, DiscoveryFeed, MarketDataFeed, PriceFeed};
 use polyrust_store::Store;
 use polyrust_strategies::{
-    ArbitrageConfig, ConfirmedDashboard, ConfirmedStrategy, CrossCorrDashboard, CrossCorrStrategy,
-    CryptoArbBase, CryptoArbDashboard, ReferenceQualityLevel, TailEndDashboard, TailEndStrategy,
-    TwoSidedDashboard, TwoSidedStrategy,
+    ArbitrageConfig, CryptoArbBase, CryptoArbDashboard, ReferenceQualityLevel, TailEndDashboard,
+    TailEndStrategy, TwoSidedDashboard, TwoSidedStrategy,
 };
 use serde::Deserialize;
 
@@ -131,8 +130,6 @@ async fn main() -> anyhow::Result<()> {
     info!(
         tailend_enabled = arb_config.tailend.enabled,
         twosided_enabled = arb_config.twosided.enabled,
-        confirmed_enabled = arb_config.confirmed.enabled,
-        crosscorr_enabled = arb_config.correlation.enabled,
         "Loaded arbitrage config"
     );
     let base = Arc::new(CryptoArbBase::new(
@@ -164,16 +161,6 @@ async fn main() -> anyhow::Result<()> {
         builder = builder.strategy(TwoSidedStrategy::new(Arc::clone(&base)));
     }
 
-    if arb_config.confirmed.enabled {
-        info!("Confirmed mode enabled");
-        builder = builder.strategy(ConfirmedStrategy::new(Arc::clone(&base)));
-    }
-
-    if arb_config.correlation.enabled {
-        info!("CrossCorr mode enabled");
-        builder = builder.strategy(CrossCorrStrategy::new(Arc::clone(&base)));
-    }
-
     // Always register per-mode dashboards so overview links don't 404.
     // Each dashboard already renders its enabled/disabled status.
     builder = builder.strategy(DashboardStrategyWrapper::new(
@@ -183,14 +170,6 @@ async fn main() -> anyhow::Result<()> {
     builder = builder.strategy(DashboardStrategyWrapper::new(
         "crypto-arb-twosided-dashboard",
         Box::new(TwoSidedDashboard::new(Arc::clone(&base))),
-    ));
-    builder = builder.strategy(DashboardStrategyWrapper::new(
-        "crypto-arb-confirmed-dashboard",
-        Box::new(ConfirmedDashboard::new(Arc::clone(&base))),
-    ));
-    builder = builder.strategy(DashboardStrategyWrapper::new(
-        "crypto-arb-crosscorr-dashboard",
-        Box::new(CrossCorrDashboard::new(Arc::clone(&base))),
     ));
 
     if !arb_config.any_mode_enabled() {
@@ -632,14 +611,6 @@ async fn run_backtest() -> anyhow::Result<()> {
             let base = Arc::new(CryptoArbBase::new(arb_config.clone(), vec![]));
             Box::new(TwoSidedStrategy::new(base))
         }
-        "crypto-arb-confirmed" => {
-            let base = Arc::new(CryptoArbBase::new(arb_config.clone(), vec![]));
-            Box::new(ConfirmedStrategy::new(base))
-        }
-        "crypto-arb-crosscorr" => {
-            let base = Arc::new(CryptoArbBase::new(arb_config.clone(), vec![]));
-            Box::new(CrossCorrStrategy::new(base))
-        }
         other => {
             return Err(anyhow::anyhow!("Unknown strategy name: {}", other));
         }
@@ -835,12 +806,20 @@ async fn run_backtest_sweep() -> anyhow::Result<()> {
     report.sort_by(&rank_by);
     report.print_table(top_n);
 
+    // Sensitivity analysis
+    let sensitivity = report.sensitivity_analysis();
+    sensitivity.print_table();
+
     // Export if configured
     if let Some(ref path) = csv_path {
         report.export_csv(path)?;
+        let sens_path = path.replace(".csv", "_sensitivity.csv");
+        sensitivity.export_csv(&sens_path)?;
     }
     if let Some(ref path) = json_path {
         report.export_json(path)?;
+        let sens_path = path.replace(".json", "_sensitivity.json");
+        sensitivity.export_json(&sens_path)?;
     }
 
     info!("Backtest sweep complete");

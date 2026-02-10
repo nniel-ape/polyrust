@@ -165,8 +165,8 @@ pub fn fmt_market_price(price: Decimal) -> String {
 
 /// Shared state and utilities for all crypto arbitrage strategies.
 ///
-/// This struct holds all the mutable state that is shared between the four
-/// strategy implementations (TailEnd, TwoSided, Confirmed, CrossCorrelated).
+/// This struct holds all the mutable state that is shared between the two
+/// strategy implementations (TailEnd, TwoSided).
 /// Using a shared base avoids duplication and ensures consistent state.
 #[allow(clippy::type_complexity)]
 pub struct CryptoArbBase {
@@ -204,15 +204,16 @@ pub struct CryptoArbBase {
     /// Used by render_view() to display UP/DOWN market prices.
     pub cached_asks: RwLock<HashMap<TokenId, Decimal>>,
     /// Throttle for dashboard-update signal emission (~5 seconds).
-    pub last_dashboard_emit: RwLock<Option<tokio::time::Instant>>,
+    pub last_dashboard_emit: RwLock<Option<DateTime<Utc>>>,
     /// Throttle for periodic pipeline status summary (~60 seconds).
-    pub last_status_log: RwLock<Option<tokio::time::Instant>>,
+    pub last_status_log: RwLock<Option<DateTime<Utc>>>,
     /// FOK rejection cooldowns per market — prevents retry storms.
-    pub fok_cooldowns: RwLock<HashMap<MarketId, tokio::time::Instant>>,
+    /// Uses `DateTime<Utc>` so backtests with simulated time work correctly.
+    pub fok_cooldowns: RwLock<HashMap<MarketId, DateTime<Utc>>>,
     /// Stop-loss rejection cooldowns per token — prevents retry storms on sell failures.
-    pub stop_loss_cooldowns: RwLock<HashMap<TokenId, tokio::time::Instant>>,
+    pub stop_loss_cooldowns: RwLock<HashMap<TokenId, DateTime<Utc>>>,
     /// Stale market cooldowns — prevents re-entry after a position was removed as stale.
-    pub stale_market_cooldowns: RwLock<HashMap<MarketId, tokio::time::Instant>>,
+    pub stale_market_cooldowns: RwLock<HashMap<MarketId, DateTime<Utc>>>,
     /// TailEnd skip-reason counters for diagnostics.
     /// Logged every 60s in the pipeline status summary.
     /// Uses std::sync::Mutex (not tokio RwLock) to avoid async overhead on a hot path.
@@ -1039,6 +1040,7 @@ impl CryptoArbBase {
         &self,
         pos: &ArbitragePosition,
         snapshot: &OrderbookSnapshot,
+        now: DateTime<Utc>,
     ) -> Option<(Action, Decimal, StopLossTrigger)> {
         // Read time_remaining from active_markets, then drop the lock before
         // acquiring price_history (via get_latest_price) to avoid inconsistent
@@ -1046,11 +1048,11 @@ impl CryptoArbBase {
         let time_remaining = {
             let markets = self.active_markets.read().await;
             let market = markets.get(&pos.market_id)?;
-            market.market.seconds_remaining()
+            market.market.seconds_remaining_at(now)
         };
 
-        // Don't trigger stop-loss in the final 60 seconds
-        if time_remaining <= 60 {
+        // Don't trigger stop-loss when time remaining is below configured threshold
+        if time_remaining <= self.config.stop_loss.min_remaining_secs {
             return None;
         }
 
@@ -1146,9 +1148,8 @@ impl CryptoArbBase {
         if !self.config.performance.auto_disable {
             return false;
         }
-        let canonical_mode = mode.canonical();
         let stats = self.mode_stats.read().await;
-        if let Some(s) = stats.get(&canonical_mode) {
+        if let Some(s) = stats.get(mode) {
             s.total_trades() >= self.config.performance.min_trades
                 && s.win_rate() < self.config.performance.min_win_rate
         } else {
@@ -1159,10 +1160,9 @@ impl CryptoArbBase {
     /// Record a trade P&L outcome for the given mode.
     pub async fn record_trade_pnl(&self, mode: &ArbitrageMode, pnl: Decimal) {
         let window_size = self.config.performance.window_size;
-        let canonical_mode = mode.canonical();
         let mut stats = self.mode_stats.write().await;
         stats
-            .entry(canonical_mode)
+            .entry(mode.clone())
             .or_insert_with(|| ModeStats::new(window_size))
             .record(pnl);
     }
@@ -1173,17 +1173,18 @@ impl CryptoArbBase {
 
     /// Record a FOK rejection cooldown for a market.
     pub async fn record_fok_cooldown(&self, market_id: &MarketId, cooldown_secs: u64) {
-        let expires_at =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(cooldown_secs);
+        let now = self.event_time().await;
+        let expires_at = now + chrono::Duration::seconds(cooldown_secs as i64);
         let mut cooldowns = self.fok_cooldowns.write().await;
         cooldowns.insert(market_id.clone(), expires_at);
     }
 
     /// Check if a market is still in FOK rejection cooldown.
     pub async fn is_fok_cooled_down(&self, market_id: &MarketId) -> bool {
+        let now = self.event_time().await;
         let cooldowns = self.fok_cooldowns.read().await;
         if let Some(expires_at) = cooldowns.get(market_id) {
-            tokio::time::Instant::now() < *expires_at
+            now < *expires_at
         } else {
             false
         }
@@ -1191,17 +1192,18 @@ impl CryptoArbBase {
 
     /// Record a stop-loss rejection cooldown for a token.
     pub async fn record_stop_loss_cooldown(&self, token_id: &TokenId, cooldown_secs: u64) {
-        let expires_at =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(cooldown_secs);
+        let now = self.event_time().await;
+        let expires_at = now + chrono::Duration::seconds(cooldown_secs as i64);
         let mut cooldowns = self.stop_loss_cooldowns.write().await;
         cooldowns.insert(token_id.clone(), expires_at);
     }
 
     /// Check if a token is still in stop-loss rejection cooldown.
     pub async fn is_stop_loss_cooled_down(&self, token_id: &TokenId) -> bool {
+        let now = self.event_time().await;
         let cooldowns = self.stop_loss_cooldowns.read().await;
         if let Some(expires_at) = cooldowns.get(token_id) {
-            tokio::time::Instant::now() < *expires_at
+            now < *expires_at
         } else {
             false
         }
@@ -1209,17 +1211,18 @@ impl CryptoArbBase {
 
     /// Record a stale market cooldown to prevent re-entry after position removal.
     pub async fn record_stale_market_cooldown(&self, market_id: &MarketId, cooldown_secs: u64) {
-        let expires_at =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(cooldown_secs);
+        let now = self.event_time().await;
+        let expires_at = now + chrono::Duration::seconds(cooldown_secs as i64);
         let mut cooldowns = self.stale_market_cooldowns.write().await;
         cooldowns.insert(market_id.clone(), expires_at);
     }
 
     /// Check if a market is still in stale-removal cooldown.
     pub async fn is_stale_market_cooled_down(&self, market_id: &MarketId) -> bool {
+        let now = self.event_time().await;
         let cooldowns = self.stale_market_cooldowns.read().await;
         if let Some(expires_at) = cooldowns.get(market_id) {
-            tokio::time::Instant::now() < *expires_at
+            now < *expires_at
         } else {
             false
         }
@@ -1326,8 +1329,8 @@ impl CryptoArbBase {
     /// matched), the subsequent `OrderEvent::Filled` can still find the order
     /// and record the position correctly.
     pub async fn check_stale_limit_orders(&self) -> Vec<Action> {
-        let max_age = std::time::Duration::from_secs(self.config.order.max_age_secs);
-        let now = tokio::time::Instant::now();
+        let max_age_secs = self.config.order.max_age_secs as i64;
+        let now = self.event_time().await;
 
         let mut orders = self.open_limit_orders.write().await;
         let mut actions = Vec::new();
@@ -1335,11 +1338,12 @@ impl CryptoArbBase {
             if lo.cancel_pending {
                 continue; // Already has a cancel in flight
             }
-            if now.duration_since(lo.placed_at) >= max_age {
+            let age_secs = (now - lo.placed_at).num_seconds();
+            if age_secs >= max_age_secs {
                 info!(
                     order_id = %order_id,
                     market = %lo.market_id,
-                    age_secs = now.duration_since(lo.placed_at).as_secs(),
+                    age_secs = age_secs,
                     "Cancelling stale GTC limit order"
                 );
                 lo.cancel_pending = true;
@@ -1371,10 +1375,10 @@ impl CryptoArbBase {
     /// the TOCTOU race where multiple strategy tasks could pass the check
     /// concurrently.
     pub async fn try_claim_dashboard_emit(&self) -> bool {
-        let now = tokio::time::Instant::now();
+        let now = self.event_time().await;
         let mut last = self.last_dashboard_emit.write().await;
         let should_emit = match *last {
-            Some(t) => now.duration_since(t) >= std::time::Duration::from_secs(5),
+            Some(t) => (now - t).num_seconds() >= 5,
             None => true,
         };
         if should_emit {
@@ -1396,11 +1400,11 @@ impl CryptoArbBase {
         // Atomically check-and-set the throttle timestamp in a single write
         // lock to avoid the TOCTOU race where multiple strategy tasks pass
         // the check concurrently.
-        let now = tokio::time::Instant::now();
+        let now = self.event_time().await;
         {
             let mut last = self.last_status_log.write().await;
             if let Some(t) = *last
-                && now.duration_since(t) < std::time::Duration::from_secs(60)
+                && (now - t).num_seconds() < 60
             {
                 return;
             }

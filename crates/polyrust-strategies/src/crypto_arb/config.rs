@@ -1,8 +1,8 @@
 //! Configuration structs for the crypto arbitrage strategies.
 //!
-//! Each trading mode (TailEnd, TwoSided, Confirmed, CrossCorrelated) has its own
-//! configuration struct with an `enabled` flag. All modes are disabled by default
-//! and must be explicitly enabled in config.
+//! Each trading mode (TailEnd, TwoSided) has its own configuration struct with
+//! an `enabled` flag. All modes are disabled by default and must be explicitly
+//! enabled in config.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,13 @@ pub struct TailEndConfig {
     /// Rejects opportunities if the orderbook is older than this.
     /// Docker adds network latency, so 15s is more realistic than 5s. Default: 15.
     pub stale_ob_secs: i64,
+    /// Maximum price drop from entry price within post-entry window to trigger exit.
+    /// Relative to entry price (e.g., 0.05 = exit if bid drops 5 cents below entry).
+    /// Previously hardcoded to absolute 0.85 threshold. Default: 0.05.
+    pub post_entry_exit_drop: Decimal,
+    /// Window in seconds after entry during which post-entry exit is active.
+    /// Default: 10 seconds.
+    pub post_entry_window_secs: i64,
 }
 
 fn default_time_thresholds() -> Vec<(u64, Decimal)> {
@@ -98,6 +105,8 @@ impl Default for TailEndConfig {
             max_recent_volatility: Decimal::new(2, 2), // 0.02 = 2%
             fok_cooldown_secs: 15,
             stale_ob_secs: 15,
+            post_entry_exit_drop: Decimal::new(5, 2), // 0.05 (5 cents below entry)
+            post_entry_window_secs: 10,
         }
     }
 }
@@ -121,32 +130,6 @@ impl Default for TwoSidedConfig {
         Self {
             enabled: false,
             combined_threshold: Decimal::new(98, 2), // 0.98
-        }
-    }
-}
-
-/// Confirmed mode configuration.
-///
-/// Entry conditions:
-/// - Dynamic confidence model based on price movement
-/// - Net profit margin >= `min_margin` after fees
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ConfirmedConfig {
-    /// Enable Confirmed trading mode. Default: false.
-    pub enabled: bool,
-    /// Minimum confidence level to enter (default 0.50).
-    pub min_confidence: Decimal,
-    /// Minimum net profit margin after fees (default 0.02 = 2%).
-    pub min_margin: Decimal,
-}
-
-impl Default for ConfirmedConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            min_confidence: Decimal::new(50, 2), // 0.50
-            min_margin: Decimal::new(2, 2),      // 0.02
         }
     }
 }
@@ -197,7 +180,7 @@ impl Default for SpikeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OrderConfig {
-    /// Use GTC maker orders for Confirmed/TwoSided modes.
+    /// Use GTC maker orders for TwoSided mode.
     pub hybrid_mode: bool,
     /// Price offset below best ask for GTC limit orders.
     pub limit_offset: Decimal,
@@ -288,6 +271,11 @@ pub struct StopLossConfig {
     /// Cooldown in seconds after a stale position is removed before re-entering
     /// the same market. Prevents immediate re-entry loops.
     pub stale_market_cooldown_secs: u64,
+    /// Minimum seconds remaining for stop-loss to be active.
+    /// Below this threshold, stop-losses are suppressed to avoid exiting
+    /// positions that are about to settle. Default: 0 (always active).
+    /// Previously hardcoded to 60, which suppressed ALL tailend stop-losses.
+    pub min_remaining_secs: i64,
 }
 
 impl Default for StopLossConfig {
@@ -300,34 +288,7 @@ impl Default for StopLossConfig {
             time_decay: true,
             trailing_min_distance: Decimal::new(1, 2), // 0.01
             stale_market_cooldown_secs: 120,
-        }
-    }
-}
-
-/// Cross-market correlation configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CorrelationConfig {
-    /// Enable cross-market correlation signals.
-    pub enabled: bool,
-    /// Minimum spike percentage in leader coin to trigger follower signals.
-    pub min_spike_pct: Decimal,
-    /// Leader → follower coin pairs (e.g. BTC → [ETH, SOL]).
-    pub pairs: Vec<(String, Vec<String>)>,
-    /// Confidence discount factor for correlation signals (default 0.7).
-    pub discount_factor: Decimal,
-}
-
-impl Default for CorrelationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            min_spike_pct: Decimal::new(1, 2), // 0.01
-            pairs: vec![
-                ("BTC".into(), vec!["ETH".into(), "SOL".into()]),
-                ("ETH".into(), vec!["SOL".into()]),
-            ],
-            discount_factor: Decimal::new(7, 1), // 0.7
+            min_remaining_secs: 0, // Always active (was hardcoded 60)
         }
     }
 }
@@ -390,7 +351,7 @@ pub struct ArbitrageConfig {
     pub coins: Vec<String>,
     /// Maximum concurrent positions
     pub max_positions: usize,
-    /// Minimum profit margin for confirmed mode
+    /// Minimum profit margin
     pub min_profit_margin: Decimal,
     /// Minimum profit margin in late window (120-300s)
     pub late_window_margin: Decimal,
@@ -408,12 +369,6 @@ pub struct ArbitrageConfig {
     /// TwoSided mode configuration.
     #[serde(default)]
     pub twosided: TwoSidedConfig,
-    /// Confirmed mode configuration.
-    #[serde(default)]
-    pub confirmed: ConfirmedConfig,
-    /// Cross-market correlation configuration.
-    #[serde(default)]
-    pub correlation: CorrelationConfig,
 
     // -------------------------------------------------------------------------
     // Shared configurations
@@ -453,8 +408,6 @@ impl Default for ArbitrageConfig {
             // Per-mode configs (all disabled by default)
             tailend: TailEndConfig::default(),
             twosided: TwoSidedConfig::default(),
-            confirmed: ConfirmedConfig::default(),
-            correlation: CorrelationConfig::default(),
             // Shared configs
             fee: FeeConfig::default(),
             spike: SpikeConfig::default(),
@@ -470,10 +423,7 @@ impl Default for ArbitrageConfig {
 impl ArbitrageConfig {
     /// Returns true if at least one trading mode is enabled.
     pub fn any_mode_enabled(&self) -> bool {
-        self.tailend.enabled
-            || self.twosided.enabled
-            || self.confirmed.enabled
-            || self.correlation.enabled
+        self.tailend.enabled || self.twosided.enabled
     }
 
     /// Apply environment variable overrides to the configuration.

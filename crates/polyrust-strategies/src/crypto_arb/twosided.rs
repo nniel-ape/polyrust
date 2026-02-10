@@ -167,7 +167,7 @@ impl TwoSidedStrategy {
                         size: pending.size,
                         reference_price: pending.reference_price,
                         coin: pending.coin,
-                        placed_at: tokio::time::Instant::now(),
+                        placed_at: self.base.event_time().await,
                         mode: pending.mode,
                         kelly_fraction: pending.kelly_fraction,
                         estimated_fee: pending.estimated_fee,

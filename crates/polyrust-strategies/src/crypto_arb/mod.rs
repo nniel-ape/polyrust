@@ -1,17 +1,13 @@
 //! Crypto arbitrage strategies for 15-minute Up/Down prediction markets.
 //!
-//! This module provides four specialized strategies that share a common base:
+//! This module provides two specialized strategies that share a common base:
 //! - **TailEnd**: High-confidence trades near expiration (< 120s, market >= 90%)
 //! - **TwoSided**: Risk-free arbitrage when both outcomes mispriced (combined < 98%)
-//! - **Confirmed**: Directional trades with dynamic confidence model
-//! - **CrossCorrelated**: Correlation-based signals from leader coin spikes
 //!
 //! All strategies share state through `CryptoArbBase` for efficient resource usage.
 
 mod base;
 mod config;
-mod confirmed;
-mod crosscorr;
 mod dashboard;
 mod tailend;
 mod twosided;
@@ -19,16 +15,11 @@ mod types;
 
 pub use base::CryptoArbBase;
 pub use config::{
-    ArbitrageConfig, ConfirmedConfig, CorrelationConfig, FeeConfig, OrderConfig, PerformanceConfig,
+    ArbitrageConfig, FeeConfig, OrderConfig, PerformanceConfig,
     ReferenceQualityLevel, SizingConfig, SpikeConfig, StopLossConfig, TailEndConfig,
     TwoSidedConfig,
 };
-pub use confirmed::ConfirmedStrategy;
-pub use crosscorr::CrossCorrStrategy;
-pub use dashboard::{
-    ConfirmedDashboard, CrossCorrDashboard, CryptoArbDashboard, TailEndDashboard,
-    TwoSidedDashboard,
-};
+pub use dashboard::{CryptoArbDashboard, TailEndDashboard, TwoSidedDashboard};
 pub use tailend::TailEndStrategy;
 pub use twosided::TwoSidedStrategy;
 pub use types::{

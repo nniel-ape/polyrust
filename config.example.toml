@@ -68,11 +68,9 @@ retry_backoff_secs = 60       # Wait 1 minute between retry attempts
 # ═══════════════════════════════════════════════════════════════════════════════
 # CRYPTO ARBITRAGE STRATEGY
 # ═══════════════════════════════════════════════════════════════════════════════
-# Exploits mispricing in 15-minute Up/Down crypto markets with four modes:
+# Exploits mispricing in 15-minute Up/Down crypto markets with two modes:
 #   1. Tail-End    — <2 min remaining, market >= 90% (highest confidence)
 #   2. Two-Sided   — both outcomes < $1 combined (guaranteed profit)
-#   3. Confirmed   — dynamic confidence model (standard directional)
-#   4. Cross-Correlated — follower coin triggered by leader spike
 #
 # IMPORTANT: All trading modes are DISABLED by default. Enable each mode
 # explicitly with `enabled = true` in its config section.
@@ -80,7 +78,7 @@ retry_backoff_secs = 60       # Wait 1 minute between retry attempts
 # [arbitrage]
 # coins = ["BTC", "ETH", "SOL", "XRP"]  # Coins to track
 # max_positions = 5                      # Maximum concurrent positions
-# min_profit_margin = 0.03               # 3% net profit for Confirmed mode (env: POLY_MIN_PROFIT_MARGIN, CLI: --min-profit)
+# min_profit_margin = 0.03               # 3% net profit margin (env: POLY_MIN_PROFIT_MARGIN, CLI: --min-profit)
 # late_window_margin = 0.02              # 2% relaxed margin (120-300s remaining)
 # scan_interval_secs = 30                # Market discovery scan interval
 # use_chainlink = true                   # On-chain Chainlink vs RTDS boundary snapshots
@@ -103,16 +101,6 @@ retry_backoff_secs = 60       # Wait 1 minute between retry attempts
 # [arbitrage.twosided]
 # enabled = true                 # Enable TwoSided mode
 # combined_threshold = 0.98      # Max combined ask price (default 0.98)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Confirmed Mode
-# ─────────────────────────────────────────────────────────────────────────────
-# Directional trades with dynamic confidence model
-
-# [arbitrage.confirmed]
-# enabled = true                 # Enable Confirmed mode
-# min_confidence = 0.50          # Minimum confidence to enter (default 0.50)
-# min_margin = 0.02              # Minimum net profit margin (default 2%)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fee Model
@@ -165,21 +153,6 @@ retry_backoff_secs = 60       # Wait 1 minute between retry attempts
 # trailing_enabled = true     # Enable trailing stop-loss
 # trailing_distance = 0.03    # $0.03 from peak bid
 # time_decay = true           # Tighten stops near expiration
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Cross-Market Correlation (CrossCorr) Mode
-# ─────────────────────────────────────────────────────────────────────────────
-# Leader coin spikes (BTC) generate signals for follower coins (ETH, SOL)
-# Confidence discounted by 0.7x for follower signals
-
-# [arbitrage.correlation]
-# enabled = false             # Enable CrossCorr mode (experimental, requires more capital)
-# min_spike_pct = 0.01        # 1% leader spike threshold
-# discount_factor = 0.7       # Confidence discount for follower signals
-# pairs = [
-#     ["BTC", ["ETH", "SOL"]],
-#     ["ETH", ["SOL"]]
-# ]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Performance Tracking & Auto-Disable

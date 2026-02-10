@@ -103,6 +103,22 @@ impl ParameterCombination {
                         config.stop_loss.trailing_distance = *v;
                     }
                 }
+                "stop_loss.min_remaining_secs" => {
+                    if let ParamValue::U64(v) = value {
+                        config.stop_loss.min_remaining_secs = *v as i64;
+                    }
+                }
+                // TailEnd post-entry params
+                "tailend.post_entry_exit_drop" => {
+                    if let ParamValue::Decimal(v) = value {
+                        config.tailend.post_entry_exit_drop = *v;
+                    }
+                }
+                "tailend.post_entry_window_secs" => {
+                    if let ParamValue::U64(v) = value {
+                        config.tailend.post_entry_window_secs = *v as i64;
+                    }
+                }
                 // Dynamic threshold params: "tailend.dynamic_thresholds.{secs}"
                 other if other.starts_with("tailend.dynamic_thresholds.") => {
                     has_threshold_params = true;
@@ -191,6 +207,19 @@ impl ParameterGrid {
             });
         }
 
+        if let Some(ref range) = config.tailend.post_entry_exit_drop {
+            axes.push(Axis {
+                name: "tailend.post_entry_exit_drop".to_string(),
+                values: range.expand().into_iter().map(ParamValue::Decimal).collect(),
+            });
+        }
+        if let Some(ref range) = config.tailend.post_entry_window_secs {
+            axes.push(Axis {
+                name: "tailend.post_entry_window_secs".to_string(),
+                values: range.expand().into_iter().map(ParamValue::U64).collect(),
+            });
+        }
+
         // Dynamic thresholds: each bucket becomes a separate axis
         if let Some(ref dt) = config.tailend.dynamic_thresholds {
             for (secs_str, range) in dt {
@@ -243,6 +272,12 @@ impl ParameterGrid {
             axes.push(Axis {
                 name: "stop_loss.trailing_distance".to_string(),
                 values: range.expand().into_iter().map(ParamValue::Decimal).collect(),
+            });
+        }
+        if let Some(ref range) = config.stop_loss.min_remaining_secs {
+            axes.push(Axis {
+                name: "stop_loss.min_remaining_secs".to_string(),
+                values: range.expand().into_iter().map(ParamValue::U64).collect(),
             });
         }
 

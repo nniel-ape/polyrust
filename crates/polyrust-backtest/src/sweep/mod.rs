@@ -5,5 +5,5 @@ pub mod runner;
 
 pub use config::SweepConfig;
 pub use grid::{ParameterCombination, ParameterGrid};
-pub use report::{SweepReport, SweepResult};
+pub use report::{SensitivityAnalysis, SweepReport, SweepResult};
 pub use runner::SweepRunner;

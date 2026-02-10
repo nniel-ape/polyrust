@@ -189,31 +189,9 @@ fn mode_stats_avg_pnl() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn arbitrage_mode_canonical() {
-    let mode = ArbitrageMode::CrossCorrelated {
-        leader: "BTC".to_string(),
-    };
-    let canonical = mode.canonical();
-    assert_eq!(
-        canonical,
-        ArbitrageMode::CrossCorrelated {
-            leader: String::new()
-        }
-    );
-}
-
-#[test]
 fn arbitrage_mode_display() {
     assert_eq!(ArbitrageMode::TailEnd.to_string(), "TailEnd");
     assert_eq!(ArbitrageMode::TwoSided.to_string(), "TwoSided");
-    assert_eq!(ArbitrageMode::Confirmed.to_string(), "Confirmed");
-    assert_eq!(
-        ArbitrageMode::CrossCorrelated {
-            leader: "BTC".to_string()
-        }
-        .to_string(),
-        "Cross(BTC)"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -352,12 +330,6 @@ fn config_default_sub_configs() {
     assert!(config.stop_loss.trailing_enabled);
     assert_eq!(config.stop_loss.trailing_distance, dec!(0.03));
     assert!(config.stop_loss.time_decay);
-
-    // Correlation defaults
-    assert!(!config.correlation.enabled);
-    assert_eq!(config.correlation.min_spike_pct, dec!(0.01));
-    assert_eq!(config.correlation.pairs.len(), 2);
-    assert_eq!(config.correlation.discount_factor, dec!(0.7));
 
     // Performance defaults
     assert_eq!(config.performance.min_trades, 20);
@@ -538,7 +510,7 @@ async fn base_can_open_position() {
                 entry_time: Utc::now(),
                 kelly_fraction: None,
                 peak_bid: dec!(0.60),
-                mode: ArbitrageMode::Confirmed,
+                mode: ArbitrageMode::TailEnd,
                 estimated_fee: Decimal::ZERO,
                 entry_market_price: dec!(0.60),
                 tick_size: dec!(0.01),
@@ -564,18 +536,18 @@ async fn base_is_mode_disabled() {
     let base = Arc::new(CryptoArbBase::new(config, vec![]));
 
     // Initially not disabled
-    assert!(!base.is_mode_disabled(&ArbitrageMode::Confirmed).await);
+    assert!(!base.is_mode_disabled(&ArbitrageMode::TailEnd).await);
 
     // Record losing trades
-    base.record_trade_pnl(&ArbitrageMode::Confirmed, dec!(-1.0))
+    base.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(-1.0))
         .await;
-    base.record_trade_pnl(&ArbitrageMode::Confirmed, dec!(-1.0))
+    base.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(-1.0))
         .await;
-    base.record_trade_pnl(&ArbitrageMode::Confirmed, dec!(-1.0))
+    base.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(-1.0))
         .await;
 
     // Now should be disabled (0% win rate after 3 trades)
-    assert!(base.is_mode_disabled(&ArbitrageMode::Confirmed).await);
+    assert!(base.is_mode_disabled(&ArbitrageMode::TailEnd).await);
 }
 
 // ---------------------------------------------------------------------------
@@ -844,8 +816,8 @@ async fn fok_cooldown_expires() {
     base.record_fok_cooldown(&market_id, 1).await;
     assert!(base.is_fok_cooled_down(&market_id).await);
 
-    // Wait for it to expire
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    // Advance simulated time by 2 seconds to expire the cooldown
+    *base.last_event_time.write().await = Utc::now() + chrono::Duration::seconds(2);
     assert!(!base.is_fok_cooled_down(&market_id).await);
 }
 
@@ -875,7 +847,7 @@ fn make_position(
         entry_time: Utc::now(),
         kelly_fraction: None,
         peak_bid,
-        mode: ArbitrageMode::Confirmed,
+        mode: ArbitrageMode::TailEnd,
         estimated_fee: Decimal::ZERO,
         entry_market_price: entry_price,
         tick_size: dec!(0.01),
@@ -950,7 +922,7 @@ async fn stop_loss_triggers_on_both_conditions() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
     let snapshot = make_snapshot("token_up", dec!(0.84), dec!(0.86));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_some(), "Stop-loss should trigger when both conditions met");
 
     let (action, exit_price, trigger) = result.unwrap();
@@ -982,7 +954,7 @@ async fn stop_loss_no_trigger_reversal_only() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
     let snapshot = make_snapshot("token_up", dec!(0.88), dec!(0.92));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_none(), "Stop-loss should NOT trigger when only crypto reversed");
 }
 
@@ -1002,15 +974,15 @@ async fn stop_loss_no_trigger_drop_only() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
     let snapshot = make_snapshot("token_up", dec!(0.80), dec!(0.85));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_none(), "Stop-loss should NOT trigger when only market dropped");
 }
 
 #[tokio::test]
-async fn stop_loss_disabled_in_final_minute() {
-    let base = make_base_with_market("m1", 55).await; // 55s remaining
+async fn stop_loss_active_at_55s_with_default_config() {
+    // Default min_remaining_secs=0 means stop-loss is always active
+    let base = make_base_with_market("m1", 55).await;
 
-    // Both conditions met
     {
         let mut history = base.price_history.write().await;
         let mut entries = std::collections::VecDeque::new();
@@ -1021,15 +993,36 @@ async fn stop_loss_disabled_in_final_minute() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
     let snapshot = make_snapshot("token_up", dec!(0.84), dec!(0.86));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
-    assert!(result.is_none(), "Stop-loss should NOT trigger in final 60 seconds");
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
+    assert!(result.is_some(), "Stop-loss should trigger at 55s with default min_remaining_secs=0");
 }
 
 #[tokio::test]
-async fn stop_loss_boundary_at_61_seconds() {
-    let base = make_base_with_market("m1", 62).await; // 62s remaining (> 60)
+async fn stop_loss_suppressed_by_min_remaining_secs() {
+    // Explicitly set min_remaining_secs=60 to suppress stop-loss in final minute
+    let mut config = super::config::ArbitrageConfig::default();
+    config.use_chainlink = false;
+    config.stop_loss.reversal_pct = dec!(0.005);
+    config.stop_loss.min_drop = dec!(0.05);
+    config.stop_loss.trailing_enabled = true;
+    config.stop_loss.trailing_distance = dec!(0.03);
+    config.stop_loss.time_decay = true;
+    config.stop_loss.min_remaining_secs = 60;
+    let base = Arc::new(CryptoArbBase::new(config, vec![]));
 
-    // Both conditions met
+    {
+        let mut markets = base.active_markets.write().await;
+        markets.insert(
+            "m1".to_string(),
+            MarketWithReference {
+                market: make_market_info("m1", Utc::now() + Duration::seconds(55)),
+                reference_price: dec!(50000),
+                reference_quality: ReferenceQuality::Exact,
+                discovery_time: Utc::now(),
+                coin: "BTC".to_string(),
+            },
+        );
+    }
     {
         let mut history = base.price_history.write().await;
         let mut entries = std::collections::VecDeque::new();
@@ -1040,8 +1033,48 @@ async fn stop_loss_boundary_at_61_seconds() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
     let snapshot = make_snapshot("token_up", dec!(0.84), dec!(0.86));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
-    assert!(result.is_some(), "Stop-loss should trigger at 62 seconds (outside protection window)");
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
+    assert!(result.is_none(), "Stop-loss should NOT trigger at 55s when min_remaining_secs=60");
+}
+
+#[tokio::test]
+async fn stop_loss_boundary_at_configured_threshold() {
+    // min_remaining_secs=60: should trigger at 62s (above threshold)
+    let mut config = super::config::ArbitrageConfig::default();
+    config.use_chainlink = false;
+    config.stop_loss.reversal_pct = dec!(0.005);
+    config.stop_loss.min_drop = dec!(0.05);
+    config.stop_loss.trailing_enabled = true;
+    config.stop_loss.trailing_distance = dec!(0.03);
+    config.stop_loss.time_decay = true;
+    config.stop_loss.min_remaining_secs = 60;
+    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+    {
+        let mut markets = base.active_markets.write().await;
+        markets.insert(
+            "m1".to_string(),
+            MarketWithReference {
+                market: make_market_info("m1", Utc::now() + Duration::seconds(62)),
+                reference_price: dec!(50000),
+                reference_quality: ReferenceQuality::Exact,
+                discovery_time: Utc::now(),
+                coin: "BTC".to_string(),
+            },
+        );
+    }
+    {
+        let mut history = base.price_history.write().await;
+        let mut entries = std::collections::VecDeque::new();
+        entries.push_back((Utc::now(), dec!(49700), "test".to_string()));
+        history.insert("BTC".to_string(), entries);
+    }
+
+    let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    let snapshot = make_snapshot("token_up", dec!(0.84), dec!(0.86));
+
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
+    assert!(result.is_some(), "Stop-loss should trigger at 62s when min_remaining_secs=60");
 }
 
 #[tokio::test]
@@ -1060,7 +1093,7 @@ async fn stop_loss_reversal_direction_up_position() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
     let snapshot = make_snapshot("token_up", dec!(0.84), dec!(0.86));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_some(), "Up position: crypto reversing DOWN should trigger");
 }
 
@@ -1080,7 +1113,7 @@ async fn stop_loss_reversal_direction_down_position() {
     let pos = make_position("m1", "token_down", OutcomeSide::Down, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
     let snapshot = make_snapshot("token_down", dec!(0.84), dec!(0.86));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_some(), "Down position: crypto reversing UP should trigger");
 }
 
@@ -1098,7 +1131,7 @@ async fn stop_loss_uses_fok_order() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
     let snapshot = make_snapshot("token_up", dec!(0.84), dec!(0.86));
 
-    let (action, _, _trigger) = base.check_stop_loss(&pos, &snapshot).await.unwrap();
+    let (action, _, _trigger) = base.check_stop_loss(&pos, &snapshot, Utc::now()).await.unwrap();
     match action {
         Action::PlaceOrder(order) => {
             assert_eq!(order.order_type, OrderType::Fok);
@@ -1131,7 +1164,7 @@ async fn trailing_stop_triggers_on_drop_from_peak() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.96));
     let snapshot = make_snapshot("token_up", dec!(0.94), dec!(0.96));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_some(), "Trailing stop should trigger when drop from peak >= effective distance");
 }
 
@@ -1151,7 +1184,7 @@ async fn trailing_stop_requires_profitable_position() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.89));
     let snapshot = make_snapshot("token_up", dec!(0.85), dec!(0.87));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_none(), "Trailing stop should NOT trigger for unprofitable position");
 }
 
@@ -1171,7 +1204,7 @@ async fn trailing_stop_time_decay_at_900s() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.96));
     let snapshot = make_snapshot("token_up", dec!(0.93), dec!(0.95));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_some(), "Trailing stop should trigger at 900s with full distance");
 }
 
@@ -1191,7 +1224,7 @@ async fn trailing_stop_time_decay_at_450s() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.96));
     let snapshot = make_snapshot("token_up", dec!(0.945), dec!(0.96));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_some(), "Trailing stop should trigger at 450s with half distance");
 }
 
@@ -1212,12 +1245,12 @@ async fn trailing_stop_time_decay_at_90s_floored() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.96));
     let snapshot = make_snapshot("token_up", dec!(0.956), dec!(0.96));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_none(), "Trailing stop should NOT trigger: drop (0.004) < floor (0.01)");
 
     // With a bigger drop: peak=0.96, bid=0.949 → drop = 0.011 >= 0.01 ✓
     let snapshot_bigger = make_snapshot("token_up", dec!(0.949), dec!(0.96));
-    let result2 = base.check_stop_loss(&pos, &snapshot_bigger).await;
+    let result2 = base.check_stop_loss(&pos, &snapshot_bigger, Utc::now()).await;
     assert!(result2.is_some(), "Trailing stop should trigger when drop exceeds floor");
     let (_, _, trigger) = result2.unwrap();
     assert_eq!(trigger.reason, "trailing_stop");
@@ -1260,7 +1293,7 @@ async fn trailing_stop_disabled_when_config_false() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.96));
     let snapshot = make_snapshot("token_up", dec!(0.92), dec!(0.94));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_none(), "Trailing stop should NOT trigger when disabled in config");
 }
 
@@ -1455,25 +1488,6 @@ fn mode_stats_rolling_window_eviction() {
 }
 
 #[tokio::test]
-async fn record_trade_pnl_canonicalizes_mode() {
-    let base = make_base_no_chainlink();
-
-    // Record for CrossCorrelated with different leaders
-    let mode_btc = ArbitrageMode::CrossCorrelated { leader: "BTC".to_string() };
-    let mode_eth = ArbitrageMode::CrossCorrelated { leader: "ETH".to_string() };
-
-    base.record_trade_pnl(&mode_btc, dec!(1.0)).await;
-    base.record_trade_pnl(&mode_eth, dec!(2.0)).await;
-
-    let stats = base.mode_stats.read().await;
-    // Both should be under the canonical CrossCorrelated mode
-    let canonical = ArbitrageMode::CrossCorrelated { leader: String::new() };
-    let mode_stats = stats.get(&canonical).expect("Should have canonical CrossCorrelated stats");
-    assert_eq!(mode_stats.total_trades(), 2);
-    assert_eq!(mode_stats.total_pnl, dec!(3.0));
-}
-
-#[tokio::test]
 async fn auto_disable_boundary_at_min_trades() {
     let mut config = super::config::ArbitrageConfig::default();
     config.performance.auto_disable = true;
@@ -1483,14 +1497,14 @@ async fn auto_disable_boundary_at_min_trades() {
 
     // Record exactly 20 trades: 8 wins (40%), 12 losses
     for _ in 0..8 {
-        base.record_trade_pnl(&ArbitrageMode::Confirmed, dec!(1.0)).await;
+        base.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(1.0)).await;
     }
     for _ in 0..12 {
-        base.record_trade_pnl(&ArbitrageMode::Confirmed, dec!(-1.0)).await;
+        base.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(-1.0)).await;
     }
 
     // 40% win rate = exactly at threshold → NOT disabled (need to be strictly below)
-    assert!(!base.is_mode_disabled(&ArbitrageMode::Confirmed).await,
+    assert!(!base.is_mode_disabled(&ArbitrageMode::TailEnd).await,
         "At exactly min_win_rate should NOT be disabled");
 }
 
@@ -1504,13 +1518,13 @@ async fn auto_disable_below_threshold() {
 
     // Record 20 trades: 7 wins (35%), 13 losses
     for _ in 0..7 {
-        base.record_trade_pnl(&ArbitrageMode::Confirmed, dec!(1.0)).await;
+        base.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(1.0)).await;
     }
     for _ in 0..13 {
-        base.record_trade_pnl(&ArbitrageMode::Confirmed, dec!(-1.0)).await;
+        base.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(-1.0)).await;
     }
 
-    assert!(base.is_mode_disabled(&ArbitrageMode::Confirmed).await,
+    assert!(base.is_mode_disabled(&ArbitrageMode::TailEnd).await,
         "35% win rate after 20 trades should trigger auto-disable");
 }
 
@@ -1556,7 +1570,7 @@ async fn has_market_exposure_checks_all_types() {
                 reference_price: dec!(50000),
                 coin: "BTC".to_string(),
                 order_type: polyrust_core::types::OrderType::Gtc,
-                mode: ArbitrageMode::Confirmed,
+                mode: ArbitrageMode::TailEnd,
                 kelly_fraction: None,
                 estimated_fee: Decimal::ZERO,
                 tick_size: dec!(0.01),
@@ -1611,7 +1625,7 @@ async fn can_open_position_counts_all_order_types() {
                 reference_price: dec!(50000),
                 coin: "BTC".to_string(),
                 order_type: polyrust_core::types::OrderType::Gtc,
-                mode: ArbitrageMode::Confirmed,
+                mode: ArbitrageMode::TailEnd,
                 kelly_fraction: None,
                 estimated_fee: Decimal::ZERO,
                 tick_size: dec!(0.01),
@@ -1635,8 +1649,8 @@ async fn can_open_position_counts_all_order_types() {
                 size: dec!(10),
                 reference_price: dec!(50000),
                 coin: "BTC".to_string(),
-                placed_at: tokio::time::Instant::now(),
-                mode: ArbitrageMode::Confirmed,
+                placed_at: Utc::now(),
+                mode: ArbitrageMode::TailEnd,
                 kelly_fraction: None,
                 estimated_fee: Decimal::ZERO,
                 tick_size: dec!(0.01),
@@ -1673,8 +1687,8 @@ async fn stale_limit_order_cancelled_after_max_age() {
                 size: dec!(10),
                 reference_price: dec!(50000),
                 coin: "BTC".to_string(),
-                placed_at: tokio::time::Instant::now() - std::time::Duration::from_secs(5),
-                mode: ArbitrageMode::Confirmed,
+                placed_at: Utc::now() - chrono::Duration::seconds(5),
+                mode: ArbitrageMode::TailEnd,
                 kelly_fraction: None,
                 estimated_fee: Decimal::ZERO,
                 tick_size: dec!(0.01),
@@ -1716,8 +1730,8 @@ async fn stale_order_cancel_pending_prevents_double() {
                 size: dec!(10),
                 reference_price: dec!(50000),
                 coin: "BTC".to_string(),
-                placed_at: tokio::time::Instant::now() - std::time::Duration::from_secs(5),
-                mode: ArbitrageMode::Confirmed,
+                placed_at: Utc::now() - chrono::Duration::seconds(5),
+                mode: ArbitrageMode::TailEnd,
                 kelly_fraction: None,
                 estimated_fee: Decimal::ZERO,
                 tick_size: dec!(0.01),
@@ -1772,7 +1786,7 @@ async fn trailing_stop_floor_prevents_noise_trigger() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.98), dec!(10), dec!(50000), dec!(0.98));
     let snapshot = make_snapshot("token_up", dec!(0.98), dec!(0.99));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_none(), "Trailing stop should NOT arm when peak_bid == entry_price (need >= entry + min_distance)");
 }
 
@@ -1794,7 +1808,7 @@ async fn trailing_stop_arms_at_min_distance_above_entry() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.91));
     let snapshot = make_snapshot("token_up", dec!(0.899), dec!(0.92));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_some(), "Trailing stop should arm when peak >= entry + min_distance");
     let (_, _, trigger) = result.unwrap();
     assert_eq!(trigger.reason, "trailing_stop");
@@ -1816,7 +1830,7 @@ async fn trailing_stop_does_not_arm_below_min_distance() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.905));
     let snapshot = make_snapshot("token_up", dec!(0.85), dec!(0.87));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     // Even though bid dropped significantly from peak, trailing should not arm
     // However, dual trigger could fire if crypto reversed + market dropped
     // Here: crypto is at 50100 > 50000, so no reversal for Up. No dual trigger.
@@ -1854,8 +1868,8 @@ async fn stale_market_cooldown_expires() {
     base.record_stale_market_cooldown(&market_id, 1).await;
     assert!(base.is_stale_market_cooled_down(&market_id).await);
 
-    // Wait for it to expire
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    // Advance simulated time by 2 seconds to expire the cooldown
+    *base.last_event_time.write().await = Utc::now() + chrono::Duration::seconds(2);
     assert!(!base.is_stale_market_cooled_down(&market_id).await);
 }
 
@@ -1894,6 +1908,7 @@ fn stop_loss_config_new_field_defaults() {
     let config = super::config::StopLossConfig::default();
     assert_eq!(config.trailing_min_distance, dec!(0.01));
     assert_eq!(config.stale_market_cooldown_secs, 120);
+    assert_eq!(config.min_remaining_secs, 0);
 }
 
 #[test]
@@ -1909,6 +1924,7 @@ fn stop_loss_config_deserialize_missing_new_fields() {
     let config: super::config::StopLossConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.trailing_min_distance, dec!(0.01));
     assert_eq!(config.stale_market_cooldown_secs, 120);
+    assert_eq!(config.min_remaining_secs, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1932,7 +1948,7 @@ async fn stop_loss_trigger_returns_trailing_metadata() {
     let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.96));
     let snapshot = make_snapshot("token_up", dec!(0.94), dec!(0.96));
 
-    let result = base.check_stop_loss(&pos, &snapshot).await;
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_some());
     let (_, _, trigger) = result.unwrap();
     assert_eq!(trigger.reason, "trailing_stop");

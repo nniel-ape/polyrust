@@ -331,7 +331,7 @@ impl TailEndStrategy {
                         size: pending.size,
                         reference_price: pending.reference_price,
                         coin: pending.coin,
-                        placed_at: tokio::time::Instant::now(),
+                        placed_at: self.base.event_time().await,
                         mode: pending.mode,
                         kelly_fraction: pending.kelly_fraction,
                         estimated_fee: pending.estimated_fee,
@@ -630,7 +630,7 @@ impl TailEndStrategy {
             }
 
             if let Some((action, exit_price, trigger)) =
-                self.base.check_stop_loss(&pos, snapshot).await
+                self.base.check_stop_loss(&pos, snapshot, self.base.event_time().await).await
             {
                 info!(
                     market = %pos.market_id,
@@ -650,22 +650,25 @@ impl TailEndStrategy {
             }
 
             // Post-entry confirmation: exit if price drops significantly
-            // within 10 seconds of entry (catches false signals immediately)
+            // within post_entry_window_secs of entry (catches false signals immediately)
             let seconds_since_entry = self.base.event_time().await
                 .signed_duration_since(pos.entry_time)
                 .num_seconds();
-            if seconds_since_entry <= 10
+            let window = self.base.config.tailend.post_entry_window_secs;
+            let max_drop = self.base.config.tailend.post_entry_exit_drop;
+            if seconds_since_entry <= window
                 && let Some(current_bid) = snapshot.best_bid()
             {
-                // Exit if market price drops below 0.85 (85%)
-                let post_entry_exit_threshold = Decimal::new(85, 2);
-                if current_bid < post_entry_exit_threshold {
+                // Exit if bid dropped more than post_entry_exit_drop below entry price
+                let exit_threshold = pos.entry_price - max_drop;
+                if current_bid < exit_threshold {
                     info!(
                         market = %pos.market_id,
-                        entry_market_price = %pos.entry_market_price,
+                        entry_price = %pos.entry_price,
+                        exit_threshold = %exit_threshold,
                         current_bid = %current_bid,
                         seconds_since_entry = seconds_since_entry,
-                        "TailEnd post-entry exit triggered: price dropped below 0.85"
+                        "TailEnd post-entry exit triggered: bid dropped {max_drop} below entry"
                     );
                     let order = OrderRequest::new(
                         pos.token_id.clone(),
