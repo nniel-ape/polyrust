@@ -86,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
         market_duration_secs: None,
         fetch_concurrency: 10,
         offline: false,
+        sweep: None,
     };
 
     tracing::info!(

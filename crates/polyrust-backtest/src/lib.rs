@@ -3,12 +3,14 @@ pub mod data;
 pub mod engine;
 pub mod error;
 pub mod report;
+pub mod sweep;
 
 pub use config::{BacktestConfig, FeeConfig};
 pub use data::{
     DataFetchConfig, DataFetcher, HistoricalCryptoPrice, HistoricalDataStore, HistoricalMarket,
     HistoricalPrice, HistoricalTrade,
 };
-pub use engine::{BacktestEngine, BacktestTrade, CloseReason};
+pub use engine::{BacktestEngine, BacktestTrade, CloseReason, HistoricalEvent};
 pub use error::{BacktestError, BacktestResult};
 pub use report::BacktestReport;
+pub use sweep::{SweepConfig, SweepReport, SweepResult, SweepRunner};

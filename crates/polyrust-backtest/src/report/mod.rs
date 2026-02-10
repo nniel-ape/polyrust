@@ -225,6 +225,127 @@ impl BacktestReport {
         })
     }
 
+    /// Create a backtest report directly from engine trades (no SQLite).
+    ///
+    /// Used in sweep mode to avoid per-run Store overhead. The engine's
+    /// returned `Vec<BacktestTrade>` already carries close_reason and realized_pnl.
+    pub fn from_trades(
+        engine_trades: Vec<crate::engine::BacktestTrade>,
+        start_balance: Decimal,
+        start_time: DateTime<Utc>,
+        end_time: DateTime<Utc>,
+    ) -> Self {
+        // Convert engine trades to report trades
+        let trades: Vec<BacktestTrade> = engine_trades
+            .into_iter()
+            .map(|t| BacktestTrade {
+                timestamp: t.timestamp,
+                token_id: t.token_id,
+                side: t.side,
+                price: t.price,
+                size: t.size,
+                realized_pnl: t.realized_pnl,
+                close_reason: t.close_reason,
+            })
+            .collect();
+
+        // Compute realized P&L
+        let realized_pnl: Decimal = trades.iter().filter_map(|t| t.realized_pnl).sum();
+        let unrealized_pnl = Decimal::ZERO;
+        let total_pnl = realized_pnl + unrealized_pnl;
+
+        // Trade breakdown
+        let total_trades = trades.len();
+        let opening_trades = trades.iter().filter(|t| t.side == OrderSide::Buy).count();
+        let closing_trades_list: Vec<_> = trades.iter().filter(|t| t.side == OrderSide::Sell).collect();
+
+        let closing_trades = closing_trades_list.len();
+        let winning_trades = closing_trades_list
+            .iter()
+            .filter(|t| t.realized_pnl.unwrap_or(Decimal::ZERO) > Decimal::ZERO)
+            .count();
+        let losing_trades = closing_trades_list
+            .iter()
+            .filter(|t| t.realized_pnl.unwrap_or(Decimal::ZERO) < Decimal::ZERO)
+            .count();
+        let expired_worthless = closing_trades_list.iter().filter(|t| t.price == Decimal::ZERO).count();
+
+        // Per close-reason breakdown
+        let is_win = |t: &&BacktestTrade| t.realized_pnl.unwrap_or(Decimal::ZERO) > Decimal::ZERO;
+        let is_worthless = |t: &&BacktestTrade| t.price == Decimal::ZERO;
+
+        let strategy_list: Vec<_> = closing_trades_list
+            .iter()
+            .filter(|t| t.close_reason == Some(CloseReason::Strategy))
+            .collect();
+        let strategy_exits = strategy_list.len();
+        let strategy_wins = strategy_list.iter().filter(|t| is_win(t)).count();
+        let strategy_losses = strategy_list
+            .iter()
+            .filter(|t| t.realized_pnl.unwrap_or(Decimal::ZERO) < Decimal::ZERO)
+            .count();
+
+        let settled_list: Vec<_> = closing_trades_list
+            .iter()
+            .filter(|t| t.close_reason == Some(CloseReason::Settlement))
+            .collect();
+        let settled_trades = settled_list.len();
+        let settled_wins = settled_list.iter().filter(|t| is_win(t)).count();
+        let settled_worthless = settled_list.iter().filter(|t| is_worthless(t)).count();
+
+        let force_list: Vec<_> = closing_trades_list
+            .iter()
+            .filter(|t| t.close_reason == Some(CloseReason::ForceClose))
+            .collect();
+        let force_closed_trades = force_list.len();
+        let force_closed_wins = force_list.iter().filter(|t| is_win(t)).count();
+        let force_closed_worthless = force_list.iter().filter(|t| is_worthless(t)).count();
+
+        let markets_traded = trades.iter().map(|t| &t.token_id).collect::<HashSet<_>>().len();
+
+        let win_rate = if closing_trades > 0 {
+            Decimal::from(winning_trades as u64) / Decimal::from(closing_trades as u64)
+        } else {
+            Decimal::ZERO
+        };
+
+        let max_drawdown = Self::compute_max_drawdown(&trades, start_balance);
+        let sharpe_ratio = Self::compute_sharpe_ratio(&trades);
+        let end_balance = start_balance + total_pnl;
+        let duration = end_time - start_time;
+
+        BacktestReport {
+            trades,
+            total_pnl,
+            realized_pnl,
+            unrealized_pnl,
+            win_rate,
+            max_drawdown,
+            sharpe_ratio,
+            total_trades,
+            opening_trades,
+            closing_trades,
+            winning_trades,
+            losing_trades,
+            expired_worthless,
+            strategy_exits,
+            strategy_wins,
+            strategy_losses,
+            settled_trades,
+            settled_wins,
+            settled_worthless,
+            force_closed_trades,
+            force_closed_wins,
+            force_closed_worthless,
+            markets_traded,
+            start_balance,
+            end_balance,
+            duration,
+            start_time,
+            end_time,
+        }
+    }
+
     /// Compute maximum drawdown from peak equity.
     ///
     /// Returns the largest percentage decline from a peak balance.

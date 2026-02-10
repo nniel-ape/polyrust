@@ -12,3 +12,5 @@ docker-compose.override.yml
 progress*.txt
 .DS_Store
 backtest_output.txt
+sweep_results.csv
+sweep_results.json

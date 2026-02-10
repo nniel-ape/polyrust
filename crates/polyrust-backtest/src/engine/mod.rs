@@ -186,12 +186,13 @@ fn synthesize_price_events_from_trades(
 /// - Executes strategy logic and collects actions
 /// - Simulates immediate fills at current market price
 /// - Tracks positions and balance
-/// - Records trades to an in-memory Store (using existing schema)
+/// - Optionally records trades to an in-memory Store (using existing schema)
 pub struct BacktestEngine {
     config: BacktestConfig,
     strategy: Box<dyn Strategy>,
     data_store: Arc<HistoricalDataStore>,
-    store: Arc<Store>,
+    /// Optional Store for trade persistence. None in sweep mode (skip SQLite overhead).
+    store: Option<Arc<Store>>,
     ctx: StrategyContext,
     current_time: DateTime<Utc>,
     /// Token price cache: token_id -> latest price
@@ -210,7 +211,7 @@ pub struct BacktestEngine {
 }
 
 impl BacktestEngine {
-    /// Create a new backtest engine.
+    /// Create a new backtest engine with trade persistence to a Store.
     ///
     /// - `config`: backtest configuration
     /// - `strategy`: strategy to test
@@ -221,6 +222,26 @@ impl BacktestEngine {
         strategy: Box<dyn Strategy>,
         data_store: Arc<HistoricalDataStore>,
         store: Arc<Store>,
+    ) -> Self {
+        Self::new_inner(config, strategy, data_store, Some(store)).await
+    }
+
+    /// Create a new backtest engine without Store persistence (for sweep mode).
+    ///
+    /// Trades are tracked in-memory only — no SQLite overhead per run.
+    pub async fn new_without_store(
+        config: BacktestConfig,
+        strategy: Box<dyn Strategy>,
+        data_store: Arc<HistoricalDataStore>,
+    ) -> Self {
+        Self::new_inner(config, strategy, data_store, None).await
+    }
+
+    async fn new_inner(
+        config: BacktestConfig,
+        strategy: Box<dyn Strategy>,
+        data_store: Arc<HistoricalDataStore>,
+        store: Option<Arc<Store>>,
     ) -> Self {
         let ctx = StrategyContext::new();
         let current_time = config.start_date;
@@ -273,6 +294,18 @@ impl BacktestEngine {
         let events = self.load_events().await?;
         info!(event_count = events.len(), "Loaded historical events");
 
+        self.run_with_events(&events).await
+    }
+
+    /// Run the backtest with pre-loaded events (avoids re-loading from DB).
+    ///
+    /// Used by sweep runner to share a single event load across many runs.
+    /// The engine must have been initialized with the correct config
+    /// (including market_ids for market_tokens/token_to_market mappings).
+    pub async fn run_with_events(&mut self, events: &[HistoricalEvent]) -> Result<Vec<BacktestTrade>> {
+        // Call strategy.on_start if run() didn't already
+        // (For sweep mode, run_with_events is called directly)
+
         // Validate that we have events to replay
         if events.is_empty() {
             return Err(polyrust_core::error::PolyError::Config(
@@ -289,7 +322,7 @@ impl BacktestEngine {
         let total_events = events.len();
         let log_interval = (total_events / 20).max(1); // Log every 5%
 
-        for (i, historical_event) in events.into_iter().enumerate() {
+        for (i, historical_event) in events.iter().enumerate() {
             self.current_time = historical_event.timestamp;
 
             // Update token price cache for price events
@@ -539,8 +572,15 @@ impl BacktestEngine {
         Ok(trades)
     }
 
+    /// Call strategy.on_start (public for sweep runner).
+    pub async fn strategy_on_start(&mut self) -> Result<()> {
+        self.strategy.on_start(&self.ctx).await
+    }
+
     /// Load historical events from the data store.
-    async fn load_events(&mut self) -> Result<Vec<HistoricalEvent>> {
+    ///
+    /// Public so sweep runner can call it once and share events across runs.
+    pub async fn load_events(&mut self) -> Result<Vec<HistoricalEvent>> {
         let mut events = Vec::new();
 
         // Pre-load crypto kline data indexed by coin for discovery price lookup.
@@ -1137,25 +1177,27 @@ impl BacktestEngine {
                     );
                 }
 
-                // Record trade in Store
-                let trade = Trade {
-                    id: Uuid::new_v4(),
-                    order_id: Uuid::new_v4().to_string(),
-                    market_id: String::new(),
-                    token_id: order.token_id.clone(),
-                    side: OrderSide::Buy,
-                    price: current_price,
-                    size: order.size,
-                    realized_pnl: None,
-                    strategy_name: self.strategy.name().to_string(),
-                    timestamp: self.current_time,
-                };
-                self.store.insert_trade(&trade).await.map_err(|e| {
-                    polyrust_core::error::PolyError::Execution(format!(
-                        "Failed to insert trade: {}",
-                        e
-                    ))
-                })?;
+                // Record trade in Store (if available)
+                if let Some(ref store) = self.store {
+                    let trade = Trade {
+                        id: Uuid::new_v4(),
+                        order_id: Uuid::new_v4().to_string(),
+                        market_id: String::new(),
+                        token_id: order.token_id.clone(),
+                        side: OrderSide::Buy,
+                        price: current_price,
+                        size: order.size,
+                        realized_pnl: None,
+                        strategy_name: self.strategy.name().to_string(),
+                        timestamp: self.current_time,
+                    };
+                    store.insert_trade(&trade).await.map_err(|e| {
+                        polyrust_core::error::PolyError::Execution(format!(
+                            "Failed to insert trade: {}",
+                            e
+                        ))
+                    })?;
+                }
 
                 debug!(
                     token_id = %order.token_id,
@@ -1240,25 +1282,27 @@ impl BacktestEngine {
                     }
                 }
 
-                // Record trade in Store
-                let trade = Trade {
-                    id: Uuid::new_v4(),
-                    order_id: Uuid::new_v4().to_string(),
-                    market_id: String::new(),
-                    token_id: order.token_id.clone(),
-                    side: OrderSide::Sell,
-                    price: current_price,
-                    size: order.size,
-                    realized_pnl: Some(realized_pnl),
-                    strategy_name: self.strategy.name().to_string(),
-                    timestamp: self.current_time,
-                };
-                self.store.insert_trade(&trade).await.map_err(|e| {
-                    polyrust_core::error::PolyError::Execution(format!(
-                        "Failed to insert trade: {}",
-                        e
-                    ))
-                })?;
+                // Record trade in Store (if available)
+                if let Some(ref store) = self.store {
+                    let trade = Trade {
+                        id: Uuid::new_v4(),
+                        order_id: Uuid::new_v4().to_string(),
+                        market_id: String::new(),
+                        token_id: order.token_id.clone(),
+                        side: OrderSide::Sell,
+                        price: current_price,
+                        size: order.size,
+                        realized_pnl: Some(realized_pnl),
+                        strategy_name: self.strategy.name().to_string(),
+                        timestamp: self.current_time,
+                    };
+                    store.insert_trade(&trade).await.map_err(|e| {
+                        polyrust_core::error::PolyError::Execution(format!(
+                            "Failed to insert trade: {}",
+                            e
+                        ))
+                    })?;
+                }
 
                 debug!(
                     token_id = %order.token_id,
@@ -1386,6 +1430,7 @@ mod tests {
 
             fetch_concurrency: 10,
             offline: false,
+            sweep: None,
         };
 
         let strategy = Box::new(TestStrategy { price_event_count: 0 });
@@ -1466,6 +1511,7 @@ mod tests {
 
             fetch_concurrency: 10,
             offline: false,
+            sweep: None,
         };
 
         let strategy = Box::new(TestStrategy { price_event_count: 0 });
@@ -1512,6 +1558,7 @@ mod tests {
 
             fetch_concurrency: 10,
             offline: false,
+            sweep: None,
         };
 
         let strategy = Box::new(TestStrategy { price_event_count: 0 });
@@ -1703,6 +1750,7 @@ mod tests {
 
             fetch_concurrency: 10,
             offline: false,
+            sweep: None,
         };
 
         let strategy = Box::new(PriceCountStrategy {

@@ -165,6 +165,7 @@ async fn test_full_backtest_pipeline() {
 
         fetch_concurrency: 10,
         offline: false,
+        sweep: None,
     };
 
     // Create in-memory results store
@@ -245,6 +246,7 @@ async fn test_backtest_with_no_data() {
 
         fetch_concurrency: 10,
         offline: false,
+        sweep: None,
     };
 
     let strategy = Box::new(SimpleTestStrategy::new());

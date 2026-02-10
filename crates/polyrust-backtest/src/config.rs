@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use crate::sweep::config::SweepConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BacktestConfig {
     /// Strategy name to backtest
@@ -34,6 +36,9 @@ pub struct BacktestConfig {
     /// Offline mode: skip all network fetches, use only cached data from backtest_data.db.
     #[serde(default)]
     pub offline: bool,
+    /// Optional parameter sweep configuration for grid search.
+    #[serde(default)]
+    pub sweep: Option<SweepConfig>,
 }
 
 /// Fee model configuration for backtesting.
@@ -79,6 +84,7 @@ impl Default for BacktestConfig {
 
             fetch_concurrency: 10,
             offline: false,
+            sweep: None,
         }
     }
 }
@@ -200,6 +206,7 @@ mod tests {
 
             fetch_concurrency: 10,
             offline: false,
+            sweep: None,
         };
         assert_eq!(config.strategy_name, "test-strategy");
         assert_eq!(config.market_ids.len(), 2);
