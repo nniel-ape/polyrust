@@ -132,20 +132,14 @@ impl TailEndStrategy {
         };
 
         let md = ctx.market_data.read().await;
-        let (token_id, ask) = match predicted {
-            OutcomeSide::Up | OutcomeSide::Yes => (
-                &market.market.token_ids.outcome_a,
-                md.orderbooks
-                    .get(&market.market.token_ids.outcome_a)
-                    .and_then(|ob| ob.best_ask()),
-            ),
-            OutcomeSide::Down | OutcomeSide::No => (
-                &market.market.token_ids.outcome_b,
-                md.orderbooks
-                    .get(&market.market.token_ids.outcome_b)
-                    .and_then(|ob| ob.best_ask()),
-            ),
+        let token_id = match predicted {
+            OutcomeSide::Up | OutcomeSide::Yes => &market.market.token_ids.outcome_a,
+            OutcomeSide::Down | OutcomeSide::No => &market.market.token_ids.outcome_b,
         };
+        let ob = md.orderbooks.get(token_id);
+        let ask = ob.and_then(|ob| ob.best_ask());
+        let bid = ob.and_then(|ob| ob.best_bid());
+        drop(md);
 
         let ask_price = match ask {
             Some(p) => p,
@@ -159,21 +153,6 @@ impl TailEndStrategy {
                 return None;
             }
         };
-
-        // Get best bid for spread calculation
-        let bid = match predicted {
-            OutcomeSide::Up | OutcomeSide::Yes => {
-                md.orderbooks
-                    .get(&market.market.token_ids.outcome_a)
-                    .and_then(|ob| ob.best_bid())
-            }
-            OutcomeSide::Down | OutcomeSide::No => {
-                md.orderbooks
-                    .get(&market.market.token_ids.outcome_b)
-                    .and_then(|ob| ob.best_bid())
-            }
-        };
-        drop(md);
 
         // Ask must be >= dynamic threshold for tail-end (based on time remaining)
         let ask_threshold = self.get_ask_threshold_impl(time_remaining);
@@ -399,6 +378,315 @@ impl TailEndStrategy {
         vec![]
     }
 
+    /// Handle an external price update: record price, scan near-expiry markets,
+    /// evaluate tail-end opportunities, and submit GTC orders.
+    async fn handle_external_price(
+        &self,
+        symbol: &str,
+        price: Decimal,
+        source: &str,
+        ctx: &StrategyContext,
+    ) -> Vec<Action> {
+        // Record price and promote any pending markets
+        let now = ctx.now().await;
+        let (_, promote_actions) = self.base.record_price(symbol, price, source, now).await;
+        let mut result = promote_actions;
+
+        // Fast pre-filter: skip coins where no market is near expiration.
+        // This avoids acquiring active_markets lock + iterating for 99%+ of events.
+        {
+            let nearest = self.base.coin_nearest_expiry.read().await;
+            if let Some(expiry) = nearest.get(symbol) {
+                let now = ctx.now().await;
+                let secs_remaining = (*expiry - now).num_seconds();
+                if secs_remaining > self.base.config.tailend.time_threshold_secs as i64 {
+                    self.base.record_tailend_skip("coin_not_near_expiry").await;
+                    return result;
+                }
+            }
+        }
+
+        // Find active markets for this coin
+        let market_ids: Vec<MarketId> = {
+            let markets = self.base.active_markets.read().await;
+            markets
+                .iter()
+                .filter(|(_, m)| m.coin == symbol)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+
+        for market_id in market_ids {
+            // Skip if market is in stale-removal cooldown
+            if self.base.is_stale_market_cooled_down(&market_id).await {
+                debug!(
+                    market = %market_id,
+                    "TailEnd skip: stale market cooldown active"
+                );
+                self.base.record_tailend_skip("stale_cooldown").await;
+                continue;
+            }
+
+            // Skip if in FOK rejection cooldown
+            if self.base.is_fok_cooled_down(&market_id).await {
+                debug!(
+                    market = %market_id,
+                    "TailEnd skip: FOK rejection cooldown active"
+                );
+                self.base.record_tailend_skip("fok_cooldown").await;
+                continue;
+            }
+
+            // Skip if we already have exposure
+            if self.base.has_market_exposure(&market_id).await {
+                debug!(
+                    market = %market_id,
+                    "TailEnd skip: already have exposure to market"
+                );
+                self.base.record_tailend_skip("exposure").await;
+                continue;
+            }
+
+            // Check position limits
+            if !self.base.can_open_position().await {
+                debug!(
+                    market = %market_id,
+                    "TailEnd skip: max positions reached"
+                );
+                self.base.record_tailend_skip("max_positions").await;
+                break;
+            }
+
+            // Get market info for order construction
+            let market_info = {
+                let markets = self.base.active_markets.read().await;
+                markets.get(&market_id).cloned()
+            };
+
+            if let Some(opp) = self.evaluate_opportunity(&market_id, price, ctx).await {
+                if opp.buy_price.is_zero() {
+                    warn!(market = %market_id, "skipping TailEnd opportunity with zero buy_price");
+                    continue;
+                }
+
+                // TailEnd uses fixed sizing (no Kelly - confidence is always 1.0)
+                // Round to 2dp immediately — raw division produces 28+ decimals
+                // which confuses logs and depth comparisons
+                let mut size = (self.base.config.sizing.base_size / opp.buy_price)
+                    .round_dp_with_strategy(
+                        2,
+                        rust_decimal::RoundingStrategy::ToZero,
+                    );
+
+                // Cap to available orderbook depth to avoid guaranteed FOK rejection
+                let available = {
+                    let md = ctx.market_data.read().await;
+                    match md.orderbooks.get(&opp.token_id) {
+                        Some(ob) => {
+                            let max_age = self.base.config.tailend.stale_ob_secs;
+                            let age = ctx
+                                .now()
+                                .await
+                                .signed_duration_since(ob.timestamp)
+                                .num_seconds();
+                            if age > max_age {
+                                warn!(
+                                    market = %market_id,
+                                    age_secs = age,
+                                    max_age_secs = max_age,
+                                    "TailEnd skip: stale orderbook"
+                                );
+                                self.base.record_tailend_skip("stale_ob").await;
+                                continue;
+                            }
+                            // Cumulative depth at all ask levels up to our buy price
+                            ob.ask_depth_up_to(opp.buy_price)
+                        }
+                        None => Decimal::ZERO,
+                    }
+                };
+                // 50% safety margin — 80% was still too aggressive for competitive tail-end windows
+                // where multiple bots race for the same asks during ~1-5s total latency
+                let safe_available = available * Decimal::new(50, 2);
+                if safe_available < size {
+                    warn!(
+                        market = %market_id,
+                        wanted = %size,
+                        available = %available,
+                        safe_available = %safe_available,
+                        "TailEnd: capping order size to safe available ask depth"
+                    );
+                    size = safe_available;
+                }
+
+                // Validate minimum order size
+                if !self.base.validate_min_order_size(&market_id, size).await {
+                    continue;
+                }
+
+                // TailEnd uses GTC orders with aggressive pricing (at/above ask).
+                // GTC avoids FOK USDC clamping at extreme prices and gets 0% maker fee.
+                let limit_offset = self.base.config.order.limit_offset;
+                let aggressive_price = (opp.buy_price + limit_offset).min(Decimal::new(99, 2));
+                let (neg_risk, tick_size, fee_rate_bps) = match &market_info {
+                    Some(m) => (m.market.neg_risk, Some(m.market.tick_size), Some(m.market.fee_rate_bps)),
+                    None => (false, None, None),
+                };
+                let mut order = OrderRequest::new(
+                    opp.token_id.clone(),
+                    aggressive_price,
+                    size,
+                    OrderSide::Buy,
+                    OrderType::Gtc,
+                    neg_risk,
+                );
+                if let Some(ts) = tick_size { order = order.with_tick_size(ts); }
+                if let Some(fr) = fee_rate_bps { order = order.with_fee_rate_bps(fr); }
+
+                info!(
+                    mode = ?opp.mode,
+                    market = %market_id,
+                    confidence = %opp.confidence,
+                    ask_price = %opp.buy_price,
+                    limit_price = %aggressive_price,
+                    size = %size,
+                    available_depth = %available,
+                    safe_depth = %safe_available,
+                    side = ?opp.outcome_to_buy,
+                    "Submitting TailEnd GTC order"
+                );
+
+                // Track pending order
+                if let Some(market) = market_info {
+                    let mut pending = self.base.pending_orders.write().await;
+                    pending.insert(
+                        opp.token_id.clone(),
+                        PendingOrder {
+                            market_id: market_id.clone(),
+                            token_id: opp.token_id.clone(),
+                            side: opp.outcome_to_buy,
+                            price: opp.buy_price,
+                            size,
+                            reference_price: market.reference_price,
+                            coin: market.coin.clone(),
+                            order_type: OrderType::Gtc,
+                            mode: ArbitrageMode::TailEnd,
+                            kelly_fraction: None,
+                            estimated_fee: opp.estimated_fee,
+                            tick_size: market.market.tick_size,
+                            fee_rate_bps: market.market.fee_rate_bps,
+                        },
+                    );
+                }
+
+                result.push(Action::PlaceOrder(order));
+            }
+        }
+
+        result
+    }
+
+    /// Handle an orderbook update: update cached asks, peak bids, check
+    /// stop-losses, and trigger post-entry exits on our positions.
+    async fn handle_orderbook_update(&self, snapshot: &OrderbookSnapshot) -> Vec<Action> {
+        // Update cached asks
+        if let Some(best_ask) = snapshot.asks.first() {
+            let mut cached = self.base.cached_asks.write().await;
+            cached.insert(snapshot.token_id.clone(), best_ask.price);
+        }
+
+        // Update peak_bid for trailing stop
+        if let Some(current_bid) = snapshot.best_bid() {
+            self.base
+                .update_peak_bid(&snapshot.token_id, current_bid)
+                .await;
+        }
+
+        // Check stop-losses on our positions
+        let mut actions = Vec::new();
+        let position_ids: Vec<(MarketId, ArbitragePosition)> = {
+            let positions = self.base.positions.read().await;
+            positions
+                .iter()
+                .flat_map(|(mid, plist)| plist.iter().map(|p| (mid.clone(), p.clone())))
+                .filter(|(_, p)| p.mode == ArbitrageMode::TailEnd)
+                .collect()
+        };
+
+        for (_, pos) in position_ids {
+            if pos.token_id != snapshot.token_id {
+                continue;
+            }
+
+            // Skip if stop-loss already in flight or in cooldown
+            {
+                let pending_sl = self.base.pending_stop_loss.read().await;
+                if pending_sl.contains_key(&pos.token_id) {
+                    continue;
+                }
+            }
+            if self.base.is_stop_loss_cooled_down(&pos.token_id).await {
+                continue;
+            }
+
+            if let Some((action, exit_price, trigger)) =
+                self.base.check_stop_loss(&pos, snapshot).await
+            {
+                info!(
+                    market = %pos.market_id,
+                    entry = %pos.entry_price,
+                    exit = %exit_price,
+                    side = ?pos.side,
+                    reason = trigger.reason,
+                    peak_bid = %trigger.peak_bid,
+                    effective_distance = %trigger.effective_distance,
+                    time_remaining = trigger.time_remaining,
+                    "TailEnd stop-loss triggered"
+                );
+                let mut pending_sl = self.base.pending_stop_loss.write().await;
+                pending_sl.insert(pos.token_id.clone(), exit_price);
+                actions.push(action);
+                continue;
+            }
+
+            // Post-entry confirmation: exit if price drops significantly
+            // within 10 seconds of entry (catches false signals immediately)
+            let seconds_since_entry = self.base.event_time().await
+                .signed_duration_since(pos.entry_time)
+                .num_seconds();
+            if seconds_since_entry <= 10
+                && let Some(current_bid) = snapshot.best_bid()
+            {
+                // Exit if market price drops below 0.85 (85%)
+                let post_entry_exit_threshold = Decimal::new(85, 2);
+                if current_bid < post_entry_exit_threshold {
+                    info!(
+                        market = %pos.market_id,
+                        entry_market_price = %pos.entry_market_price,
+                        current_bid = %current_bid,
+                        seconds_since_entry = seconds_since_entry,
+                        "TailEnd post-entry exit triggered: price dropped below 0.85"
+                    );
+                    let order = OrderRequest::new(
+                        pos.token_id.clone(),
+                        current_bid,
+                        pos.size,
+                        OrderSide::Sell,
+                        OrderType::Fok,
+                        false, // neg_risk - will be set from market info if needed
+                    )
+                    .with_tick_size(pos.tick_size)
+                    .with_fee_rate_bps(pos.fee_rate_bps);
+                    let mut pending_sl = self.base.pending_stop_loss.write().await;
+                    pending_sl.insert(pos.token_id.clone(), current_bid);
+                    actions.push(Action::PlaceOrder(order));
+                }
+            }
+        }
+
+        actions
+    }
+
     /// Handle a fully filled GTC order event.
     async fn on_order_filled(
         &self,
@@ -429,24 +717,13 @@ impl TailEndStrategy {
         );
 
         let now = self.base.event_time().await;
-        let position = ArbitragePosition {
-            market_id: lo.market_id.clone(),
-            token_id: lo.token_id,
-            side: lo.side,
-            entry_price: price,
+        let position = ArbitragePosition::from_limit_order(
+            &lo,
+            price,
             size,
-            reference_price: lo.reference_price,
-            coin: lo.coin,
-            order_id: Some(order_id.to_string()),
-            entry_time: now,
-            kelly_fraction: lo.kelly_fraction,
-            peak_bid: price,
-            mode: lo.mode,
-            estimated_fee: lo.estimated_fee,
-            entry_market_price: price,
-            tick_size: lo.tick_size,
-            fee_rate_bps: lo.fee_rate_bps,
-        };
+            Some(order_id.to_string()),
+            now,
+        );
 
         self.base.record_position(position).await;
         vec![]
@@ -488,311 +765,10 @@ impl Strategy for TailEndStrategy {
                 price,
                 source,
                 ..
-            }) => {
-                // Record price and promote any pending markets
-                let now = ctx.now().await;
-                let (_, promote_actions) =
-                    self.base.record_price(symbol, *price, source, now).await;
-                let mut result = promote_actions;
-
-                // Fast pre-filter: skip coins where no market is near expiration.
-                // This avoids acquiring active_markets lock + iterating for 99%+ of events.
-                {
-                    let nearest = self.base.coin_nearest_expiry.read().await;
-                    if let Some(expiry) = nearest.get(symbol.as_str()) {
-                        let now = ctx.now().await;
-                        let secs_remaining = (*expiry - now).num_seconds();
-                        if secs_remaining > self.base.config.tailend.time_threshold_secs as i64 {
-                            self.base.record_tailend_skip("coin_not_near_expiry").await;
-                            return Ok(result);
-                        }
-                    }
-                }
-
-                // Find active markets for this coin
-                let market_ids: Vec<MarketId> = {
-                    let markets = self.base.active_markets.read().await;
-                    markets
-                        .iter()
-                        .filter(|(_, m)| m.coin == *symbol)
-                        .map(|(id, _)| id.clone())
-                        .collect()
-                };
-
-                for market_id in market_ids {
-                    // Skip if market is in stale-removal cooldown
-                    if self.base.is_stale_market_cooled_down(&market_id).await {
-                        debug!(
-                            market = %market_id,
-                            "TailEnd skip: stale market cooldown active"
-                        );
-                        self.base.record_tailend_skip("stale_cooldown").await;
-                        continue;
-                    }
-
-                    // Skip if in FOK rejection cooldown
-                    if self.base.is_fok_cooled_down(&market_id).await {
-                        debug!(
-                            market = %market_id,
-                            "TailEnd skip: FOK rejection cooldown active"
-                        );
-                        self.base.record_tailend_skip("fok_cooldown").await;
-                        continue;
-                    }
-
-                    // Skip if we already have exposure
-                    if self.base.has_market_exposure(&market_id).await {
-                        debug!(
-                            market = %market_id,
-                            "TailEnd skip: already have exposure to market"
-                        );
-                        self.base.record_tailend_skip("exposure").await;
-                        continue;
-                    }
-
-                    // Check position limits
-                    if !self.base.can_open_position().await {
-                        debug!(
-                            market = %market_id,
-                            "TailEnd skip: max positions reached"
-                        );
-                        self.base.record_tailend_skip("max_positions").await;
-                        break;
-                    }
-
-                    // Get market info for order construction
-                    let market_info = {
-                        let markets = self.base.active_markets.read().await;
-                        markets.get(&market_id).cloned()
-                    };
-
-                    if let Some(opp) = self.evaluate_opportunity(&market_id, *price, ctx).await {
-                        if opp.buy_price.is_zero() {
-                            warn!(market = %market_id, "skipping TailEnd opportunity with zero buy_price");
-                            continue;
-                        }
-
-                        // TailEnd uses fixed sizing (no Kelly - confidence is always 1.0)
-                        // Round to 2dp immediately — raw division produces 28+ decimals
-                        // which confuses logs and depth comparisons
-                        let mut size = (self.base.config.sizing.base_size / opp.buy_price)
-                            .round_dp_with_strategy(
-                                2,
-                                rust_decimal::RoundingStrategy::ToZero,
-                            );
-
-                        // Cap to available orderbook depth to avoid guaranteed FOK rejection
-                        let available = {
-                            let md = ctx.market_data.read().await;
-                            match md.orderbooks.get(&opp.token_id) {
-                                Some(ob) => {
-                                    let max_age = self.base.config.tailend.stale_ob_secs;
-                                    let age = ctx
-                                        .now()
-                                        .await
-                                        .signed_duration_since(ob.timestamp)
-                                        .num_seconds();
-                                    if age > max_age {
-                                        warn!(
-                                            market = %market_id,
-                                            age_secs = age,
-                                            max_age_secs = max_age,
-                                            "TailEnd skip: stale orderbook"
-                                        );
-                                        self.base.record_tailend_skip("stale_ob").await;
-                                        continue;
-                                    }
-                                    // Cumulative depth at all ask levels up to our buy price
-                                    ob.ask_depth_up_to(opp.buy_price)
-                                }
-                                None => Decimal::ZERO,
-                            }
-                        };
-                        // 50% safety margin — 80% was still too aggressive for competitive tail-end windows
-                        // where multiple bots race for the same asks during ~1-5s total latency
-                        let safe_available = available * Decimal::new(50, 2);
-                        if safe_available < size {
-                            warn!(
-                                market = %market_id,
-                                wanted = %size,
-                                available = %available,
-                                safe_available = %safe_available,
-                                "TailEnd: capping order size to safe available ask depth"
-                            );
-                            size = safe_available;
-                        }
-
-                        // Validate minimum order size
-                        if !self.base.validate_min_order_size(&market_id, size).await {
-                            continue;
-                        }
-
-                        // TailEnd uses GTC orders with aggressive pricing (at/above ask).
-                        // GTC avoids FOK USDC clamping at extreme prices and gets 0% maker fee.
-                        let limit_offset = self.base.config.order.limit_offset;
-                        let aggressive_price = (opp.buy_price + limit_offset).min(Decimal::new(99, 2));
-                        let order = if let Some(ref market) = market_info {
-                            OrderRequest::new(
-                                opp.token_id.clone(),
-                                aggressive_price,
-                                size,
-                                OrderSide::Buy,
-                                OrderType::Gtc,
-                                market.market.neg_risk,
-                            )
-                            .with_tick_size(market.market.tick_size)
-                            .with_fee_rate_bps(market.market.fee_rate_bps)
-                        } else {
-                            OrderRequest::new(
-                                opp.token_id.clone(),
-                                aggressive_price,
-                                size,
-                                OrderSide::Buy,
-                                OrderType::Gtc,
-                                false,
-                            )
-                        };
-
-                        info!(
-                            mode = ?opp.mode,
-                            market = %market_id,
-                            confidence = %opp.confidence,
-                            ask_price = %opp.buy_price,
-                            limit_price = %aggressive_price,
-                            size = %size,
-                            available_depth = %available,
-                            safe_depth = %safe_available,
-                            side = ?opp.outcome_to_buy,
-                            "Submitting TailEnd GTC order"
-                        );
-
-                        // Track pending order
-                        if let Some(market) = market_info {
-                            let mut pending = self.base.pending_orders.write().await;
-                            pending.insert(
-                                opp.token_id.clone(),
-                                PendingOrder {
-                                    market_id: market_id.clone(),
-                                    token_id: opp.token_id.clone(),
-                                    side: opp.outcome_to_buy,
-                                    price: opp.buy_price,
-                                    size,
-                                    reference_price: market.reference_price,
-                                    coin: market.coin.clone(),
-                                    order_type: OrderType::Gtc,
-                                    mode: ArbitrageMode::TailEnd,
-                                    kelly_fraction: None,
-                                    estimated_fee: opp.estimated_fee,
-                                    tick_size: market.market.tick_size,
-                                    fee_rate_bps: market.market.fee_rate_bps,
-                                    },
-                                );
-                        }
-
-                        result.push(Action::PlaceOrder(order));
-                    }
-                }
-
-                result
-            }
+            }) => self.handle_external_price(symbol, *price, source, ctx).await,
 
             Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot)) => {
-                // Update cached asks
-                if let Some(best_ask) = snapshot.asks.first() {
-                    let mut cached = self.base.cached_asks.write().await;
-                    cached.insert(snapshot.token_id.clone(), best_ask.price);
-                }
-
-                // Update peak_bid for trailing stop
-                if let Some(current_bid) = snapshot.best_bid() {
-                    self.base
-                        .update_peak_bid(&snapshot.token_id, current_bid)
-                        .await;
-                }
-
-                // Check stop-losses on our positions
-                let mut actions = Vec::new();
-                let position_ids: Vec<(MarketId, ArbitragePosition)> = {
-                    let positions = self.base.positions.read().await;
-                    positions
-                        .iter()
-                        .flat_map(|(mid, plist)| plist.iter().map(|p| (mid.clone(), p.clone())))
-                        .filter(|(_, p)| p.mode == ArbitrageMode::TailEnd)
-                        .collect()
-                };
-
-                for (_, pos) in position_ids {
-                    if pos.token_id != snapshot.token_id {
-                        continue;
-                    }
-
-                    // Skip if stop-loss already in flight or in cooldown
-                    {
-                        let pending_sl = self.base.pending_stop_loss.read().await;
-                        if pending_sl.contains_key(&pos.token_id) {
-                            continue;
-                        }
-                    }
-                    if self.base.is_stop_loss_cooled_down(&pos.token_id).await {
-                        continue;
-                    }
-
-                    if let Some((action, exit_price, trigger)) =
-                        self.base.check_stop_loss(&pos, snapshot).await
-                    {
-                        info!(
-                            market = %pos.market_id,
-                            entry = %pos.entry_price,
-                            exit = %exit_price,
-                            side = ?pos.side,
-                            reason = trigger.reason,
-                            peak_bid = %trigger.peak_bid,
-                            effective_distance = %trigger.effective_distance,
-                            time_remaining = trigger.time_remaining,
-                            "TailEnd stop-loss triggered"
-                        );
-                        let mut pending_sl = self.base.pending_stop_loss.write().await;
-                        pending_sl.insert(pos.token_id.clone(), exit_price);
-                        actions.push(action);
-                        continue;
-                    }
-
-                    // Post-entry confirmation: exit if price drops significantly
-                    // within 10 seconds of entry (catches false signals immediately)
-                    let seconds_since_entry = self.base.event_time().await
-                        .signed_duration_since(pos.entry_time)
-                        .num_seconds();
-                    if seconds_since_entry <= 10
-                        && let Some(current_bid) = snapshot.best_bid()
-                    {
-                        // Exit if market price drops below 0.85 (85%)
-                        let post_entry_exit_threshold = Decimal::new(85, 2);
-                        if current_bid < post_entry_exit_threshold {
-                            info!(
-                                market = %pos.market_id,
-                                entry_market_price = %pos.entry_market_price,
-                                current_bid = %current_bid,
-                                seconds_since_entry = seconds_since_entry,
-                                "TailEnd post-entry exit triggered: price dropped below 0.85"
-                            );
-                            let order = OrderRequest::new(
-                                pos.token_id.clone(),
-                                current_bid,
-                                pos.size,
-                                OrderSide::Sell,
-                                OrderType::Fok,
-                                false, // neg_risk - will be set from market info if needed
-                            )
-                            .with_tick_size(pos.tick_size)
-                            .with_fee_rate_bps(pos.fee_rate_bps);
-                            let mut pending_sl = self.base.pending_stop_loss.write().await;
-                            pending_sl.insert(pos.token_id.clone(), current_bid);
-                            actions.push(Action::PlaceOrder(order));
-                        }
-                    }
-                }
-
-                actions
+                self.handle_orderbook_update(snapshot).await
             }
 
             Event::OrderUpdate(OrderEvent::Placed(result)) => self.on_order_placed(result).await,

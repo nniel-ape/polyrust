@@ -249,6 +249,39 @@ pub struct ArbitragePosition {
     pub fee_rate_bps: u32,
 }
 
+impl ArbitragePosition {
+    /// Create a position from a filled limit order.
+    ///
+    /// Used by both `on_order_placed` (FOK fallback) and `on_order_filled` (GTC fill)
+    /// to avoid duplicating the field mapping.
+    pub fn from_limit_order(
+        lo: &OpenLimitOrder,
+        fill_price: Decimal,
+        fill_size: Decimal,
+        order_id: Option<String>,
+        entry_time: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            market_id: lo.market_id.clone(),
+            token_id: lo.token_id.clone(),
+            side: lo.side,
+            entry_price: fill_price,
+            size: fill_size,
+            reference_price: lo.reference_price,
+            coin: lo.coin.clone(),
+            order_id,
+            entry_time,
+            kelly_fraction: lo.kelly_fraction,
+            peak_bid: fill_price,
+            mode: lo.mode.clone(),
+            estimated_fee: lo.estimated_fee,
+            entry_market_price: fill_price,
+            tick_size: lo.tick_size,
+            fee_rate_bps: lo.fee_rate_bps,
+        }
+    }
+}
+
 /// A detected price spike event.
 ///
 /// Tracks large, rapid price movements that may signal arbitrage opportunities.
