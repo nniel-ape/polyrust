@@ -577,6 +577,21 @@ impl BacktestEngine {
         self.strategy.on_start(&self.ctx).await
     }
 
+    /// Get token maps built during load_events() (for sharing with sweep engines).
+    pub fn token_maps(&self) -> (HashMap<String, (String, String)>, HashMap<String, String>) {
+        (self.market_tokens.clone(), self.token_to_market.clone())
+    }
+
+    /// Inject pre-built token maps (used by sweep runner to avoid re-loading).
+    pub fn set_token_maps(
+        &mut self,
+        market_tokens: HashMap<String, (String, String)>,
+        token_to_market: HashMap<String, String>,
+    ) {
+        self.market_tokens = market_tokens;
+        self.token_to_market = token_to_market;
+    }
+
     /// Load historical events from the data store.
     ///
     /// Public so sweep runner can call it once and share events across runs.
