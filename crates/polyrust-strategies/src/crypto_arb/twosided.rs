@@ -9,7 +9,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use rust_decimal::Decimal;
 use tracing::{info, warn};
 
@@ -40,7 +39,8 @@ impl TwoSidedStrategy {
         let markets = self.base.active_markets.read().await;
         let market = markets.get(market_id)?;
 
-        let time_remaining = market.market.seconds_remaining();
+        let now = ctx.now().await;
+        let time_remaining = market.market.seconds_remaining_at(now);
         if time_remaining <= 0 {
             return None;
         }
@@ -167,10 +167,13 @@ impl TwoSidedStrategy {
                         size: pending.size,
                         reference_price: pending.reference_price,
                         coin: pending.coin,
-                        placed_at: tokio::time::Instant::now(),
+                        placed_at: self.base.event_time().await,
                         mode: pending.mode,
                         kelly_fraction: pending.kelly_fraction,
                         estimated_fee: pending.estimated_fee,
+                        tick_size: pending.tick_size,
+                        fee_rate_bps: pending.fee_rate_bps,
+                        cancel_pending: false,
                     },
                 );
             }
@@ -178,6 +181,7 @@ impl TwoSidedStrategy {
         }
 
         // FOK orders fill immediately
+        let now = self.base.event_time().await;
         let position = ArbitragePosition {
             market_id: pending.market_id.clone(),
             token_id: pending.token_id,
@@ -187,11 +191,14 @@ impl TwoSidedStrategy {
             reference_price: pending.reference_price,
             coin: pending.coin,
             order_id: result.order_id.clone(),
-            entry_time: Utc::now(),
+            entry_time: now,
             kelly_fraction: pending.kelly_fraction,
             peak_bid: pending.price,
             mode: pending.mode.clone(),
             estimated_fee: pending.estimated_fee,
+            entry_market_price: pending.price,
+            tick_size: pending.tick_size,
+            fee_rate_bps: pending.fee_rate_bps,
         };
 
         info!(
@@ -234,6 +241,7 @@ impl TwoSidedStrategy {
             "TwoSided GTC order filled"
         );
 
+        let now = self.base.event_time().await;
         let position = ArbitragePosition {
             market_id: lo.market_id.clone(),
             token_id: lo.token_id,
@@ -243,11 +251,14 @@ impl TwoSidedStrategy {
             reference_price: lo.reference_price,
             coin: lo.coin,
             order_id: Some(order_id.to_string()),
-            entry_time: Utc::now(),
+            entry_time: now,
             kelly_fraction: lo.kelly_fraction,
             peak_bid: price,
             mode: lo.mode,
             estimated_fee: lo.estimated_fee,
+            entry_market_price: price,
+            tick_size: lo.tick_size,
+            fee_rate_bps: lo.fee_rate_bps,
         };
 
         self.base.record_position(position).await;
@@ -274,6 +285,8 @@ impl Strategy for TwoSidedStrategy {
     }
 
     async fn on_event(&mut self, event: &Event, ctx: &StrategyContext) -> Result<Vec<Action>> {
+        self.base.update_event_time(ctx).await;
+
         let mut actions = match event {
             Event::MarketData(MarketDataEvent::MarketDiscovered(market)) => {
                 self.base.on_market_discovered(market, ctx).await
@@ -290,8 +303,9 @@ impl Strategy for TwoSidedStrategy {
                 ..
             }) => {
                 // Record price and promote any pending markets
+                let now = ctx.now().await;
                 let (_, promote_actions) =
-                    self.base.record_price(symbol, *price, source).await;
+                    self.base.record_price(symbol, *price, source, now).await;
                 let mut result = promote_actions;
 
                 // Find active markets for this coin
@@ -305,6 +319,11 @@ impl Strategy for TwoSidedStrategy {
                 };
 
                 for market_id in market_ids {
+                    // Skip if market is in stale-removal cooldown
+                    if self.base.is_stale_market_cooled_down(&market_id).await {
+                        continue;
+                    }
+
                     // Skip if we already have exposure
                     if self.base.has_market_exposure(&market_id).await {
                         continue;
@@ -344,6 +363,11 @@ impl Strategy for TwoSidedStrategy {
                             continue;
                         }
 
+                        // Validate minimum order size for both legs
+                        if !self.base.validate_min_order_size(&market_id, share_count).await {
+                            continue;
+                        }
+
                         // Determine order type and price
                         let (order_type, up_price, down_price) =
                             if self.base.config.order.hybrid_mode {
@@ -357,23 +381,35 @@ impl Strategy for TwoSidedStrategy {
                                 (OrderType::Fok, opps[0].buy_price, opps[1].buy_price)
                             };
 
+                        // Get market info for tick_size and fee_rate_bps
+                        let markets = self.base.active_markets.read().await;
+                        let market = markets.get(&market_id);
+                        let tick_size = market.map(|m| m.market.tick_size).unwrap_or_else(|| Decimal::new(1, 2));
+                        let fee_rate_bps = market.map(|m| m.market.fee_rate_bps).unwrap_or(0);
+                        let neg_risk = market.map(|m| m.market.neg_risk).unwrap_or(false);
+                        drop(markets);
+
                         let batch_orders = vec![
-                            OrderRequest {
-                                token_id: opps[0].token_id.clone(),
-                                price: up_price,
-                                size: share_count,
-                                side: OrderSide::Buy,
+                            OrderRequest::new(
+                                opps[0].token_id.clone(),
+                                up_price,
+                                share_count,
+                                OrderSide::Buy,
                                 order_type,
-                                neg_risk: false,
-                            },
-                            OrderRequest {
-                                token_id: opps[1].token_id.clone(),
-                                price: down_price,
-                                size: share_count,
-                                side: OrderSide::Buy,
+                                neg_risk,
+                            )
+                            .with_tick_size(tick_size)
+                            .with_fee_rate_bps(fee_rate_bps),
+                            OrderRequest::new(
+                                opps[1].token_id.clone(),
+                                down_price,
+                                share_count,
+                                OrderSide::Buy,
                                 order_type,
-                                neg_risk: false,
-                            },
+                                neg_risk,
+                            )
+                            .with_tick_size(tick_size)
+                            .with_fee_rate_bps(fee_rate_bps),
                         ];
 
                         info!(
@@ -408,6 +444,8 @@ impl Strategy for TwoSidedStrategy {
                                             mode: ArbitrageMode::TwoSided,
                                             kelly_fraction: None,
                                             estimated_fee: opp.estimated_fee,
+                                            tick_size: market.market.tick_size,
+                                            fee_rate_bps: market.market.fee_rate_bps,
                                         },
                                     );
                                 }
@@ -479,6 +517,12 @@ impl Strategy for TwoSidedStrategy {
                 vec![]
             }
 
+            Event::OrderUpdate(OrderEvent::CancelFailed { order_id, reason }) => {
+                let (_found, fill_actions) =
+                    self.base.handle_cancel_failed(order_id, reason).await;
+                fill_actions
+            }
+
             Event::OrderUpdate(OrderEvent::Rejected { token_id, .. }) => {
                 if let Some(token_id) = token_id {
                     let mut pending = self.base.pending_orders.write().await;
@@ -514,5 +558,190 @@ impl Strategy for TwoSidedStrategy {
 
     fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> {
         None // Uses shared dashboard
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use rust_decimal_macros::dec;
+
+    use crate::crypto_arb::config::ArbitrageConfig;
+    use crate::crypto_arb::types::{MarketWithReference, ReferenceQuality};
+
+    fn make_market_info(id: &str, end_date: chrono::DateTime<Utc>) -> polyrust_core::types::MarketInfo {
+        polyrust_core::types::MarketInfo {
+            id: id.to_string(),
+            slug: "btc-up-down".to_string(),
+            question: "Will BTC go up?".to_string(),
+            start_date: None,
+            end_date,
+            token_ids: polyrust_core::types::TokenIds {
+                outcome_a: "token_up".to_string(),
+                outcome_b: "token_down".to_string(),
+            },
+            accepting_orders: true,
+            neg_risk: false,
+            min_order_size: dec!(5.0),
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+        }
+    }
+
+    async fn make_twosided(time_remaining: i64) -> (TwoSidedStrategy, StrategyContext) {
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.twosided.enabled = true;
+        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+        let market = MarketWithReference {
+            market: make_market_info("market1", Utc::now() + Duration::seconds(time_remaining)),
+            reference_price: dec!(50000),
+            reference_quality: ReferenceQuality::Exact,
+            discovery_time: Utc::now(),
+            coin: "BTC".to_string(),
+        };
+        base.active_markets
+            .write()
+            .await
+            .insert("market1".to_string(), market);
+
+        let ctx = StrategyContext::new();
+        let strategy = TwoSidedStrategy::new(base);
+        (strategy, ctx)
+    }
+
+    #[tokio::test]
+    async fn twosided_generates_two_opportunities() {
+        let (strategy, ctx) = make_twosided(600).await;
+
+        // Both asks below combined threshold: 0.47 + 0.48 = 0.95 < 0.98
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.47), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_down".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.48), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opps = strategy.evaluate_opportunity(&"market1".to_string(), &ctx).await;
+        assert!(opps.is_some());
+        let opps = opps.unwrap();
+        assert_eq!(opps.len(), 2);
+        assert_eq!(opps[0].outcome_to_buy, OutcomeSide::Up);
+        assert_eq!(opps[1].outcome_to_buy, OutcomeSide::Down);
+        assert_eq!(opps[0].buy_price, dec!(0.47));
+        assert_eq!(opps[1].buy_price, dec!(0.48));
+        assert_eq!(opps[0].mode, ArbitrageMode::TwoSided);
+    }
+
+    #[tokio::test]
+    async fn twosided_skips_above_combined_threshold() {
+        let (strategy, ctx) = make_twosided(600).await;
+
+        // Combined = 0.50 + 0.50 = 1.00 >= 0.98
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.50), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_down".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.50), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opps = strategy.evaluate_opportunity(&"market1".to_string(), &ctx).await;
+        assert!(opps.is_none());
+    }
+
+    #[tokio::test]
+    async fn twosided_skips_expired_market() {
+        let (strategy, ctx) = make_twosided(-10).await; // Already expired
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.40), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_down".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.40), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opps = strategy.evaluate_opportunity(&"market1".to_string(), &ctx).await;
+        assert!(opps.is_none());
+    }
+
+    #[tokio::test]
+    async fn twosided_equal_profit_margin_both_legs() {
+        let (strategy, ctx) = make_twosided(600).await;
+
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.45), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+            md.orderbooks.insert(
+                "token_down".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_down".to_string(),
+                    bids: vec![],
+                    asks: vec![polyrust_core::types::OrderbookLevel { price: dec!(0.45), size: dec!(100) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        let opps = strategy.evaluate_opportunity(&"market1".to_string(), &ctx).await;
+        assert!(opps.is_some());
+        let opps = opps.unwrap();
+        // Both legs share the same profit_margin = 1 - 0.90 = 0.10
+        assert_eq!(opps[0].profit_margin, opps[1].profit_margin);
+        assert_eq!(opps[0].profit_margin, dec!(0.10));
     }
 }

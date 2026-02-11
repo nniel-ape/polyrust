@@ -1,11 +1,33 @@
 //! Configuration structs for the crypto arbitrage strategies.
 //!
-//! Each trading mode (TailEnd, TwoSided, Confirmed, CrossCorrelated) has its own
-//! configuration struct with an `enabled` flag. All modes are disabled by default
-//! and must be explicitly enabled in config.
+//! Each trading mode (TailEnd, TwoSided) has its own configuration struct with
+//! an `enabled` flag. All modes are disabled by default and must be explicitly
+//! enabled in config.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Reference Quality Level
+// ---------------------------------------------------------------------------
+
+/// Minimum required reference price quality for tail-end entry.
+///
+/// Used to filter out trades when the reference price is stale or inaccurate.
+/// Ordered from lowest to highest quality (for Ord derivation).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceQualityLevel {
+    /// Current price at discovery time (least accurate, fallback).
+    #[default]
+    Current,
+    /// Historical price entry (within 30s of window start).
+    Historical,
+    /// On-chain Chainlink price lookup.
+    OnChain,
+    /// Exact boundary snapshot (captured within 2s of window start).
+    Exact,
+}
 
 // ---------------------------------------------------------------------------
 // Per-Mode Configuration Structs
@@ -15,7 +37,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// Entry conditions:
 /// - Time remaining < `time_threshold_secs` (default 120s)
-/// - Predicted winner's ask >= `ask_threshold` (default 0.90)
+/// - Predicted winner's ask >= dynamic threshold based on time remaining
+/// - Reference quality >= `min_reference_quality` (default Historical)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TailEndConfig {
@@ -24,7 +47,49 @@ pub struct TailEndConfig {
     /// Maximum seconds remaining to enter (default 120).
     pub time_threshold_secs: u64,
     /// Minimum ask price to enter (default 0.90).
+    /// Deprecated: use dynamic thresholds below instead.
     pub ask_threshold: Decimal,
+    /// Minimum required reference quality to enter (default Historical).
+    /// Trades with Current quality will be skipped.
+    pub min_reference_quality: ReferenceQualityLevel,
+    /// Dynamic ask thresholds by time bucket (in seconds remaining).
+    /// Higher thresholds as expiration approaches to reduce false positives.
+    /// Default: 120s->0.90, 90s->0.92, 60s->0.93, 30s->0.95
+    #[serde(default = "default_time_thresholds")]
+    pub dynamic_thresholds: Vec<(u64, Decimal)>,
+    /// Maximum spread in basis points (1 bp = 0.01%, default 100 = 1%).
+    /// Filters out illiquid markets where wide spread masquerades as certainty.
+    pub max_spread_bps: Decimal,
+    /// Minimum seconds the crypto price must have favored the predicted direction.
+    /// Filters out sudden spikes that immediately reverse. Default: 10 seconds.
+    /// With ~5s RTDS intervals, 10s captures 2-3 ticks to establish direction.
+    pub min_sustained_secs: u64,
+    /// Maximum recent volatility (price wick) in last 10 seconds.
+    /// Filters out choppy/volatile conditions. Default: 0.01 (1%).
+    pub max_recent_volatility: Decimal,
+    /// Cooldown in seconds after a FOK order is rejected before re-evaluating
+    /// the same market. Prevents retry storms on every price tick. Default: 15.
+    pub fok_cooldown_secs: u64,
+    /// Maximum age in seconds for an orderbook snapshot to be considered fresh.
+    /// Rejects opportunities if the orderbook is older than this.
+    /// Docker adds network latency, so 15s is more realistic than 5s. Default: 15.
+    pub stale_ob_secs: i64,
+    /// Maximum price drop from entry price within post-entry window to trigger exit.
+    /// Relative to entry price (e.g., 0.05 = exit if bid drops 5 cents below entry).
+    /// Previously hardcoded to absolute 0.85 threshold. Default: 0.05.
+    pub post_entry_exit_drop: Decimal,
+    /// Window in seconds after entry during which post-entry exit is active.
+    /// Default: 10 seconds.
+    pub post_entry_window_secs: i64,
+}
+
+fn default_time_thresholds() -> Vec<(u64, Decimal)> {
+    vec![
+        (120, Decimal::new(90, 2)),  // 0.90 at 120s
+        (90, Decimal::new(92, 2)),   // 0.92 at 90s
+        (60, Decimal::new(93, 2)),   // 0.93 at 60s
+        (30, Decimal::new(95, 2)),   // 0.95 at 30s
+    ]
 }
 
 impl Default for TailEndConfig {
@@ -33,6 +98,15 @@ impl Default for TailEndConfig {
             enabled: false,
             time_threshold_secs: 120,
             ask_threshold: Decimal::new(90, 2), // 0.90
+            min_reference_quality: ReferenceQualityLevel::Historical, // Default: skip Current quality
+            dynamic_thresholds: default_time_thresholds(),
+            max_spread_bps: Decimal::new(200, 0), // 200 bps = 2%
+            min_sustained_secs: 5,
+            max_recent_volatility: Decimal::new(2, 2), // 0.02 = 2%
+            fok_cooldown_secs: 15,
+            stale_ob_secs: 15,
+            post_entry_exit_drop: Decimal::new(5, 2), // 0.05 (5 cents below entry)
+            post_entry_window_secs: 10,
         }
     }
 }
@@ -56,32 +130,6 @@ impl Default for TwoSidedConfig {
         Self {
             enabled: false,
             combined_threshold: Decimal::new(98, 2), // 0.98
-        }
-    }
-}
-
-/// Confirmed mode configuration.
-///
-/// Entry conditions:
-/// - Dynamic confidence model based on price movement
-/// - Net profit margin >= `min_margin` after fees
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ConfirmedConfig {
-    /// Enable Confirmed trading mode. Default: false.
-    pub enabled: bool,
-    /// Minimum confidence level to enter (default 0.50).
-    pub min_confidence: Decimal,
-    /// Minimum net profit margin after fees (default 0.02 = 2%).
-    pub min_margin: Decimal,
-}
-
-impl Default for ConfirmedConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            min_confidence: Decimal::new(50, 2), // 0.50
-            min_margin: Decimal::new(2, 2),      // 0.02
         }
     }
 }
@@ -132,7 +180,7 @@ impl Default for SpikeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OrderConfig {
-    /// Use GTC maker orders for Confirmed/TwoSided modes.
+    /// Use GTC maker orders for TwoSided mode.
     pub hybrid_mode: bool,
     /// Price offset below best ask for GTC limit orders.
     pub limit_offset: Decimal,
@@ -217,6 +265,17 @@ pub struct StopLossConfig {
     pub trailing_distance: Decimal,
     /// Tighten trailing distance as time remaining decreases.
     pub time_decay: bool,
+    /// Floor on effective trailing distance after time decay.
+    /// Prevents noise triggers when time_decay shrinks distance to near-zero.
+    pub trailing_min_distance: Decimal,
+    /// Cooldown in seconds after a stale position is removed before re-entering
+    /// the same market. Prevents immediate re-entry loops.
+    pub stale_market_cooldown_secs: u64,
+    /// Minimum seconds remaining for stop-loss to be active.
+    /// Below this threshold, stop-losses are suppressed to avoid exiting
+    /// positions that are about to settle. Default: 0 (always active).
+    /// Previously hardcoded to 60, which suppressed ALL tailend stop-losses.
+    pub min_remaining_secs: i64,
 }
 
 impl Default for StopLossConfig {
@@ -227,34 +286,9 @@ impl Default for StopLossConfig {
             trailing_enabled: true,
             trailing_distance: Decimal::new(3, 2), // 0.03
             time_decay: true,
-        }
-    }
-}
-
-/// Cross-market correlation configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CorrelationConfig {
-    /// Enable cross-market correlation signals.
-    pub enabled: bool,
-    /// Minimum spike percentage in leader coin to trigger follower signals.
-    pub min_spike_pct: Decimal,
-    /// Leader → follower coin pairs (e.g. BTC → [ETH, SOL]).
-    pub pairs: Vec<(String, Vec<String>)>,
-    /// Confidence discount factor for correlation signals (default 0.7).
-    pub discount_factor: Decimal,
-}
-
-impl Default for CorrelationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            min_spike_pct: Decimal::new(1, 2), // 0.01
-            pairs: vec![
-                ("BTC".into(), vec!["ETH".into(), "SOL".into()]),
-                ("ETH".into(), vec!["SOL".into()]),
-            ],
-            discount_factor: Decimal::new(7, 1), // 0.7
+            trailing_min_distance: Decimal::new(1, 2), // 0.01
+            stale_market_cooldown_secs: 120,
+            min_remaining_secs: 0, // Always active (was hardcoded 60)
         }
     }
 }
@@ -284,6 +318,31 @@ impl Default for PerformanceConfig {
     }
 }
 
+/// Order amount rounding configuration.
+///
+/// Polymarket API has specific decimal precision requirements:
+/// - Maker amount (USDC total): max 2 decimals
+/// - Taker amount (shares): max 2 decimals (SDK LOT_SIZE_SCALE = 2)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoundingConfig {
+    /// Maximum decimal places for order size (taker amount).
+    /// SDK enforces max 2 decimals (LOT_SIZE_SCALE = 2).
+    pub size_decimals: u32,
+    /// Maximum decimal places for order price.
+    /// Tick size typically determines this (0.01 = 2 decimals).
+    pub price_decimals: u32,
+}
+
+impl Default for RoundingConfig {
+    fn default() -> Self {
+        Self {
+            size_decimals: 2,  // SDK enforces max 2 (LOT_SIZE_SCALE = 2)
+            price_decimals: 2, // Standard tick size
+        }
+    }
+}
+
 /// Configuration for the crypto arbitrage strategy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -292,7 +351,7 @@ pub struct ArbitrageConfig {
     pub coins: Vec<String>,
     /// Maximum concurrent positions
     pub max_positions: usize,
-    /// Minimum profit margin for confirmed mode
+    /// Minimum profit margin
     pub min_profit_margin: Decimal,
     /// Minimum profit margin in late window (120-300s)
     pub late_window_margin: Decimal,
@@ -310,12 +369,6 @@ pub struct ArbitrageConfig {
     /// TwoSided mode configuration.
     #[serde(default)]
     pub twosided: TwoSidedConfig,
-    /// Confirmed mode configuration.
-    #[serde(default)]
-    pub confirmed: ConfirmedConfig,
-    /// Cross-market correlation configuration.
-    #[serde(default)]
-    pub correlation: CorrelationConfig,
 
     // -------------------------------------------------------------------------
     // Shared configurations
@@ -338,6 +391,9 @@ pub struct ArbitrageConfig {
     /// Performance tracking configuration.
     #[serde(default)]
     pub performance: PerformanceConfig,
+    /// Order amount rounding configuration.
+    #[serde(default)]
+    pub rounding: RoundingConfig,
 }
 
 impl Default for ArbitrageConfig {
@@ -352,8 +408,6 @@ impl Default for ArbitrageConfig {
             // Per-mode configs (all disabled by default)
             tailend: TailEndConfig::default(),
             twosided: TwoSidedConfig::default(),
-            confirmed: ConfirmedConfig::default(),
-            correlation: CorrelationConfig::default(),
             // Shared configs
             fee: FeeConfig::default(),
             spike: SpikeConfig::default(),
@@ -361,6 +415,7 @@ impl Default for ArbitrageConfig {
             sizing: SizingConfig::default(),
             stop_loss: StopLossConfig::default(),
             performance: PerformanceConfig::default(),
+            rounding: RoundingConfig::default(),
         }
     }
 }
@@ -368,9 +423,36 @@ impl Default for ArbitrageConfig {
 impl ArbitrageConfig {
     /// Returns true if at least one trading mode is enabled.
     pub fn any_mode_enabled(&self) -> bool {
-        self.tailend.enabled
-            || self.twosided.enabled
-            || self.confirmed.enabled
-            || self.correlation.enabled
+        self.tailend.enabled || self.twosided.enabled
+    }
+
+    /// Apply environment variable overrides to the configuration.
+    pub fn with_env_overrides(mut self) -> Self {
+        if let Ok(v) = std::env::var("POLY_MIN_PROFIT_MARGIN")
+            && let Ok(d) = v.parse::<Decimal>()
+        {
+            self.min_profit_margin = d;
+        }
+        if let Ok(v) = std::env::var("POLY_TAILEND_MIN_SUSTAINED_SECS")
+            && let Ok(secs) = v.parse::<u64>()
+        {
+            self.tailend.min_sustained_secs = secs;
+        }
+        if let Ok(v) = std::env::var("POLY_TAILEND_MAX_VOLATILITY")
+            && let Ok(d) = v.parse::<Decimal>()
+        {
+            self.tailend.max_recent_volatility = d;
+        }
+        if let Ok(v) = std::env::var("POLY_TAILEND_MAX_SPREAD_BPS")
+            && let Ok(d) = v.parse::<Decimal>()
+        {
+            self.tailend.max_spread_bps = d;
+        }
+        if let Ok(v) = std::env::var("POLY_TAILEND_STALE_OB_SECS")
+            && let Ok(secs) = v.parse::<i64>()
+        {
+            self.tailend.stale_ob_secs = secs;
+        }
+        self
     }
 }

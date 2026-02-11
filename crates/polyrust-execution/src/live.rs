@@ -4,9 +4,7 @@ use async_trait::async_trait;
 use polymarket_client_sdk::POLYGON;
 use polymarket_client_sdk::auth::{LocalSigner, Signer};
 use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, OrdersRequest};
-use polymarket_client_sdk::clob::types::{
-    OrderType as SdkOrderType, Side as SdkSide, SignatureType,
-};
+use polymarket_client_sdk::clob::types::{OrderStatusType, Side as SdkSide, SignatureType};
 use polymarket_client_sdk::clob::{Client, Config as SdkConfig};
 use polymarket_client_sdk::types::{Address as SdkAddress, U256 as SdkU256};
 use rust_decimal::Decimal;
@@ -16,7 +14,9 @@ use polyrust_core::config::Config;
 use polyrust_core::error::{PolyError, Result};
 use polyrust_core::types::*;
 
-use crate::rounding::{round_price, round_size};
+use crate::rounding::build_signable_order;
+use crate::ctf_redeemer::CtfRedeemer;
+use polyrust_core::execution::{RedeemRequest, RedeemResult};
 
 /// Live execution backend using rs-clob-client for real Polymarket orders.
 ///
@@ -37,12 +37,22 @@ trait LiveBackendInner: Send + Sync {
     async fn get_open_orders(&self) -> Result<Vec<Order>>;
     async fn get_positions(&self) -> Result<Vec<Position>>;
     async fn get_balance(&self) -> Result<Decimal>;
+    async fn is_market_resolved(&self, condition_id: &str) -> Result<bool>;
+    async fn redeem_positions(&self, request: &RedeemRequest) -> Result<RedeemResult>;
 }
 
 /// Concrete inner implementation parameterized by the SDK `Kind` and signer type.
 struct LiveBackendImpl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> {
     client: Client<polymarket_client_sdk::auth::state::Authenticated<K>>,
     signer: S,
+    /// Signer's on-chain address (or Safe address as funder).
+    signer_address: SdkAddress,
+    /// Optional Safe address used as `maker` in orders.
+    funder: Option<SdkAddress>,
+    /// Signature type (EOA or GnosisSafe).
+    signature_type: SignatureType,
+    /// CTF redeemer for on-chain position redemption
+    ctf_redeemer: Option<CtfRedeemer>,
 }
 
 impl LiveBackend {
@@ -65,28 +75,57 @@ impl LiveBackend {
 
         let mut auth_builder = client.authentication_builder(&signer);
 
-        if let Some(ref safe_addr) = config.polymarket.safe_address {
-            let funder = SdkAddress::from_str(safe_addr)
+        let (funder, sig_type) = if let Some(ref safe_addr) = config.polymarket.safe_address {
+            let funder_addr = SdkAddress::from_str(safe_addr)
                 .map_err(|e| PolyError::Config(format!("Invalid safe address: {e}")))?;
             auth_builder = auth_builder
-                .funder(funder)
+                .funder(funder_addr)
                 .signature_type(SignatureType::GnosisSafe);
-        }
+            (Some(funder_addr), SignatureType::GnosisSafe)
+        } else {
+            (None, SignatureType::Eoa)
+        };
 
         let authenticated = auth_builder
             .authenticate()
             .await
             .map_err(|e| PolyError::Sdk(format!("Authentication failed: {e}")))?;
 
+        let signer_address = authenticated.address();
+
         info!(
-            address = %authenticated.address(),
+            address = %signer_address,
             "LiveBackend authenticated with Polymarket"
         );
+
+        // Initialize CtfRedeemer if we have RPC URLs
+        let ctf_redeemer = if !config.polymarket.rpc_urls.is_empty() {
+            match CtfRedeemer::new(&config.polymarket.rpc_urls, private_key, config.polymarket.safe_address.as_deref().unwrap_or("")) {
+                Ok(redeemer) => {
+                    info!(rpc_count = config.polymarket.rpc_urls.len(), "CtfRedeemer initialized");
+                    if let Err(e) = redeemer.ensure_approvals().await {
+                        warn!("Token approval check failed: {e} (sells may fail)");
+                    }
+                    Some(redeemer)
+                }
+                Err(e) => {
+                    warn!("Failed to initialize CtfRedeemer: {} (redemption disabled)", e);
+                    None
+                }
+            }
+        } else {
+            warn!("No RPC URLs configured, redemption disabled");
+            None
+        };
 
         Ok(Self {
             inner: Box::new(LiveBackendImpl {
                 client: authenticated,
                 signer,
+                signer_address,
+                funder,
+                signature_type: sig_type,
+                ctf_redeemer,
             }),
         })
     }
@@ -95,6 +134,7 @@ impl LiveBackend {
 #[async_trait]
 impl polyrust_core::execution::ExecutionBackend for LiveBackend {
     async fn place_order(&self, order: &OrderRequest) -> Result<OrderResult> {
+        // Rounding is handled inside build_signable_order
         self.inner.place_order(order).await
     }
 
@@ -120,11 +160,20 @@ impl polyrust_core::execution::ExecutionBackend for LiveBackend {
 
     async fn place_batch_orders(&self, orders: &[OrderRequest]) -> Result<Vec<OrderResult>> {
         // SDK does not expose a batch endpoint; fall back to sequential placement.
+        // Rounding is handled inside build_signable_order.
         let mut results = Vec::with_capacity(orders.len());
         for order in orders {
             results.push(self.inner.place_order(order).await?);
         }
         Ok(results)
+    }
+
+    async fn is_market_resolved(&self, condition_id: &str) -> Result<bool> {
+        self.inner.is_market_resolved(condition_id).await
+    }
+
+    async fn redeem_positions(&self, request: &RedeemRequest) -> Result<RedeemResult> {
+        self.inner.redeem_positions(request).await
     }
 }
 
@@ -136,25 +185,36 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
         let token_id = SdkU256::from_str(&order.token_id)
             .map_err(|e| PolyError::Execution(format!("Invalid token_id: {e}")))?;
 
-        // Set neg_risk on the client's internal cache
+        // Set neg_risk on the client's internal cache (needed by sign())
         self.client.set_neg_risk(token_id, order.neg_risk);
 
-        let price = round_price(order.price);
-        let size = round_size(order.size);
-        let sdk_side = map_order_side(order.side);
-        let sdk_order_type = map_order_type(order.order_type);
-
-        let signable = self
+        // Fetch actual fee_rate_bps from CLOB API (cached by SDK)
+        let fee_rate_bps = self
             .client
-            .limit_order()
-            .token_id(token_id)
-            .side(sdk_side)
-            .price(price)
-            .size(size)
-            .order_type(sdk_order_type)
-            .build()
+            .fee_rate_bps(token_id)
             .await
-            .map_err(|e| PolyError::Sdk(format!("Failed to build order: {e}")))?;
+            .map(|r| r.base_fee)
+            .unwrap_or(order.fee_rate_bps);
+
+        let price = order.price;
+        let size = order.size;
+
+        // Construct SignableOrder directly, bypassing SDK's OrderBuilder.
+        // FOK orders use RAW price (immediate fill, tick alignment irrelevant).
+        // GTC/GTD orders use tick-rounded price (rest in book at tick boundaries).
+        // See rounding.rs for full precision rules.
+        let signable = build_signable_order(
+            token_id,
+            price,
+            size,
+            order.side,
+            order.order_type,
+            order.tick_size,
+            fee_rate_bps,
+            self.signer_address,
+            self.funder,
+            self.signature_type,
+        );
 
         debug!(
             token_id = %order.token_id,
@@ -162,7 +222,8 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
             price = %price,
             size = %size,
             order_type = ?order.order_type,
-            "Signing order"
+            fee_rate_bps = fee_rate_bps,
+            "Signing order (direct construction)"
         );
 
         let signed = self
@@ -188,7 +249,10 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
             price,
             size,
             side: order.side,
-            status: Some(format!("{:?}", response.status)),
+            status: Some(match response.status {
+                OrderStatusType::Matched => "Filled".to_string(),
+                other => format!("{:?}", other),
+            }),
             message: response.error_msg.unwrap_or_else(|| "ok".to_string()),
         };
 
@@ -300,26 +364,45 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
         debug!(balance = %response.balance, "Retrieved USDC balance");
         Ok(response.balance)
     }
+
+    async fn is_market_resolved(&self, condition_id: &str) -> Result<bool> {
+        match &self.ctf_redeemer {
+            Some(redeemer) => redeemer.is_resolved(condition_id).await,
+            None => Err(PolyError::Execution(
+                "CtfRedeemer not initialized (no RPC URL configured)".into(),
+            )),
+        }
+    }
+
+    async fn redeem_positions(&self, request: &RedeemRequest) -> Result<RedeemResult> {
+        match &self.ctf_redeemer {
+            Some(redeemer) => {
+                match redeemer
+                    .redeem(&request.condition_id, request.neg_risk, &request.token_ids)
+                    .await?
+                {
+                    Some(tx_hash) => Ok(RedeemResult {
+                        market_id: request.market_id.clone(),
+                        tx_hash: format!("{:#x}", tx_hash),
+                        success: true,
+                        message: "Position redeemed successfully".to_string(),
+                    }),
+                    None => Ok(RedeemResult {
+                        market_id: request.market_id.clone(),
+                        tx_hash: String::new(),
+                        success: true,
+                        message: "No CTF balance".to_string(),
+                    }),
+                }
+            }
+            None => Err(PolyError::Execution(
+                "CtfRedeemer not initialized (no RPC URL configured)".into(),
+            )),
+        }
+    }
 }
 
 // --- Type mapping helpers ---
-
-/// Map domain OrderSide to SDK Side
-fn map_order_side(side: OrderSide) -> SdkSide {
-    match side {
-        OrderSide::Buy => SdkSide::Buy,
-        OrderSide::Sell => SdkSide::Sell,
-    }
-}
-
-/// Map domain OrderType to SDK OrderType
-fn map_order_type(order_type: OrderType) -> SdkOrderType {
-    match order_type {
-        OrderType::Gtc => SdkOrderType::GTC,
-        OrderType::Gtd => SdkOrderType::GTD,
-        OrderType::Fok => SdkOrderType::FOK,
-    }
-}
 
 /// Map SDK Side to domain OrderSide
 fn map_sdk_side(side: &SdkSide) -> OrderSide {
@@ -367,33 +450,8 @@ fn map_sdk_order_to_domain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polymarket_client_sdk::clob::types::OrderStatusType;
+    use polymarket_client_sdk::clob::types::{OrderStatusType, OrderType as SdkOrderType};
     use rust_decimal_macros::dec;
-
-    #[test]
-    fn order_side_mapping_buy() {
-        assert!(matches!(map_order_side(OrderSide::Buy), SdkSide::Buy));
-    }
-
-    #[test]
-    fn order_side_mapping_sell() {
-        assert!(matches!(map_order_side(OrderSide::Sell), SdkSide::Sell));
-    }
-
-    #[test]
-    fn order_type_mapping_gtc() {
-        assert!(matches!(map_order_type(OrderType::Gtc), SdkOrderType::GTC));
-    }
-
-    #[test]
-    fn order_type_mapping_gtd() {
-        assert!(matches!(map_order_type(OrderType::Gtd), SdkOrderType::GTD));
-    }
-
-    #[test]
-    fn order_type_mapping_fok() {
-        assert!(matches!(map_order_type(OrderType::Fok), SdkOrderType::FOK));
-    }
 
     #[test]
     fn sdk_side_mapping() {

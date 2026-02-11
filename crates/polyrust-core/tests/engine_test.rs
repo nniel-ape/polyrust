@@ -11,6 +11,7 @@ use polyrust_core::types::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::io::Write;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::NamedTempFile;
 
@@ -312,22 +313,22 @@ async fn default_place_batch_orders_calls_place_order_per_item() {
     let backend = BatchTrackingBackend::new(dec!(1000));
 
     let orders = vec![
-        OrderRequest {
-            token_id: "token1".to_string(),
-            price: dec!(0.50),
-            size: dec!(10),
-            side: OrderSide::Buy,
-            order_type: OrderType::Gtc,
-            neg_risk: false,
-        },
-        OrderRequest {
-            token_id: "token2".to_string(),
-            price: dec!(0.40),
-            size: dec!(10),
-            side: OrderSide::Buy,
-            order_type: OrderType::Gtc,
-            neg_risk: false,
-        },
+        OrderRequest::new(
+            "token1".to_string(),
+            dec!(0.50),
+            dec!(10),
+            OrderSide::Buy,
+            OrderType::Gtc,
+            false,
+        ),
+        OrderRequest::new(
+            "token2".to_string(),
+            dec!(0.40),
+            dec!(10),
+            OrderSide::Buy,
+            OrderType::Gtc,
+            false,
+        ),
     ];
 
     let results = backend.place_batch_orders(&orders).await.unwrap();
@@ -339,4 +340,237 @@ async fn default_place_batch_orders_calls_place_order_per_item() {
     assert_eq!(results[1].token_id, "token2");
     // Default impl calls place_order for each item
     assert_eq!(backend.place_order_count.load(Ordering::Relaxed), 2);
+}
+
+// --- Phase 6: Engine integration tests (execute_action event publishing) ---
+
+use polyrust_core::engine::execute_action;
+use polyrust_core::event_bus::EventBus;
+use polyrust_core::events::OrderEvent;
+
+/// Mock backend for engine integration tests that returns configurable results.
+struct ConfigurableBackend {
+    balance: Decimal,
+    reject: bool,
+}
+
+impl ConfigurableBackend {
+    fn accepting(balance: Decimal) -> Self {
+        Self {
+            balance,
+            reject: false,
+        }
+    }
+    fn rejecting(balance: Decimal) -> Self {
+        Self {
+            balance,
+            reject: true,
+        }
+    }
+}
+
+#[async_trait]
+impl ExecutionBackend for ConfigurableBackend {
+    async fn place_order(&self, order: &OrderRequest) -> Result<OrderResult> {
+        if self.reject {
+            Ok(OrderResult {
+                success: false,
+                order_id: None,
+                token_id: order.token_id.clone(),
+                price: order.price,
+                size: order.size,
+                side: order.side,
+                status: None,
+                message: "Insufficient balance".to_string(),
+            })
+        } else {
+            Ok(OrderResult {
+                success: true,
+                order_id: Some("order-123".to_string()),
+                token_id: order.token_id.clone(),
+                price: order.price,
+                size: order.size,
+                side: order.side,
+                status: Some("Filled".to_string()),
+                message: "ok".to_string(),
+            })
+        }
+    }
+
+    async fn cancel_order(&self, _order_id: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn cancel_all_orders(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn get_open_orders(&self) -> Result<Vec<Order>> {
+        Ok(vec![])
+    }
+    async fn get_positions(&self) -> Result<Vec<Position>> {
+        Ok(vec![])
+    }
+    async fn get_balance(&self) -> Result<Decimal> {
+        Ok(self.balance)
+    }
+}
+
+#[tokio::test]
+async fn engine_place_order_publishes_placed_event() {
+    let backend: Arc<dyn ExecutionBackend> =
+        Arc::new(ConfigurableBackend::accepting(dec!(1000)));
+    let event_bus = EventBus::default();
+    let context = StrategyContext::new();
+    let mut subscriber = event_bus.subscribe();
+
+    let action = Action::PlaceOrder(OrderRequest::new(
+        "token1".to_string(),
+        dec!(0.50),
+        dec!(10),
+        OrderSide::Buy,
+        OrderType::Gtc,
+        false,
+    ));
+
+    execute_action(&action, &backend, &event_bus, &context, "test-strategy", None)
+        .await
+        .unwrap();
+
+    // Should receive Placed event
+    let event = tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    match event {
+        Event::OrderUpdate(OrderEvent::Placed(result)) => {
+            assert!(result.success);
+            assert_eq!(result.token_id, "token1");
+            assert_eq!(result.order_id.as_deref(), Some("order-123"));
+        }
+        other => panic!("Expected Placed event, got {:?}", other),
+    }
+
+    // Balance should be synced to context
+    let balance = context.balance.read().await;
+    assert_eq!(balance.available_usdc, dec!(1000));
+}
+
+#[tokio::test]
+async fn engine_order_rejection_publishes_rejected_event() {
+    let backend: Arc<dyn ExecutionBackend> =
+        Arc::new(ConfigurableBackend::rejecting(dec!(1000)));
+    let event_bus = EventBus::default();
+    let context = StrategyContext::new();
+    let mut subscriber = event_bus.subscribe();
+
+    let action = Action::PlaceOrder(OrderRequest::new(
+        "token1".to_string(),
+        dec!(0.50),
+        dec!(10),
+        OrderSide::Buy,
+        OrderType::Gtc,
+        false,
+    ));
+
+    execute_action(&action, &backend, &event_bus, &context, "test-strategy", None)
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    match event {
+        Event::OrderUpdate(OrderEvent::Rejected {
+            reason, token_id, ..
+        }) => {
+            assert!(reason.contains("Insufficient balance"));
+            assert_eq!(token_id, Some("token1".to_string()));
+        }
+        other => panic!("Expected Rejected event, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn engine_cancel_order_publishes_cancelled_event() {
+    let backend: Arc<dyn ExecutionBackend> =
+        Arc::new(ConfigurableBackend::accepting(dec!(1000)));
+    let event_bus = EventBus::default();
+    let context = StrategyContext::new();
+    let mut subscriber = event_bus.subscribe();
+
+    let action = Action::CancelOrder("order-456".to_string());
+
+    execute_action(&action, &backend, &event_bus, &context, "test-strategy", None)
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    match event {
+        Event::OrderUpdate(OrderEvent::Cancelled(id)) => {
+            assert_eq!(id, "order-456");
+        }
+        other => panic!("Expected Cancelled event, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn engine_batch_order_publishes_per_leg() {
+    let backend: Arc<dyn ExecutionBackend> =
+        Arc::new(ConfigurableBackend::accepting(dec!(1000)));
+    let event_bus = EventBus::default();
+    let context = StrategyContext::new();
+    let mut subscriber = event_bus.subscribe();
+
+    let action = Action::PlaceBatchOrder(vec![
+        OrderRequest::new(
+            "token_a".to_string(),
+            dec!(0.45),
+            dec!(10),
+            OrderSide::Buy,
+            OrderType::Gtc,
+            false,
+        ),
+        OrderRequest::new(
+            "token_b".to_string(),
+            dec!(0.50),
+            dec!(10),
+            OrderSide::Buy,
+            OrderType::Gtc,
+            false,
+        ),
+    ]);
+
+    execute_action(&action, &backend, &event_bus, &context, "test-strategy", None)
+        .await
+        .unwrap();
+
+    // Should receive 2 Placed events (one per leg)
+    let event1 = tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let event2 = tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Events might also include Filled events since status is "Filled",
+    // but we verify at least the first 2 are Placed events
+    match (&event1, &event2) {
+        (Event::OrderUpdate(OrderEvent::Placed(r1)), Event::OrderUpdate(OrderEvent::Placed(r2))) => {
+            assert!(r1.success);
+            assert!(r2.success);
+            // Both should have same token_ids from the batch (order may vary due to sequential processing)
+            let tokens: Vec<_> = vec![r1.token_id.clone(), r2.token_id.clone()];
+            assert!(tokens.contains(&"token_a".to_string()));
+            assert!(tokens.contains(&"token_b".to_string()));
+        }
+        _ => panic!("Expected two Placed events, got {:?} and {:?}", event1, event2),
+    }
 }

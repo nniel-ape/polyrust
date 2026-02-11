@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
 use polyrust_core::prelude::*;
+use crate::crypto_arb::config::ReferenceQualityLevel;
 
 /// How accurately the reference price matches the market's actual start-of-window price.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,21 @@ impl ReferenceQuality {
             ReferenceQuality::Historical(_) => Decimal::new(85, 2),
             ReferenceQuality::Current => Decimal::new(70, 2),
         }
+    }
+
+    /// Convert to quality level for threshold comparison.
+    pub fn as_level(&self) -> ReferenceQualityLevel {
+        match self {
+            ReferenceQuality::Exact => ReferenceQualityLevel::Exact,
+            ReferenceQuality::OnChain(_) => ReferenceQualityLevel::OnChain,
+            ReferenceQuality::Historical(_) => ReferenceQualityLevel::Historical,
+            ReferenceQuality::Current => ReferenceQualityLevel::Current,
+        }
+    }
+
+    /// Check if this quality meets the minimum required level.
+    pub fn meets_threshold(&self, min_level: ReferenceQualityLevel) -> bool {
+        self.as_level() >= min_level
     }
 }
 
@@ -117,38 +133,14 @@ impl MarketWithReference {
 /// Each mode represents a different market condition or signal type:
 /// - **TailEnd**: Highest confidence, market near certainty + time urgency
 /// - **TwoSided**: Risk-free arbitrage when both outcomes mispriced
-/// - **Confirmed**: Standard directional bet with dynamic confidence model
-/// - **CrossCorrelated**: Correlation-based signal from leader coin spike
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ArbitrageMode {
     /// Tail-end mode: < 2 min remaining, market price >= 90%.
-    /// Uses FOK orders for speed (fee ~0% at extreme prices).
+    /// Uses GTC orders with aggressive pricing (0% maker fee, no USDC clamping).
     TailEnd,
     /// Two-sided mode: both outcomes priced below combined $0.98.
     /// Guaranteed profit regardless of outcome. Uses batch GTC orders.
     TwoSided,
-    /// Confirmed mode: standard directional with dynamic confidence.
-    /// Uses GTC maker orders to avoid taker fees.
-    Confirmed,
-    /// Cross-market correlation: follower coin triggered by leader spike.
-    /// Confidence discounted by correlation factor for uncertainty.
-    CrossCorrelated {
-        /// The leader coin that spiked (e.g. "BTC").
-        leader: String,
-    },
-}
-
-impl ArbitrageMode {
-    /// Get the canonical mode variant for performance tracking.
-    /// Strips the leader field from CrossCorrelated to unify stats across all leaders.
-    pub fn canonical(&self) -> Self {
-        match self {
-            ArbitrageMode::CrossCorrelated { .. } => ArbitrageMode::CrossCorrelated {
-                leader: String::new(),
-            },
-            other => other.clone(),
-        }
-    }
 }
 
 impl std::fmt::Display for ArbitrageMode {
@@ -156,8 +148,6 @@ impl std::fmt::Display for ArbitrageMode {
         match self {
             ArbitrageMode::TailEnd => write!(f, "TailEnd"),
             ArbitrageMode::TwoSided => write!(f, "TwoSided"),
-            ArbitrageMode::Confirmed => write!(f, "Confirmed"),
-            ArbitrageMode::CrossCorrelated { leader } => write!(f, "Cross({})", leader),
         }
     }
 }
@@ -224,6 +214,46 @@ pub struct ArbitragePosition {
     /// Estimated fee **per share** at entry (for P&L calculation).
     /// Total fee for position = `estimated_fee * size`.
     pub estimated_fee: Decimal,
+    /// Market price (best bid) at entry time (for post-entry confirmation).
+    /// Used to detect false signals when price drops shortly after entry.
+    pub entry_market_price: Decimal,
+    /// Market tick size for order rounding.
+    pub tick_size: Decimal,
+    /// Fee rate in basis points for this market.
+    pub fee_rate_bps: u32,
+}
+
+impl ArbitragePosition {
+    /// Create a position from a filled limit order.
+    ///
+    /// Used by both `on_order_placed` (FOK fallback) and `on_order_filled` (GTC fill)
+    /// to avoid duplicating the field mapping.
+    pub fn from_limit_order(
+        lo: &OpenLimitOrder,
+        fill_price: Decimal,
+        fill_size: Decimal,
+        order_id: Option<String>,
+        entry_time: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            market_id: lo.market_id.clone(),
+            token_id: lo.token_id.clone(),
+            side: lo.side,
+            entry_price: fill_price,
+            size: fill_size,
+            reference_price: lo.reference_price,
+            coin: lo.coin.clone(),
+            order_id,
+            entry_time,
+            kelly_fraction: lo.kelly_fraction,
+            peak_bid: fill_price,
+            mode: lo.mode.clone(),
+            estimated_fee: lo.estimated_fee,
+            entry_market_price: fill_price,
+            tick_size: lo.tick_size,
+            fee_rate_bps: lo.fee_rate_bps,
+        }
+    }
 }
 
 /// A detected price spike event.
@@ -333,6 +363,10 @@ pub struct PendingOrder {
     pub kelly_fraction: Option<Decimal>,
     /// Estimated fee **per share** at entry. Total fee = `estimated_fee * size`.
     pub estimated_fee: Decimal,
+    /// Market tick size for order rounding.
+    pub tick_size: Decimal,
+    /// Fee rate in basis points for this market.
+    pub fee_rate_bps: u32,
 }
 
 /// An open GTC limit order that has been placed but not yet fully filled.
@@ -357,8 +391,10 @@ pub struct OpenLimitOrder {
     pub reference_price: Decimal,
     /// Coin symbol (e.g. "BTC").
     pub coin: String,
-    /// Instant when order was placed (for staleness check).
-    pub placed_at: tokio::time::Instant,
+    /// Timestamp when order was placed (for staleness check).
+    /// Uses `DateTime<Utc>` instead of `tokio::time::Instant` so that
+    /// backtests with simulated time can correctly detect stale orders.
+    pub placed_at: DateTime<Utc>,
     /// Trading mode that generated this order.
     pub mode: ArbitrageMode,
     /// Kelly fraction used for sizing (None if fixed).
@@ -366,4 +402,11 @@ pub struct OpenLimitOrder {
     /// Estimated fee **per share** at entry (0 for GTC maker orders).
     /// Total fee = `estimated_fee * size`.
     pub estimated_fee: Decimal,
+    /// Market tick size for order rounding.
+    pub tick_size: Decimal,
+    /// Fee rate in basis points for this market.
+    pub fee_rate_bps: u32,
+    /// Whether a cancel request is in flight for this order.
+    /// Prevents duplicate cancel actions on subsequent event cycles.
+    pub cancel_pending: bool,
 }

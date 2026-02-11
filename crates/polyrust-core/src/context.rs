@@ -1,5 +1,6 @@
 use crate::strategy::Strategy;
 use crate::types::*;
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,6 +19,8 @@ pub struct StrategyContext {
     pub strategy_count: Arc<AtomicUsize>,
     /// Strategies that provide custom dashboard views, keyed by view name.
     pub strategy_views: Arc<RwLock<HashMap<String, StrategyHandle>>>,
+    /// Simulated clock for backtesting. None = use Utc::now() (live mode).
+    pub simulated_clock: Arc<RwLock<Option<DateTime<Utc>>>>,
 }
 
 impl StrategyContext {
@@ -28,7 +31,16 @@ impl StrategyContext {
             balance: Arc::new(RwLock::new(BalanceState::default())),
             strategy_count: Arc::new(AtomicUsize::new(0)),
             strategy_views: Arc::new(RwLock::new(HashMap::new())),
+            simulated_clock: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Returns the current time: simulated clock if set, otherwise Utc::now().
+    pub async fn now(&self) -> DateTime<Utc> {
+        self.simulated_clock
+            .read()
+            .await
+            .unwrap_or_else(Utc::now)
     }
 
     /// Returns the view names of all strategies that have custom dashboard views.

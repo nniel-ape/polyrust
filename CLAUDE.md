@@ -21,6 +21,10 @@ cargo run                        # Run bot (paper mode by default)
 cargo run --example simple_strategy  # Run minimal example
 cargo build --release            # Optimized single binary → target/release/polyrust
 
+# Backtesting
+cargo run -- --backtest          # Run backtest with config.toml settings
+cargo run --example run_backtest # Minimal backtest example
+
 # Docker deployment
 docker-compose up -d             # Build and start bot in background
 docker-compose logs -f polyrust  # View real-time logs
@@ -41,7 +45,8 @@ polyrust-core (engine, event bus, traits, shared state)
   ├── polyrust-execution (live + paper backends)
   ├── polyrust-store (Turso persistence)
   ├── polyrust-strategies (reference: crypto arbitrage)
-  └── polyrust-dashboard (Axum + HTMX monitoring UI)
+  ├── polyrust-dashboard (Axum + HTMX monitoring UI)
+  └── polyrust-backtest (historical data + backtesting engine)
 
 src/main.rs → wires all crates into a single binary
 ```
@@ -83,7 +88,10 @@ Real-time updates use SSE: strategies emit `"dashboard-update"` signals, the SSE
 - **Token IDs**: Each market has 2 outcomes (Up/Down or Yes/No), each is an ERC-1155 token
 - **Prices**: Probabilities in [0, 1] range — use `rust_decimal::Decimal`, never floats
 - **USDC**: 6 decimal places; store as `Decimal`, persist as TEXT in SQLite
-- **Tick sizes**: Typically 0.01 (2 decimal price, 2 decimal size, 4 decimal amount)
+- **Tick sizes**: Typically 0.01 (2 decimal price, 2 decimal size). USDC amount precision is order-type-dependent:
+  - GTC/GTD: `price_decimals + size_decimals` (e.g., 4 for tick=0.01), uses **tick-rounded** price
+  - FOK: `price_decimals` only (e.g., 2 for tick=0.01), uses **raw price** (round UP for BUY, DOWN for SELL)
+  - FOK must use raw price because tick-rounding drops effective bid below ask for sub-tick prices (e.g. 0.997→0.99)
 - **neg_risk**: Boolean on orders — false for 15-minute markets (most common)
 
 ## Configuration
@@ -97,7 +105,9 @@ Copy `config.example.toml` → `config.toml` and customize. Environment variable
 Paper mode: `[paper] enabled = true` or `POLY_PAPER_TRADING=true`
 Docker deployment: Set `POLY_DASHBOARD_HOST=0.0.0.0` in `docker-compose.yml` to allow access from host machine.
 
-Strategy configuration: Add `[arbitrage]` section (and nested `[arbitrage.tailend]`, `[arbitrage.twosided]`, `[arbitrage.confirmed]`, `[arbitrage.correlation]`) to `config.toml`. All trading modes are disabled by default and must be explicitly enabled with `enabled = true`. See `config.example.toml` for the complete reference.
+Strategy configuration: Add `[arbitrage]` section (and nested `[arbitrage.tailend]`, `[arbitrage.twosided]`) to `config.toml`. All trading modes are disabled by default and must be explicitly enabled with `enabled = true`. See `config.example.toml` for the complete reference.
+
+Backtest configuration: Add `[backtest]` section to `config.toml` or use env overrides (`POLY_BACKTEST_START`, `POLY_BACKTEST_END`, etc.). Backtesting evaluates strategies on historical data without live/paper trading. See `config.example.toml` for the complete reference.
 
 ## Adding a New Strategy
 
@@ -172,11 +182,9 @@ See `examples/simple_strategy.rs` for a complete runnable example.
 
 ## Reference Strategy: Crypto Arbitrage
 
-Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-minute Up/Down crypto markets with four modes:
+Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-minute Up/Down crypto markets with two modes:
 1. **Tail-End** (<2 min remaining, market >= 90%) — highest confidence
 2. **Two-Sided** (both outcomes < $1 combined) — guaranteed profit
-3. **Confirmed** (dynamic confidence model) — standard directional trading
-4. **Cross-Correlated** (follower coin triggered by leader spike) — correlation-based signals
 
 ### Strategy Configuration
 
@@ -184,8 +192,6 @@ The crypto arbitrage strategy is configured via the `[arbitrage]` section in `co
 
 - `TailEndStrategy` — high-confidence trades near expiration
 - `TwoSidedStrategy` — risk-free arbitrage
-- `ConfirmedStrategy` — directional trades with confidence model
-- `CrossCorrStrategy` — correlation-based signals
 
 Each mode is conditionally registered with the engine based on its `enabled` flag.
 
@@ -202,8 +208,6 @@ pub struct ArbitrageConfig {
     // Per-mode configs (each mode disabled by default)
     pub tailend: TailEndConfig,       // TailEnd mode (enabled, time_threshold_secs, ask_threshold)
     pub twosided: TwoSidedConfig,     // TwoSided mode (enabled, combined_threshold)
-    pub confirmed: ConfirmedConfig,   // Confirmed mode (enabled, min_confidence, min_margin)
-    pub correlation: CorrelationConfig, // Cross-market correlation pairs
 
     // Shared configs (all with #[serde(default)])
     pub fee: FeeConfig,           // Taker fee model (default 3.15% at 50/50)
@@ -219,12 +223,10 @@ pub struct ArbitrageConfig {
 
 - **TailEndConfig**: Per-mode toggle (`enabled`), `time_threshold_secs` (120), `ask_threshold` (0.90)
 - **TwoSidedConfig**: Per-mode toggle (`enabled`), `combined_threshold` (0.98)
-- **ConfirmedConfig**: Per-mode toggle (`enabled`), `min_confidence` (0.50), `min_margin` (0.02)
-- **CorrelationConfig**: Per-mode toggle (`enabled`), cross-market pairs, `discount_factor` (0.7)
 - **FeeConfig**: Taker fee rate for net profit margin calculation
 - **SpikeConfig**: Price spike detection (threshold_pct, window_secs, history_size)
 - **OrderConfig**: Hybrid order mode (hybrid_mode, limit_offset, max_age_secs)
-  - GTC maker orders for Confirmed/TwoSided modes (0% fee)
+  - GTC maker orders for TwoSided mode (0% fee)
   - FOK taker orders for TailEnd mode (speed matters)
 - **SizingConfig**: Kelly criterion sizing (base_size, kelly_multiplier, min/max_size, use_kelly)
   - Scales position size with confidence and edge
@@ -235,18 +237,17 @@ pub struct ArbitrageConfig {
   - trailing_enabled, trailing_distance: lock in profits as bid rises
   - time_decay: tighten stops near expiration
 - **PerformanceConfig**: Per-mode tracking and auto-disable
-  - Tracks win rate, P&L per mode (TailEnd, TwoSided, Confirmed, CrossCorrelated)
+  - Tracks win rate, P&L per mode (TailEnd, TwoSided)
   - Auto-disable modes with low win rate after min_trades
 
 ### Key Features
 
 - **Fee-aware profit margins**: Net profit calculation accounts for Polymarket's dynamic taker fees (3.15% at 50/50, ~0% near 0/1)
-- **Hybrid order execution**: GTC maker orders (0% fee) for most trades, FOK taker orders only for tail-end urgency
+- **Hybrid order execution**: GTC maker orders (0% fee) for most trades, FOK taker orders only for tail-end urgency. FOK has stricter USDC precision (see `rounding.rs`)
 - **Kelly criterion sizing**: Position size scales with confidence and edge, clamped to [min_size, max_size]
 - **Spike detection**: Pre-filters small moves, triggers evaluation only on significant price changes or when delta exceeds fee+margin threshold
 - **Trailing stop-loss**: Locks in profits as position moves favorably, with optional time decay near expiration
 - **Batch order API**: TwoSided mode places both legs in a single API call for atomic execution
-- **Cross-market correlation**: Leader coin spikes (BTC) generate signals for follower coins (ETH, SOL)
 - **Performance tracking**: Per-mode statistics with optional auto-disable for underperforming modes
 
 ## Polymarket API Endpoints
@@ -256,11 +257,84 @@ pub struct ArbitrageConfig {
 - Data API: `https://data-api.polymarket.com` (positions, balances)
 - WebSocket: `wss://ws-subscriptions-clob.polymarket.com` (orderbook streams)
 
+## Backtesting Framework
+
+The backtesting system (`crates/polyrust-backtest`) allows strategy evaluation on historical data before live/paper trading. It consists of two subsystems:
+
+1. **Historical data pipeline** — fetch/cache trade data from Goldsky subgraph, market metadata from Gamma API
+2. **Backtest engine** — deterministic event replay through strategies with simulated fills
+
+### Architecture
+
+Two isolated databases:
+- **`backtest_data.db`** (persistent) — historical data cache (prices, trades, markets, fetch log). Reused across runs.
+- **`:memory:` Store** (ephemeral) — receives simulated trades using existing live schema. Disposed after run; report extracted first.
+
+### Data Sources
+
+- **Gamma API** (`/markets`) — market discovery and metadata
+- **Goldsky activity subgraph** — unlimited historical trade data via GraphQL
+
+All trade data comes from the Goldsky subgraph (no CLOB API dependency). DataFetcher checks `data_fetch_log` before fetching to avoid duplicate API calls. PriceChange events are synthesized from trade data by the engine at configured `data_fidelity_secs` granularity.
+
+### Backtest Engine
+
+Synchronous deterministic event replay:
+1. Load cached trade data from `backtest_data.db` for configured market_ids and date range
+2. Synthesize PriceChange events from trades at `data_fidelity_secs` granularity (bucketed by time window)
+3. Sort all events chronologically (trades + synthetic prices + lifecycle events)
+4. For each event: advance simulated clock, update market data, call `strategy.on_event()`, execute actions with immediate fills at current market price
+5. After replay: finalize results, generate `BacktestReport` with P&L metrics
+
+Fill mode: Immediate only (historical orderbook depth not available from Polymarket APIs). Fills simulate at historical trade price with configurable fee model.
+
+### Configuration
+
+Add `[backtest]` section to `config.toml`:
+
+```toml
+[backtest]
+strategy_name = "crypto-arb"            # Which strategy to backtest
+market_ids = []                         # Empty = auto-discover via Gamma API
+start_date = "2025-01-01T00:00:00Z"     # Backtest window start (RFC3339)
+end_date = "2025-01-31T23:59:59Z"       # Backtest window end (RFC3339)
+initial_balance = 1000.00               # Starting USDC balance
+data_fidelity_secs = 60                 # Price granularity in seconds (60 = 1min, 300 = 5min)
+data_db_path = "backtest_data.db"       # Persistent historical data cache
+fetch_concurrency = 10                  # Markets fetched in parallel (default 10)
+
+[backtest.fees]
+taker_fee_rate = 0.0315  # 3.15% at 50/50 probability
+```
+
+Environment variable overrides: `POLY_BACKTEST_START`, `POLY_BACKTEST_END`, `POLY_BACKTEST_INITIAL_BALANCE`, `POLY_BACKTEST_DATA_DB_PATH`, `POLY_BACKTEST_FETCH_CONCURRENCY`, etc.
+
+### Running Backtests
+
+```fish
+cargo run -- --backtest          # Use config.toml settings
+cargo run --example run_backtest # Minimal example
+```
+
+Backtest report includes: total P&L, realized/unrealized P&L, win rate, max drawdown, Sharpe ratio, trade count, start/end balance, duration.
+
+### Strategy Compatibility
+
+Any `impl Strategy` works in backtest without modification — strategies receive the same `Event` stream and return `Vec<Action>` as in live/paper mode. The engine handles the rest.
+
+## Danger Zones & Approvals
+
+- When adding a new workspace crate, update `Dockerfile` in 3 places: manifest `COPY`, dummy `RUN` source, and `find crates` touch
+- Never push Docker images with `config.toml` baked in — it's `.dockerignore`d and mounted at runtime
+- `cargo build --release --locked` in Docker requires `Cargo.lock` committed and up-to-date
+- USDC rounding in `rounding.rs` must branch on `OrderType` — FOK uses **raw price** (`size * price`), GTC uses **tick-rounded price** (`size * rounded_price`). FOK also has stricter decimal precision (`price_decimals` only vs `price_decimals + size_decimals`). See rs-clob-client issue #114
+
 ## Design Documents
 
 - `docs/brainstorms/polyrust-trading-framework.md` — goals, architecture, traits
 - `docs/plans/polyrust-framework-implementation.md` — detailed implementation guide (2400 lines)
 - `docs/plans/polyrust-checklist.md` — 14-milestone task checklist with validation commands
 - `docs/plans/strategy-dashboard-views.md` — strategy dashboard views design and implementation plan
+- `docs/plans/backtesting-framework.md` — backtesting framework design and implementation plan
 - `docs/research/polymarket-price-discovery.md` — how Polymarket discovers reference prices (CLOB midpoint, RTDS feeds, Chainlink/Binance oracles, confidence model)
 - `docs/research/crypto-arb-reference-price.md` — crypto arb strategy reference price mechanics for 15-min markets (capture flow, confidence model, three trading modes, fee impact)

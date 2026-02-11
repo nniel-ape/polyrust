@@ -53,6 +53,45 @@ pub struct OrderRequest {
     pub side: OrderSide,
     pub order_type: OrderType,
     pub neg_risk: bool,
+    /// Market tick size for price rounding (default: 0.01)
+    pub tick_size: Decimal,
+    /// Fee rate in basis points (default: 0)
+    pub fee_rate_bps: u32,
+}
+
+impl OrderRequest {
+    /// Create a new OrderRequest with default tick_size (0.01) and fee_rate_bps (0)
+    pub fn new(
+        token_id: TokenId,
+        price: Decimal,
+        size: Decimal,
+        side: OrderSide,
+        order_type: OrderType,
+        neg_risk: bool,
+    ) -> Self {
+        Self {
+            token_id,
+            price,
+            size,
+            side,
+            order_type,
+            neg_risk,
+            tick_size: Decimal::new(1, 2), // 0.01 default
+            fee_rate_bps: 0,
+        }
+    }
+
+    /// Set the tick size for this order
+    pub fn with_tick_size(mut self, tick_size: Decimal) -> Self {
+        self.tick_size = tick_size;
+        self
+    }
+
+    /// Set the fee rate in basis points for this order
+    pub fn with_fee_rate_bps(mut self, fee_rate_bps: u32) -> Self {
+        self.fee_rate_bps = fee_rate_bps;
+        self
+    }
 }
 
 /// Result of an order placement
@@ -127,6 +166,25 @@ pub struct Trade {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Request to redeem winning positions after market resolution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedeemRequest {
+    pub market_id: MarketId,
+    /// Hex bytes32 condition_id for CTF contract
+    pub condition_id: String,
+    pub token_ids: Vec<TokenId>,
+    pub neg_risk: bool,
+}
+
+/// Result of a position redemption
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedeemResult {
+    pub market_id: MarketId,
+    pub tx_hash: String,
+    pub success: bool,
+    pub message: String,
+}
+
 /// A single level in an orderbook (price + size)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderbookLevel {
@@ -166,6 +224,21 @@ impl OrderbookSnapshot {
             _ => None,
         }
     }
+
+    /// Returns the size available at the best ask level.
+    pub fn best_ask_depth(&self) -> Option<Decimal> {
+        self.asks.first().map(|l| l.size)
+    }
+
+    /// Returns the total ask size available at price levels up to (inclusive) `max_price`.
+    /// Useful for estimating how much a FOK order can sweep.
+    pub fn ask_depth_up_to(&self, max_price: Decimal) -> Decimal {
+        self.asks
+            .iter()
+            .take_while(|l| l.price <= max_price)
+            .map(|l| l.size)
+            .sum()
+    }
 }
 
 /// Market information (from Gamma API)
@@ -182,6 +255,21 @@ pub struct MarketInfo {
     pub token_ids: TokenIds,
     pub accepting_orders: bool,
     pub neg_risk: bool,
+    /// Minimum order size in shares (from Gamma API orderMinSize).
+    /// Defaults to 5.0 if not provided.
+    pub min_order_size: Decimal,
+    /// Market tick size for price rounding (from Gamma API).
+    /// Defaults to 0.01 if not provided.
+    #[serde(default = "default_tick_size")]
+    pub tick_size: Decimal,
+    /// Fee rate in basis points (from Gamma API).
+    /// Defaults to 0 if not provided.
+    #[serde(default)]
+    pub fee_rate_bps: u32,
+}
+
+fn default_tick_size() -> Decimal {
+    Decimal::new(1, 2) // 0.01
 }
 
 /// Token IDs for the two outcomes of a market
@@ -194,11 +282,20 @@ pub struct TokenIds {
 }
 
 impl MarketInfo {
+    pub fn has_ended_at(&self, now: DateTime<Utc>) -> bool {
+        now >= self.end_date
+    }
+
+    pub fn seconds_remaining_at(&self, now: DateTime<Utc>) -> i64 {
+        (self.end_date - now).num_seconds().max(0)
+    }
+
+    /// Convenience: uses Utc::now(). Prefer `_at` variants in backtest-aware code.
     pub fn has_ended(&self) -> bool {
-        Utc::now() >= self.end_date
+        self.has_ended_at(Utc::now())
     }
 
     pub fn seconds_remaining(&self) -> i64 {
-        (self.end_date - Utc::now()).num_seconds().max(0)
+        self.seconds_remaining_at(Utc::now())
     }
 }

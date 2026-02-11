@@ -47,108 +47,108 @@
 ## Implementation Steps
 
 ### Task 1: Scaffold polyrust-backtest crate
-- [ ] Create `crates/polyrust-backtest/` with `Cargo.toml` depending on `polyrust-core`, `polyrust-store`, `polyrust-execution`
-- [ ] Add workspace dependencies: `reqwest` (HTTP client), `serde_json`, `chrono`, `rust_decimal`, `tokio`, `tracing`
-- [ ] Add `polyrust-backtest` to workspace `Cargo.toml` members
-- [ ] Create module structure: `lib.rs`, `config.rs`, `data/mod.rs`, `engine/mod.rs`, `report/mod.rs`
-- [ ] Add placeholder public API: `BacktestConfig`, `BacktestEngine`, `DataFetcher`
-- [ ] Verify `cargo build --workspace` compiles cleanly
-- [ ] Write basic smoke test that instantiates BacktestConfig with defaults
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Create `crates/polyrust-backtest/` with `Cargo.toml` depending on `polyrust-core`, `polyrust-store`, `polyrust-execution`
+- [x] Add workspace dependencies: `reqwest` (HTTP client), `serde_json`, `chrono`, `rust_decimal`, `tokio`, `tracing`
+- [x] Add `polyrust-backtest` to workspace `Cargo.toml` members
+- [x] Create module structure: `lib.rs`, `config.rs`, `data/mod.rs`, `engine/mod.rs`, `report/mod.rs`
+- [x] Add placeholder public API: `BacktestConfig`, `BacktestEngine`, `DataFetcher`
+- [x] Verify `cargo build --workspace` compiles cleanly
+- [x] Write basic smoke test that instantiates BacktestConfig with defaults
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 2: Define historical data cache DB schema
-- [ ] Create `HistoricalDataStore` struct in `polyrust-backtest` (separate from live `Store`)
+- [x] Create `HistoricalDataStore` struct in `polyrust-backtest` (separate from live `Store`)
   - Opens/creates `backtest_data.db` file (configurable path via `[backtest] data_db_path`)
   - This DB is persistent and reused across backtest runs
-- [ ] Create migration tables in `backtest_data.db`:
+- [x] Create migration tables in `backtest_data.db`:
   - `historical_prices` — token_id, timestamp, price (TEXT/Decimal), source (clob/subgraph)
   - `historical_trades` — token_id, timestamp, price, size, side, tx_hash, source
   - `historical_markets` — market_id, slug, question, start_date, end_date, token_a, token_b, neg_risk
   - `data_fetch_log` — source, token_id, start_ts, end_ts, fetched_at, row_count (track what's cached)
-- [ ] Add indexes: (token_id, timestamp) on prices/trades, market_id on markets
-- [ ] Implement insert methods: `insert_historical_prices()`, `insert_historical_trades()`, `insert_historical_market()`
-- [ ] Implement query methods: `get_historical_prices(token_id, start, end)`, `get_historical_trades(token_id, start, end)`
-- [ ] Implement `get_fetch_log(source, token_id)` — check what date ranges are already cached
-- [ ] Write tests for all insert/query methods using in-memory Turso (`:memory:`)
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Add indexes: (token_id, timestamp) on prices/trades, market_id on markets
+- [x] Implement insert methods: `insert_historical_prices()`, `insert_historical_trades()`, `insert_historical_market()`
+- [x] Implement query methods: `get_historical_prices(token_id, start, end)`, `get_historical_trades(token_id, start, end)`
+- [x] Implement `get_fetch_log(source, token_id)` — check what date ranges are already cached
+- [x] Write tests for all insert/query methods using in-memory Turso (`:memory:`)
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 3: CLOB API data fetcher (last ~7 days)
-- [ ] Create `data/clob_fetcher.rs` — HTTP client for CLOB REST API
-- [ ] Implement `fetch_price_history(token_id, start_ts, end_ts, fidelity_mins)` → `Vec<HistoricalPrice>`
+- [x] Create `data/clob_fetcher.rs` — HTTP client for CLOB REST API
+- [x] Implement `fetch_price_history(token_id, start_ts, end_ts, fidelity_secs)` → `Vec<HistoricalPrice>`
   - Endpoint: `GET https://clob.polymarket.com/prices-history?market={token_id}&startTs={}&endTs={}&fidelity={}`
   - Parse response: `{"history": [{"t": timestamp, "p": price}]}`
-- [ ] Implement `fetch_trades(market_id, limit, offset)` → `Vec<HistoricalTrade>`
+- [x] Implement `fetch_trades(market_id, limit, offset)` → `Vec<HistoricalTrade>`
   - Endpoint: `GET https://data-api.polymarket.com/trades?market={}&limit={}&offset={}`
   - Handle pagination (max 10k per request)
-- [ ] Add rate limiting / retry logic with exponential backoff
-- [ ] Implement cache-aware fetching: check `data_fetch_log` before fetching, skip already-cached ranges
-- [ ] Write tests with mock HTTP responses (use `wiremock` or similar)
-- [ ] Write `#[ignore]` live API test that fetches real price history for a known token
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Add rate limiting / retry logic with exponential backoff
+- [x] Implement cache-aware fetching: check `data_fetch_log` before fetching, skip already-cached ranges
+- [x] Write tests with mock HTTP responses (use `wiremock` or similar)
+- [x] Write `#[ignore]` live API test that fetches real price history for a known token
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 4: Gamma API market discovery fetcher
-- [ ] Create `data/gamma_fetcher.rs` — fetch market metadata for backtesting
-- [ ] Implement `fetch_markets_by_slug(slug_pattern)` → `Vec<HistoricalMarket>`
+- [x] Create `data/gamma_fetcher.rs` — fetch market metadata for backtesting
+- [x] Implement `fetch_markets_by_slug(slug_pattern)` → `Vec<HistoricalMarket>`
   - Endpoint: `GET https://gamma-api.polymarket.com/markets?slug_contains={}`
   - Extract: market_id, slug, question, start_date, end_date, token_ids, neg_risk
-- [ ] Implement `fetch_market_by_id(condition_id)` → `Option<HistoricalMarket>`
-- [ ] Implement `fetch_expired_markets(coin, date_range)` — discover historical 15-min crypto markets
-- [ ] Cache results in `historical_markets` table
-- [ ] Write tests with mock HTTP responses
-- [ ] Write `#[ignore]` live test that discovers BTC 15-min markets
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Implement `fetch_market_by_id(condition_id)` → `Option<HistoricalMarket>`
+- [x] Implement `fetch_expired_markets(coin, date_range)` — discover historical 15-min crypto markets
+- [x] Cache results in `historical_markets` table
+- [x] Write tests with mock HTTP responses
+- [x] Write `#[ignore]` live test that discovers BTC 15-min markets
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 5: Goldsky subgraph fetcher (unlimited history)
-- [ ] Create `data/subgraph_fetcher.rs` — GraphQL client for Goldsky subgraphs
-- [ ] Define GraphQL query structures for activity subgraph:
+- [x] Create `data/subgraph_fetcher.rs` — GraphQL client for Goldsky subgraphs
+- [x] Define GraphQL query structures for activity subgraph:
   - Endpoint: `https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/activity-subgraph/0.0.4/gn`
   - Query trade events by token/market/time range with pagination (`first`, `skip`, `where` filters)
-- [ ] Implement `fetch_subgraph_trades(token_id, start_ts, end_ts)` → `Vec<HistoricalTrade>`
+- [x] Implement `fetch_subgraph_trades(token_id, start_ts, end_ts)` → `Vec<HistoricalTrade>`
   - Handle GraphQL pagination (subgraphs limit to 1000 results per query, use `skip` or `id_gt` cursor)
-- [ ] Implement `fetch_subgraph_positions(market_id)` — optional, for volume/liquidity context
-- [ ] Add cache-aware logic: merge subgraph data with existing DB cache, avoid duplicates by tx_hash
-- [ ] Write tests with mock GraphQL responses
-- [ ] Write `#[ignore]` live test that fetches trades from activity subgraph
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Implement `fetch_subgraph_positions(market_id)` — optional, for volume/liquidity context
+- [x] Add cache-aware logic: merge subgraph data with existing DB cache, avoid duplicates by tx_hash
+- [x] Write tests with mock GraphQL responses
+- [x] Write `#[ignore]` live test that fetches trades from activity subgraph
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 6: Unified DataFetcher with smart caching
-- [ ] Create `data/fetcher.rs` — orchestrates CLOB, Gamma, and subgraph fetchers
-- [ ] Implement `DataFetcher::new(store: Arc<Store>, config: DataFetchConfig)`
-- [ ] Implement `fetch_market_data(market_id, start, end)` — smart routing:
+- [x] Create `data/fetcher.rs` — orchestrates CLOB, Gamma, and subgraph fetchers
+- [x] Implement `DataFetcher::new(store: Arc<Store>, config: DataFetchConfig)`
+- [x] Implement `fetch_market_data(market_id, start, end)` — smart routing:
   - If date range within last 7 days → use CLOB API (higher resolution)
   - If date range older than 7 days → use Goldsky subgraph
   - Check `data_fetch_log` first, only fetch missing ranges
   - Merge overlapping data, deduplicate by timestamp
-- [ ] Implement `fetch_and_cache(token_ids, date_range)` — bulk fetch for backtest preparation
-- [ ] Implement `get_cached_data(token_id, start, end)` → `CachedMarketData` (prices + trades from DB)
-- [ ] Add progress reporting via `tracing` (log fetching progress for long historical pulls)
-- [ ] Write tests for smart routing logic (mock both API sources)
-- [ ] Write test for cache hit/miss behavior
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Implement `fetch_and_cache(token_ids, date_range)` — bulk fetch for backtest preparation
+- [x] Implement `get_cached_data(token_id, start, end)` → `CachedMarketData` (prices + trades from DB)
+- [x] Add progress reporting via `tracing` (log fetching progress for long historical pulls)
+- [x] Write tests for smart routing logic (mock both API sources)
+- [x] Write test for cache hit/miss behavior
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 7: BacktestConfig and CLI integration
-- [ ] Define `BacktestConfig` in `config.rs`:
+- [x] Define `BacktestConfig` in `config.rs`:
   - `strategy_name: String` — which strategy to backtest
   - `market_ids: Vec<String>` — markets to include (or discover by pattern)
   - `start_date: DateTime<Utc>`, `end_date: DateTime<Utc>` — backtest window
   - `initial_balance: Decimal` — starting USDC
-  - `data_fidelity_mins: u64` — price history granularity in minutes (default 1 min)
+  - `data_fidelity_secs: u64` — price history granularity in seconds (default 60s)
   - `data_db_path: String` — path to persistent historical data cache (default `backtest_data.db`)
   - `fee_model: FeeConfig` — reuse existing fee config
-- [ ] Add `[backtest]` section to `config.example.toml`
-- [ ] Parse from TOML with `#[derive(Deserialize)]` and `#[serde(default)]` for optional fields
-- [ ] Support env overrides: `POLY_BACKTEST_START`, `POLY_BACKTEST_END`, etc.
-- [ ] Write tests for config parsing (valid, defaults, env overrides)
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Add `[backtest]` section to `config.example.toml`
+- [x] Parse from TOML with `#[derive(Deserialize)]` and `#[serde(default)]` for optional fields
+- [x] Support env overrides: `POLY_BACKTEST_START`, `POLY_BACKTEST_END`, etc.
+- [x] Write tests for config parsing (valid, defaults, env overrides)
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 8: BacktestEngine — deterministic event replay
-- [ ] Create `engine/mod.rs` with `BacktestEngine` struct
-- [ ] Implement `BacktestEngine::new(config, strategy, data_store, store)` — initializes:
+- [x] Create `engine/mod.rs` with `BacktestEngine` struct
+- [x] Implement `BacktestEngine::new(config, strategy, data_store, store)` — initializes:
   - `data_store`: `HistoricalDataStore` — reads cached historical data
   - `store`: fresh `Store` instance (`:memory:`) using existing live schema — receives simulated trades/orders
   - `StrategyContext` with initial balance and empty positions
   - Simulated clock starting at `config.start_date`
-- [ ] Implement `run(&mut self)` — main synchronous event loop:
+- [x] Implement `run(&mut self)` — main synchronous event loop:
   1. Load cached data from DB for configured market_ids and date range
   2. Sort all events chronologically (prices + trades → unified timeline)
   3. For each event in order:
@@ -160,19 +160,19 @@
      f. Update positions, balance, emit fill events back to strategy
      g. Record trade in backtest results
   4. After all events: call `strategy.on_stop()`, finalize results
-- [ ] Implement immediate fill logic:
+- [x] Implement immediate fill logic:
   - Fill at current market price (latest price from historical data)
   - Fee calculation using configured fee model
   - No orderbook depth simulation (historical orderbooks not available from Polymarket APIs)
-- [ ] Handle market expiration events (MarketExpired at end_date)
-- [ ] Write tests with synthetic event data:
+- [x] Handle market expiration events (MarketExpired at end_date)
+- [x] Write tests with synthetic event data:
   - Test single buy order fills correctly
   - Test strategy receives events in chronological order
   - Test position tracking through multiple fills
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 9: Backtest results and reporting
-- [ ] Create `report/mod.rs` with `BacktestReport` struct:
+- [x] Create `report/mod.rs` with `BacktestReport` struct:
   - `trades: Vec<BacktestTrade>` — all simulated trades with timestamps, prices, P&L
   - `total_pnl: Decimal`, `realized_pnl: Decimal`, `unrealized_pnl: Decimal`
   - `win_rate: Decimal` — winning trades / total trades
@@ -181,36 +181,36 @@
   - `total_trades: usize`, `winning_trades: usize`, `losing_trades: usize`
   - `start_balance: Decimal`, `end_balance: Decimal`
   - `duration: chrono::Duration`
-- [ ] Implement `BacktestReport::from_engine_results()` — compute all metrics from trade history
-- [ ] Implement `report.summary()` → formatted String for terminal output
-- [ ] Implement `report.to_json()` → serde_json::Value for programmatic use
-- [ ] Extract report from in-memory `Store` (query trades, orders, pnl_snapshots using existing Store API)
-- [ ] Optionally persist report summary to `backtest_runs` table in `backtest_data.db` (for comparing runs across sessions)
-- [ ] Write tests for metric calculations (known trade sequences → expected metrics)
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Implement `BacktestReport::from_engine_results()` — compute all metrics from trade history
+- [x] Implement `report.summary()` → formatted String for terminal output
+- [x] Implement `report.to_json()` → serde_json::Value for programmatic use
+- [x] Extract report from in-memory `Store` (query trades, orders, pnl_snapshots using existing Store API)
+- [x] Optionally persist report summary to `backtest_runs` table in `backtest_data.db` (for comparing runs across sessions)
+- [x] Write tests for metric calculations (known trade sequences → expected metrics)
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 10: Integration — wire backtest into main binary
-- [ ] Add `backtest` subcommand or `--backtest` flag to `src/main.rs`
-- [ ] When backtest mode: load `[backtest]` config, open `HistoricalDataStore` (persistent), create fresh `:memory:` `Store`, instantiate `DataFetcher`, check/fetch data, run `BacktestEngine`, print report
-- [ ] Add `polyrust-backtest` dependency to root `Cargo.toml`
-- [ ] Create `examples/run_backtest.rs` — minimal example running crypto arb strategy on historical data
-- [ ] Write integration test: full pipeline from config → data fetch (mocked) → engine run → report
-- [ ] Run `cargo test --workspace` — must pass
+- [x] Add `backtest` subcommand or `--backtest` flag to `src/main.rs`
+- [x] When backtest mode: load `[backtest]` config, open `HistoricalDataStore` (persistent), create fresh `:memory:` `Store`, instantiate `DataFetcher`, check/fetch data, run `BacktestEngine`, print report
+- [x] Add `polyrust-backtest` dependency to root `Cargo.toml`
+- [x] Create `examples/run_backtest.rs` — minimal example running crypto arb strategy on historical data
+- [x] Write integration test: full pipeline from config → data fetch (mocked) → engine run → report
+- [x] Run `cargo test --workspace` — must pass
 
 ### Task 11: Verify acceptance criteria
-- [ ] Verify data fetching works for both CLOB API and subgraph sources
-- [ ] Verify DB caching prevents re-fetching already-cached data
-- [ ] Verify BacktestEngine replays events deterministically (same input → same output)
-- [ ] Verify existing strategies work in backtest without modification
-- [ ] Verify backtest report metrics are accurate against known trade sequences
-- [ ] Run full test suite: `cargo test --workspace`
-- [ ] Run clippy: `cargo clippy --workspace -- -D warnings`
-- [ ] Verify test coverage for new crate
+- [x] Verify data fetching works for both CLOB API and subgraph sources
+- [x] Verify DB caching prevents re-fetching already-cached data
+- [x] Verify BacktestEngine replays events deterministically (same input → same output)
+- [x] Verify existing strategies work in backtest without modification
+- [x] Verify backtest report metrics are accurate against known trade sequences
+- [x] Run full test suite: `cargo test --workspace`
+- [x] Run clippy: `cargo clippy --workspace -- -D warnings`
+- [x] Verify test coverage for new crate
 
 ### Task 12: [Final] Update documentation
-- [ ] Update CLAUDE.md with backtest module architecture, commands, and config
-- [ ] Update `config.example.toml` with complete `[backtest]` section and comments
-- [ ] Add backtest commands to Build & Test Commands section
+- [x] Update CLAUDE.md with backtest module architecture, commands, and config
+- [x] Update `config.example.toml` with complete `[backtest]` section and comments
+- [x] Add backtest commands to Build & Test Commands section
 
 ## Technical Details
 
@@ -302,7 +302,7 @@ coins = ["BTC", "ETH"]  # used for market discovery
 start_date = "2025-01-01T00:00:00Z"
 end_date = "2025-01-31T00:00:00Z"
 initial_balance = 1000.00
-data_fidelity_mins = 1
+data_fidelity_secs = 60
 data_db_path = "backtest_data.db"  # persistent cache, reused across runs
 # Fill mode is always Immediate — historical orderbook depth not available from Polymarket APIs
 

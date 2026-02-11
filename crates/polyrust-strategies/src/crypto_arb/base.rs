@@ -26,6 +26,19 @@ use crate::crypto_arb::types::{
     OpenLimitOrder, PendingOrder, ReferenceQuality, SpikeEvent,
 };
 
+/// Metadata about why a stop-loss was triggered, for diagnostic logging.
+#[derive(Debug, Clone)]
+pub struct StopLossTrigger {
+    /// Which trigger fired: "trailing_stop" or "dual_trigger".
+    pub reason: &'static str,
+    /// Peak bid observed during position lifetime.
+    pub peak_bid: Decimal,
+    /// Effective trailing distance (after time decay + floor).
+    pub effective_distance: Decimal,
+    /// Seconds remaining on the market.
+    pub time_remaining: i64,
+}
+
 /// Number of price history entries to keep per coin.
 /// At ~5s RTDS intervals, 200 entries covers ~16 minutes — enough for a full
 /// 15-minute window plus discovery delay.
@@ -152,8 +165,8 @@ pub fn fmt_market_price(price: Decimal) -> String {
 
 /// Shared state and utilities for all crypto arbitrage strategies.
 ///
-/// This struct holds all the mutable state that is shared between the four
-/// strategy implementations (TailEnd, TwoSided, Confirmed, CrossCorrelated).
+/// This struct holds all the mutable state that is shared between the two
+/// strategy implementations (TailEnd, TwoSided).
 /// Using a shared base avoids duplication and ensures consistent state.
 #[allow(clippy::type_complexity)]
 pub struct CryptoArbBase {
@@ -181,7 +194,8 @@ pub struct CryptoArbBase {
     pub pending_stop_loss: RwLock<HashMap<TokenId, Decimal>>,
     /// Markets discovered before prices were available, keyed by coin.
     /// Promoted to active_markets once a price arrives for the coin.
-    pub pending_discovery: RwLock<HashMap<String, MarketInfo>>,
+    /// Vec allows multiple markets per coin (e.g. multiple BTC windows at backtest start).
+    pub pending_discovery: RwLock<HashMap<String, Vec<MarketInfo>>>,
     /// Recent spike events for display and analysis.
     pub spike_events: RwLock<VecDeque<SpikeEvent>>,
     /// Per-mode performance statistics (wins, losses, P&L).
@@ -190,11 +204,32 @@ pub struct CryptoArbBase {
     /// Used by render_view() to display UP/DOWN market prices.
     pub cached_asks: RwLock<HashMap<TokenId, Decimal>>,
     /// Throttle for dashboard-update signal emission (~5 seconds).
+    /// Uses real wall-clock time (not simulated) to rate-limit output.
     pub last_dashboard_emit: RwLock<Option<tokio::time::Instant>>,
     /// Throttle for periodic pipeline status summary (~60 seconds).
+    /// Uses real wall-clock time (not simulated) to rate-limit output.
     pub last_status_log: RwLock<Option<tokio::time::Instant>>,
+    /// FOK rejection cooldowns per market — prevents retry storms.
+    /// Uses `DateTime<Utc>` so backtests with simulated time work correctly.
+    pub fok_cooldowns: RwLock<HashMap<MarketId, DateTime<Utc>>>,
+    /// Stop-loss rejection cooldowns per token — prevents retry storms on sell failures.
+    pub stop_loss_cooldowns: RwLock<HashMap<TokenId, DateTime<Utc>>>,
+    /// Stale market cooldowns — prevents re-entry after a position was removed as stale.
+    pub stale_market_cooldowns: RwLock<HashMap<MarketId, DateTime<Utc>>>,
+    /// TailEnd skip-reason counters for diagnostics.
+    /// Logged every 60s in the pipeline status summary.
+    /// Uses std::sync::Mutex (not tokio RwLock) to avoid async overhead on a hot path.
+    pub tailend_skip_stats: std::sync::Mutex<HashMap<&'static str, u64>>,
+    /// Per-coin nearest market expiry time. Used as a fast pre-filter in TailEnd
+    /// to skip ExternalPrice events for coins where no market is near expiration.
+    /// Updated on market discovered/expired.
+    pub coin_nearest_expiry: RwLock<HashMap<String, DateTime<Utc>>>,
     /// Coins configured for this strategy.
     coins: HashSet<String>,
+    /// Last event timestamp from the strategy context (simulated or real).
+    /// Updated at the start of each on_event call so internal methods
+    /// (on_order_placed, on_order_filled) can use it without access to ctx.
+    pub last_event_time: RwLock<DateTime<Utc>>,
 }
 
 impl CryptoArbBase {
@@ -224,8 +259,26 @@ impl CryptoArbBase {
             cached_asks: RwLock::new(HashMap::new()),
             last_dashboard_emit: RwLock::new(None),
             last_status_log: RwLock::new(None),
+            fok_cooldowns: RwLock::new(HashMap::new()),
+            stop_loss_cooldowns: RwLock::new(HashMap::new()),
+            stale_market_cooldowns: RwLock::new(HashMap::new()),
+            tailend_skip_stats: std::sync::Mutex::new(HashMap::new()),
+            coin_nearest_expiry: RwLock::new(HashMap::new()),
             coins,
+            last_event_time: RwLock::new(Utc::now()),
         }
+    }
+
+    /// Update the cached event time from the strategy context.
+    /// Should be called at the start of each on_event handler.
+    pub async fn update_event_time(&self, ctx: &StrategyContext) {
+        let now = ctx.now().await;
+        *self.last_event_time.write().await = now;
+    }
+
+    /// Get the last cached event time.
+    pub async fn event_time(&self) -> DateTime<Utc> {
+        *self.last_event_time.read().await
     }
 
     // -------------------------------------------------------------------------
@@ -240,8 +293,8 @@ impl CryptoArbBase {
         symbol: &str,
         price: Decimal,
         source: &str,
+        now: DateTime<Utc>,
     ) -> (Option<Decimal>, Vec<Action>) {
-        let now = Utc::now();
 
         // Record price history with source (keep last PRICE_HISTORY_SIZE entries).
         // Deduplicate: when multiple strategy handlers share this base, the same
@@ -297,14 +350,14 @@ impl CryptoArbBase {
             }
             // Prune old boundary snapshots
             drop(boundaries);
-            self.prune_boundary_snapshots(symbol).await;
+            self.prune_boundary_snapshots(symbol, now).await;
         }
 
         // Promote any pending markets for this coin
-        let promote_actions = self.promote_pending_markets(symbol, price).await;
+        let promote_actions = self.promote_pending_markets(symbol, price, now).await;
 
         // Spike detection
-        let spike = self.detect_spike(symbol, price).await;
+        let spike = self.detect_spike(symbol, price, now).await;
 
         (spike, promote_actions)
     }
@@ -317,6 +370,92 @@ impl CryptoArbBase {
             .and_then(|h| h.back().map(|(_, p, _)| *p))
     }
 
+    /// Check if price has favored the given direction for at least `min_sustained_secs`.
+    ///
+    /// Returns true if for the last `min_sustained_secs`, all prices consistently
+    /// indicate the same outcome (above reference for Up, below for Down).
+    pub async fn check_sustained_direction(
+        &self,
+        coin: &str,
+        reference_price: Decimal,
+        predicted: OutcomeSide,
+        min_sustained_secs: u64,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let history = self.price_history.read().await;
+        let entries = match history.get(coin) {
+            Some(e) => e,
+            None => return false,
+        };
+        let cutoff = now - chrono::Duration::seconds(min_sustained_secs as i64);
+
+        // Get all entries within the sustained window
+        let window_entries: Vec<_> = entries.iter().filter(|(ts, _, _)| *ts >= cutoff).collect();
+
+        // Need at least 1 entry to confirm direction
+        if window_entries.is_empty() {
+            debug!(
+                coin = %coin,
+                min_sustained_secs = min_sustained_secs,
+                "Sustained direction check failed: no entries in window"
+            );
+            return false;
+        }
+
+        // Check if ALL entries in the window favor the predicted direction
+        match predicted {
+            OutcomeSide::Up | OutcomeSide::Yes => {
+                window_entries.iter().all(|(_, price, _)| *price > reference_price)
+            }
+            OutcomeSide::Down | OutcomeSide::No => {
+                window_entries.iter().all(|(_, price, _)| *price < reference_price)
+            }
+        }
+    }
+
+    /// Calculate maximum volatility (price wick) in the last `window_secs`.
+    ///
+    /// Returns the max percentage deviation from the reference price
+    /// as an absolute value (always positive).
+    pub async fn max_recent_volatility(
+        &self,
+        coin: &str,
+        reference_price: Decimal,
+        window_secs: u64,
+        now: DateTime<Utc>,
+    ) -> Option<Decimal> {
+        if reference_price.is_zero() {
+            return None;
+        }
+
+        let history = self.price_history.read().await;
+        let entries = history.get(coin)?;
+        let cutoff = now - chrono::Duration::seconds(window_secs as i64);
+
+        let window_entries: Vec<_> = entries.iter().filter(|(ts, _, _)| *ts >= cutoff).collect();
+
+        if window_entries.is_empty() {
+            return None;
+        }
+
+        let max_price = window_entries
+            .iter()
+            .map(|(_, p, _)| *p)
+            .max()
+            .unwrap_or(reference_price);
+        let min_price = window_entries
+            .iter()
+            .map(|(_, p, _)| *p)
+            .min()
+            .unwrap_or(reference_price);
+
+        // Calculate max deviation from reference (wick in either direction)
+        let up_wick = (max_price - reference_price).abs() / reference_price;
+        let down_wick = (min_price - reference_price).abs() / reference_price;
+
+        Some(up_wick.max(down_wick))
+    }
+
     // -------------------------------------------------------------------------
     // Spike detection
     // -------------------------------------------------------------------------
@@ -326,10 +465,9 @@ impl CryptoArbBase {
     ///
     /// Returns `Some(change_pct)` if the absolute percentage change exceeds
     /// `spike.threshold_pct`, otherwise `None`.
-    pub async fn detect_spike(&self, coin: &str, current_price: Decimal) -> Option<Decimal> {
+    pub async fn detect_spike(&self, coin: &str, current_price: Decimal, now: DateTime<Utc>) -> Option<Decimal> {
         let history = self.price_history.read().await;
         let entries = history.get(coin)?;
-        let now = Utc::now();
         let window = chrono::Duration::seconds(self.config.spike.window_secs as i64);
         let cutoff = now - window;
 
@@ -447,20 +585,22 @@ impl CryptoArbBase {
         let history = self.price_history.read().await;
         if let (Some(target_dt), Some(entries)) = (target, history.get(coin)) {
             // Find all entries within 30s of window start
-            let mut best: Option<(u64, Decimal, bool)> = None; // (staleness, price, is_chainlink)
+            let mut best: Option<(u64, Decimal, bool)> = None; // (staleness, price, is_preferred)
             for (ts, price, source) in entries {
                 let staleness = (*ts - target_dt).num_seconds().unsigned_abs();
                 if staleness >= 30 {
                     continue;
                 }
-                let is_chainlink = source.eq_ignore_ascii_case("chainlink");
+                // Prefer Chainlink and Binance futures (Polymarket resolves on Binance futures mark price)
+                let is_preferred = source.eq_ignore_ascii_case("chainlink")
+                    || source.eq_ignore_ascii_case("binance-futures");
                 let is_better = match best {
                     None => true,
-                    Some((prev_stale, _, prev_cl)) => {
-                        // Prefer Chainlink if staleness is similar (within 5s)
-                        if is_chainlink && !prev_cl && staleness < prev_stale + 5 {
+                    Some((prev_stale, _, prev_pref)) => {
+                        // Prefer authoritative sources if staleness is similar (within 5s)
+                        if is_preferred && !prev_pref && staleness < prev_stale + 5 {
                             true
-                        } else if !is_chainlink && prev_cl && prev_stale < staleness + 5 {
+                        } else if !is_preferred && prev_pref && prev_stale < staleness + 5 {
                             false
                         } else {
                             staleness < prev_stale
@@ -468,7 +608,7 @@ impl CryptoArbBase {
                     }
                 };
                 if is_better {
-                    best = Some((staleness, *price, is_chainlink));
+                    best = Some((staleness, *price, is_preferred));
                 }
             }
             if let Some((staleness, price, _)) = best {
@@ -486,8 +626,8 @@ impl CryptoArbBase {
     }
 
     /// Remove boundary snapshots older than 4 windows (1 hour) for a given coin.
-    async fn prune_boundary_snapshots(&self, coin: &str) {
-        let now_ts = Utc::now().timestamp();
+    async fn prune_boundary_snapshots(&self, coin: &str, now: DateTime<Utc>) {
+        let now_ts = now.timestamp();
         let cutoff = now_ts - (WINDOW_SECS * 4);
         let prefix = format!("{coin}-");
         let mut boundaries = self.boundary_prices.write().await;
@@ -561,13 +701,14 @@ impl CryptoArbBase {
                 );
                 drop(md);
                 let mut pending = self.pending_discovery.write().await;
-                pending.insert(coin, market.clone());
+                pending.entry(coin).or_default().push(market.clone());
                 return vec![];
             }
         };
         drop(md);
 
-        self.activate_market(market, &coin, current_price).await
+        let now = ctx.now().await;
+        self.activate_market(market, &coin, current_price, now).await
     }
 
     /// Handle a market expiration. Removes from active markets, resolves open positions.
@@ -628,6 +769,8 @@ impl CryptoArbBase {
             }
         }
 
+        self.rebuild_nearest_expiry().await;
+
         vec![Action::UnsubscribeMarket(market_id.to_string())]
     }
 
@@ -639,14 +782,21 @@ impl CryptoArbBase {
         &self,
         symbol: &str,
         current_price: Decimal,
+        now: DateTime<Utc>,
     ) -> Vec<Action> {
-        let market = {
+        let markets = {
             let mut pending = self.pending_discovery.write().await;
             pending.remove(symbol)
         };
 
-        match market {
-            Some(m) => self.activate_market(&m, symbol, current_price).await,
+        match markets {
+            Some(market_list) => {
+                let mut actions = Vec::new();
+                for m in market_list {
+                    actions.extend(self.activate_market(&m, symbol, current_price, now).await);
+                }
+                actions
+            }
             None => vec![],
         }
     }
@@ -658,8 +808,9 @@ impl CryptoArbBase {
         market: &MarketInfo,
         coin: &str,
         current_price: Decimal,
+        now: DateTime<Utc>,
     ) -> Vec<Action> {
-        let now_ts = Utc::now().timestamp();
+        let now_ts = now.timestamp();
         let boundary_ts = now_ts - (now_ts % WINDOW_SECS);
 
         let window_ts = market
@@ -676,7 +827,7 @@ impl CryptoArbBase {
             market: market.clone(),
             reference_price,
             reference_quality,
-            discovery_time: Utc::now(),
+            discovery_time: now,
             coin: coin.to_string(),
         };
 
@@ -690,13 +841,33 @@ impl CryptoArbBase {
 
         let mut active = self.active_markets.write().await;
         active.insert(market.id.clone(), mwr);
+        drop(active);
 
-        vec![Action::SubscribeMarket(market.id.clone())]
+        self.rebuild_nearest_expiry().await;
+
+        vec![Action::SubscribeMarket(market.clone())]
     }
 
     // -------------------------------------------------------------------------
     // Market management
     // -------------------------------------------------------------------------
+
+    /// Rebuild the coin_nearest_expiry cache from active_markets.
+    /// Must be called after any change to active_markets.
+    pub async fn rebuild_nearest_expiry(&self) {
+        let markets = self.active_markets.read().await;
+        let mut nearest: HashMap<String, DateTime<Utc>> = HashMap::new();
+        for mwr in markets.values() {
+            let entry = nearest
+                .entry(mwr.coin.clone())
+                .or_insert(mwr.market.end_date);
+            if mwr.market.end_date < *entry {
+                *entry = mwr.market.end_date;
+            }
+        }
+        let mut cache = self.coin_nearest_expiry.write().await;
+        *cache = nearest;
+    }
 
     /// Check if this coin is tracked by the strategy.
     pub fn is_tracked_coin(&self, coin: &str) -> bool {
@@ -758,6 +929,34 @@ impl CryptoArbBase {
         let total = total_positions + pending.len() + limits.len();
 
         total < self.config.max_positions
+    }
+
+    /// Validate that the calculated share size meets the market's minimum order size.
+    ///
+    /// Returns `true` if the size is valid (>= min_order_size), `false` otherwise.
+    /// Logs a warning if the size is below minimum to help diagnose config issues.
+    pub async fn validate_min_order_size(
+        &self,
+        market_id: &MarketId,
+        size: Decimal,
+    ) -> bool {
+        let markets = self.active_markets.read().await;
+        let market = match markets.get(market_id) {
+            Some(m) => &m.market,
+            None => return false, // Can't validate without market info
+        };
+
+        if size < market.min_order_size {
+            warn!(
+                market = %market_id,
+                size = %size,
+                min_order_size = %market.min_order_size,
+                "Order size below market minimum - skipping"
+            );
+            false
+        } else {
+            true
+        }
     }
 
     /// Check if market already has a position, pending order, or open limit order.
@@ -838,23 +1037,24 @@ impl CryptoArbBase {
     /// 2. Market price dropped by >= stop_loss_min_drop (5¢) from entry
     /// 3. Time remaining > 60s (don't sell in final minute)
     ///
-    /// Returns `Some((action, exit_price))` when stop-loss should trigger.
+    /// Returns `Some((action, exit_price, trigger))` when stop-loss should trigger.
     pub async fn check_stop_loss(
         &self,
         pos: &ArbitragePosition,
         snapshot: &OrderbookSnapshot,
-    ) -> Option<(Action, Decimal)> {
+        now: DateTime<Utc>,
+    ) -> Option<(Action, Decimal, StopLossTrigger)> {
         // Read time_remaining from active_markets, then drop the lock before
         // acquiring price_history (via get_latest_price) to avoid inconsistent
         // lock ordering with record_price which acquires them in reverse order.
         let time_remaining = {
             let markets = self.active_markets.read().await;
             let market = markets.get(&pos.market_id)?;
-            market.market.seconds_remaining()
+            market.market.seconds_remaining_at(now)
         };
 
-        // Don't trigger stop-loss in the final 60 seconds
-        if time_remaining <= 60 {
+        // Don't trigger stop-loss when time remaining is below configured threshold
+        if time_remaining <= self.config.stop_loss.min_remaining_secs {
             return None;
         }
 
@@ -882,12 +1082,16 @@ impl CryptoArbBase {
         let price_drop = pos.entry_price - current_bid;
         let market_dropped = price_drop >= self.config.stop_loss.min_drop;
 
-        // Trailing stop: triggers when position was profitable and bid dropped from peak
-        let trailing_triggered = if self.config.stop_loss.trailing_enabled
-            && pos.peak_bid > pos.entry_price
+        let min_distance = self.config.stop_loss.trailing_min_distance;
+
+        // Trailing stop: triggers when position was profitable and bid dropped from peak.
+        // Arming requires peak_bid >= entry_price + trailing_min_distance to avoid
+        // triggering on sub-cent profit noise.
+        let (trailing_triggered, effective_distance) = if self.config.stop_loss.trailing_enabled
+            && pos.peak_bid >= pos.entry_price + min_distance
         {
             let base_distance = self.config.stop_loss.trailing_distance;
-            let effective_distance = if self.config.stop_loss.time_decay {
+            let eff = if self.config.stop_loss.time_decay {
                 // Tighten trailing distance as expiry approaches (900s = 15min market)
                 let decay_factor = Decimal::from(time_remaining) / Decimal::from(900i64);
                 // Clamp to [0, 1]
@@ -898,26 +1102,40 @@ impl CryptoArbBase {
                 } else {
                     decay_factor
                 };
-                base_distance * clamped
+                // Apply floor: never let effective distance go below trailing_min_distance
+                (base_distance * clamped).max(min_distance)
             } else {
                 base_distance
             };
             let drop_from_peak = pos.peak_bid - current_bid;
-            drop_from_peak >= effective_distance
+            (drop_from_peak >= eff, eff)
         } else {
-            false
+            (false, min_distance)
         };
 
         if (crypto_reversed && market_dropped) || trailing_triggered {
-            let order = OrderRequest {
-                token_id: pos.token_id.clone(),
-                price: current_bid,
-                size: pos.size,
-                side: OrderSide::Sell,
-                order_type: OrderType::Fok,
-                neg_risk: false,
+            let reason = if trailing_triggered {
+                "trailing_stop"
+            } else {
+                "dual_trigger"
             };
-            Some((Action::PlaceOrder(order), current_bid))
+            let trigger = StopLossTrigger {
+                reason,
+                peak_bid: pos.peak_bid,
+                effective_distance,
+                time_remaining,
+            };
+            let order = OrderRequest::new(
+                pos.token_id.clone(),
+                current_bid,
+                pos.size,
+                OrderSide::Sell,
+                OrderType::Fok,
+                false, // neg_risk
+            )
+            .with_tick_size(pos.tick_size)
+            .with_fee_rate_bps(pos.fee_rate_bps);
+            Some((Action::PlaceOrder(order), current_bid, trigger))
         } else {
             None
         }
@@ -932,9 +1150,8 @@ impl CryptoArbBase {
         if !self.config.performance.auto_disable {
             return false;
         }
-        let canonical_mode = mode.canonical();
         let stats = self.mode_stats.read().await;
-        if let Some(s) = stats.get(&canonical_mode) {
+        if let Some(s) = stats.get(mode) {
             s.total_trades() >= self.config.performance.min_trades
                 && s.win_rate() < self.config.performance.min_win_rate
         } else {
@@ -945,10 +1162,9 @@ impl CryptoArbBase {
     /// Record a trade P&L outcome for the given mode.
     pub async fn record_trade_pnl(&self, mode: &ArbitrageMode, pnl: Decimal) {
         let window_size = self.config.performance.window_size;
-        let canonical_mode = mode.canonical();
         let mut stats = self.mode_stats.write().await;
         stats
-            .entry(canonical_mode)
+            .entry(mode.clone())
             .or_insert_with(|| ModeStats::new(window_size))
             .record(pnl);
     }
@@ -957,31 +1173,197 @@ impl CryptoArbBase {
     // Order management
     // -------------------------------------------------------------------------
 
+    /// Record a FOK rejection cooldown for a market.
+    pub async fn record_fok_cooldown(&self, market_id: &MarketId, cooldown_secs: u64) {
+        let now = self.event_time().await;
+        let expires_at = now + chrono::Duration::seconds(cooldown_secs as i64);
+        let mut cooldowns = self.fok_cooldowns.write().await;
+        cooldowns.insert(market_id.clone(), expires_at);
+    }
+
+    /// Check if a market is still in FOK rejection cooldown.
+    pub async fn is_fok_cooled_down(&self, market_id: &MarketId) -> bool {
+        let now = self.event_time().await;
+        let cooldowns = self.fok_cooldowns.read().await;
+        if let Some(expires_at) = cooldowns.get(market_id) {
+            now < *expires_at
+        } else {
+            false
+        }
+    }
+
+    /// Record a stop-loss rejection cooldown for a token.
+    pub async fn record_stop_loss_cooldown(&self, token_id: &TokenId, cooldown_secs: u64) {
+        let now = self.event_time().await;
+        let expires_at = now + chrono::Duration::seconds(cooldown_secs as i64);
+        let mut cooldowns = self.stop_loss_cooldowns.write().await;
+        cooldowns.insert(token_id.clone(), expires_at);
+    }
+
+    /// Check if a token is still in stop-loss rejection cooldown.
+    pub async fn is_stop_loss_cooled_down(&self, token_id: &TokenId) -> bool {
+        let now = self.event_time().await;
+        let cooldowns = self.stop_loss_cooldowns.read().await;
+        if let Some(expires_at) = cooldowns.get(token_id) {
+            now < *expires_at
+        } else {
+            false
+        }
+    }
+
+    /// Record a stale market cooldown to prevent re-entry after position removal.
+    pub async fn record_stale_market_cooldown(&self, market_id: &MarketId, cooldown_secs: u64) {
+        let now = self.event_time().await;
+        let expires_at = now + chrono::Duration::seconds(cooldown_secs as i64);
+        let mut cooldowns = self.stale_market_cooldowns.write().await;
+        cooldowns.insert(market_id.clone(), expires_at);
+    }
+
+    /// Check if a market is still in stale-removal cooldown.
+    pub async fn is_stale_market_cooled_down(&self, market_id: &MarketId) -> bool {
+        let now = self.event_time().await;
+        let cooldowns = self.stale_market_cooldowns.read().await;
+        if let Some(expires_at) = cooldowns.get(market_id) {
+            now < *expires_at
+        } else {
+            false
+        }
+    }
+
+    /// Handle a rejected stop-loss sell order.
+    ///
+    /// If the reason indicates a permanent balance/allowance issue, removes the stale
+    /// position to prevent retry loops. Otherwise applies a cooldown for transient errors.
+    pub async fn handle_stop_loss_rejection(&self, token_id: &TokenId, reason: &str, mode_name: &str) {
+        let mut pending_sl = self.pending_stop_loss.write().await;
+        pending_sl.remove(token_id);
+
+        if reason.contains("not enough balance") || reason.contains("allowance") {
+            warn!(
+                token_id = %token_id,
+                mode = mode_name,
+                reason = %reason,
+                "Removing stale position: balance/allowance insufficient"
+            );
+            drop(pending_sl);
+            if let Some(pos) = self.remove_position_by_token(token_id).await {
+                let cooldown = self.config.stop_loss.stale_market_cooldown_secs;
+                self.record_stale_market_cooldown(&pos.market_id, cooldown)
+                    .await;
+                info!(
+                    token_id = %token_id,
+                    market = %pos.market_id,
+                    mode = mode_name,
+                    cooldown_secs = cooldown,
+                    "Stale position removed after stop-loss rejection, market cooldown applied"
+                );
+            }
+        } else {
+            warn!(
+                token_id = %token_id,
+                mode = mode_name,
+                reason = %reason,
+                "Stop-loss sell rejected (transient), cooldown applied"
+            );
+            drop(pending_sl);
+            self.record_stop_loss_cooldown(token_id, 30).await;
+        }
+    }
+
+    /// Handle a CancelFailed event for a limit order.
+    ///
+    /// If the reason indicates the order is permanently gone (matched/canceled/not found),
+    /// remove it from `open_limit_orders` to prevent retry loops. Otherwise, reset
+    /// `cancel_pending` so the stale-order check can retry later.
+    ///
+    /// Returns `(found, actions)` — `found` is true if the order was in our tracking,
+    /// and `actions` contains a matched-fill signal if the order was matched by a
+    /// counterparty (so the claim monitor can track the position).
+    pub async fn handle_cancel_failed(&self, order_id: &str, reason: &str) -> (bool, Vec<Action>) {
+        let mut limits = self.open_limit_orders.write().await;
+        if let Some(lo) = limits.get_mut(order_id) {
+            let permanently_gone = reason.contains("matched")
+                || reason.contains("canceled")
+                || reason.contains("not found");
+            if permanently_gone {
+                let lo = limits.remove(order_id).unwrap();
+                warn!(
+                    order_id = %order_id,
+                    market = %lo.market_id,
+                    mode = %lo.mode,
+                    reason = %reason,
+                    "Order permanently gone — removed from tracking"
+                );
+
+                let mut actions = Vec::new();
+                if reason.contains("matched") {
+                    info!(
+                        order_id = %order_id,
+                        market = %lo.market_id,
+                        mode = %lo.mode,
+                        "Detected matched fill from cancel failure"
+                    );
+                    actions.push(Action::EmitSignal {
+                        signal_type: "matched-fill".to_string(),
+                        payload: serde_json::json!({ "market_id": lo.market_id }),
+                    });
+                }
+                return (true, actions);
+            } else {
+                lo.cancel_pending = false;
+                warn!(
+                    order_id = %order_id,
+                    market = %lo.market_id,
+                    mode = %lo.mode,
+                    reason = %reason,
+                    "Cancel failed (transient), will retry"
+                );
+            }
+            return (true, vec![]);
+        }
+        (false, vec![])
+    }
+
     /// Cancel GTC limit orders that have been open longer than `max_age_secs`.
+    ///
+    /// Orders are flagged with `cancel_pending = true` rather than removed from
+    /// the map. This ensures that if the cancel fails (e.g., order was already
+    /// matched), the subsequent `OrderEvent::Filled` can still find the order
+    /// and record the position correctly.
     pub async fn check_stale_limit_orders(&self) -> Vec<Action> {
-        let max_age = std::time::Duration::from_secs(self.config.order.max_age_secs);
-        let now = tokio::time::Instant::now();
+        let max_age_secs = self.config.order.max_age_secs as i64;
+        let now = self.event_time().await;
 
         let mut orders = self.open_limit_orders.write().await;
-        let stale_ids: Vec<OrderId> = orders
-            .iter()
-            .filter(|(_, lo)| now.duration_since(lo.placed_at) >= max_age)
-            .map(|(id, _)| id.clone())
-            .collect();
-
         let mut actions = Vec::new();
-        for order_id in stale_ids {
-            if let Some(lo) = orders.remove(&order_id) {
+        for (order_id, lo) in orders.iter_mut() {
+            if lo.cancel_pending {
+                continue; // Already has a cancel in flight
+            }
+            let age_secs = (now - lo.placed_at).num_seconds();
+            if age_secs >= max_age_secs {
                 info!(
                     order_id = %order_id,
                     market = %lo.market_id,
-                    age_secs = now.duration_since(lo.placed_at).as_secs(),
+                    age_secs = age_secs,
                     "Cancelling stale GTC limit order"
                 );
-                actions.push(Action::CancelOrder(order_id));
+                lo.cancel_pending = true;
+                actions.push(Action::CancelOrder(order_id.clone()));
             }
         }
         actions
+    }
+
+    // -------------------------------------------------------------------------
+    // TailEnd skip diagnostics
+    // -------------------------------------------------------------------------
+
+    /// Increment a TailEnd skip reason counter.
+    /// Uses std::sync::Mutex — no async overhead.
+    pub async fn record_tailend_skip(&self, reason: &'static str) {
+        let mut stats = self.tailend_skip_stats.lock().unwrap();
+        *stats.entry(reason).or_insert(0) += 1;
     }
 
     // -------------------------------------------------------------------------
@@ -1043,6 +1425,12 @@ impl CryptoArbBase {
             .sum();
         let pending_orders = self.pending_orders.read().await.len();
 
+        // Drain TailEnd skip stats for this period
+        let skip_stats: HashMap<&'static str, u64> = {
+            let mut stats = self.tailend_skip_stats.lock().unwrap();
+            std::mem::take(&mut *stats)
+        };
+
         info!(
             active_markets = active_count,
             pending_markets = pending_count,
@@ -1051,5 +1439,16 @@ impl CryptoArbBase {
             pending_orders = pending_orders,
             "Pipeline status summary"
         );
+
+        if !skip_stats.is_empty() {
+            let summary: Vec<String> = skip_stats
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            info!(
+                stats = %summary.join(", "),
+                "TailEnd skip stats (last 60s)"
+            );
+        }
     }
 }

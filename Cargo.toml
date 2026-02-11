@@ -7,6 +7,7 @@ members = [
     "crates/polyrust-store",
     "crates/polyrust-dashboard",
     "crates/polyrust-strategies",
+    "crates/polyrust-backtest",
 ]
 
 [workspace.dependencies]
@@ -25,10 +26,17 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio-stream = "0.1"
 toml = "0.8"
 rust_decimal_macros = "1"
+rand = "0.9"
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 
 polymarket-client-sdk = { version = "0.4", features = [
     "clob", "ws", "rtds", "data", "gamma", "tracing", "heartbeats", "ctf"
 ] }
+
+# Alloy for on-chain interaction (CTF redemption)
+# Version must match polymarket-client-sdk's alloy dependency (1.5.2)
+alloy = { version = "1.5", features = ["full", "node-bindings", "rpc-types", "signer-local"] }
+alloy-primitives = "1.1"
 
 # Internal crates
 polyrust-core = { path = "crates/polyrust-core" }
@@ -37,6 +45,7 @@ polyrust-execution = { path = "crates/polyrust-execution" }
 polyrust-store = { path = "crates/polyrust-store" }
 polyrust-dashboard = { path = "crates/polyrust-dashboard" }
 polyrust-strategies = { path = "crates/polyrust-strategies" }
+polyrust-backtest = { path = "crates/polyrust-backtest" }
 
 [package]
 name = "polyrust"
@@ -50,6 +59,7 @@ polyrust-execution.workspace = true
 polyrust-store.workspace = true
 polyrust-dashboard.workspace = true
 polyrust-strategies.workspace = true
+polyrust-backtest.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -61,6 +71,7 @@ async-trait.workspace = true
 rust_decimal.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+polymarket-client-sdk.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros = "1"
@@ -68,3 +79,7 @@ rust_decimal_macros = "1"
 [[example]]
 name = "simple_strategy"
 path = "examples/simple_strategy.rs"
+
+[[example]]
+name = "run_backtest"
+path = "examples/run_backtest.rs"

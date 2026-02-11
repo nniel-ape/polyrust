@@ -5,8 +5,6 @@
 //! - **Per-mode dashboards** — detailed view for each trading mode:
 //!   - `/strategy/crypto-arb-tailend`
 //!   - `/strategy/crypto-arb-twosided`
-//!   - `/strategy/crypto-arb-confirmed`
-//!   - `/strategy/crypto-arb-crosscorr`
 
 use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
@@ -14,6 +12,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use chrono::Utc;
 use rust_decimal::Decimal;
 
 use polyrust_core::prelude::*;
@@ -237,10 +236,7 @@ async fn render_performance_for_mode(base: &CryptoArbBase, html: &mut String, mo
 fn mode_matches(mode: &ArbitrageMode, filter: &str) -> bool {
     matches!(
         (mode, filter),
-        (ArbitrageMode::TailEnd, "tailend")
-            | (ArbitrageMode::TwoSided, "twosided")
-            | (ArbitrageMode::Confirmed, "confirmed")
-            | (ArbitrageMode::CrossCorrelated { .. }, "crosscorr")
+        (ArbitrageMode::TailEnd, "tailend") | (ArbitrageMode::TwoSided, "twosided")
     )
 }
 
@@ -280,17 +276,11 @@ impl CryptoArbDashboard {
         // --- Mode Status & Navigation ---
         html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
         html.push_str(r#"<h2 class="text-lg font-bold mb-3">Trading Modes</h2>"#);
-        html.push_str(r#"<div class="grid grid-cols-2 md:grid-cols-4 gap-4">"#);
+        html.push_str(r#"<div class="grid grid-cols-2 gap-4">"#);
 
         let modes = [
             ("TailEnd", "tailend", self.base.config.tailend.enabled),
             ("TwoSided", "twosided", self.base.config.twosided.enabled),
-            ("Confirmed", "confirmed", self.base.config.confirmed.enabled),
-            (
-                "CrossCorr",
-                "crosscorr",
-                self.base.config.correlation.enabled,
-            ),
         ];
 
         for (name, slug, enabled) in &modes {
@@ -423,8 +413,6 @@ impl CryptoArbDashboard {
                     let mode_name = match &pos.mode {
                         ArbitrageMode::TailEnd => "TailEnd",
                         ArbitrageMode::TwoSided => "TwoSided",
-                        ArbitrageMode::Confirmed => "Confirmed",
-                        ArbitrageMode::CrossCorrelated { .. } => "CrossCorr",
                     };
                     *mode_counts.entry(mode_name.to_string()).or_default() += 1;
                 }
@@ -564,6 +552,187 @@ impl TailEndDashboard {
         );
         html.push_str("</div></div>");
 
+        // Active markets
+        {
+            let active_markets = self.base.active_markets.read().await;
+            let cached_asks = self.base.cached_asks.read().await;
+            let fee_rate = self.base.config.fee.taker_fee_rate;
+
+            let mut markets_by_time: Vec<_> = active_markets.values().collect();
+            markets_by_time.sort_by_key(|m| m.market.end_date);
+
+            html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+            let _ = write!(
+                html,
+                r#"<h2 class="text-lg font-bold mb-3">Active Markets ({})</h2>"#,
+                markets_by_time.len()
+            );
+
+            if markets_by_time.is_empty() {
+                html.push_str(r#"<p class="text-gray-500">No active markets</p>"#);
+            } else {
+                html.push_str(
+                    r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
+                );
+                html.push_str("<th class=\"text-left py-1\">Market</th>");
+                html.push_str("<th class=\"text-right py-1\">UP</th>");
+                html.push_str("<th class=\"text-right py-1\">DOWN</th>");
+                html.push_str("<th class=\"text-right py-1\">Fee</th>");
+                html.push_str("<th class=\"text-right py-1\">Net</th>");
+                html.push_str("<th class=\"text-right py-1\">Time Left</th>");
+                html.push_str("</tr></thead><tbody>");
+
+                for mwr in &markets_by_time {
+                    let remaining = mwr.market.seconds_remaining().max(0);
+                    let time_str = if remaining > 60 {
+                        format!("{}m {}s", remaining / 60, remaining % 60)
+                    } else {
+                        format!("{}s", remaining)
+                    };
+
+                    let up_ask = cached_asks.get(&mwr.market.token_ids.outcome_a).copied();
+                    let down_ask = cached_asks.get(&mwr.market.token_ids.outcome_b).copied();
+
+                    let up_price = up_ask
+                        .map(fmt_market_price)
+                        .unwrap_or_else(|| "-".to_string());
+                    let down_price = down_ask
+                        .map(fmt_market_price)
+                        .unwrap_or_else(|| "-".to_string());
+
+                    let (fee_str, net_str) = match (up_ask, down_ask) {
+                        (Some(ua), Some(da)) => {
+                            let price = ua.min(da);
+                            let fee = taker_fee(price, fee_rate);
+                            let net = net_profit_margin(price, fee_rate, false);
+                            (
+                                format!("{:.3}", fee.round_dp(3)),
+                                format!("{:.3}", net.round_dp(3)),
+                            )
+                        }
+                        (Some(p), None) | (None, Some(p)) => {
+                            let fee = taker_fee(p, fee_rate);
+                            let net = net_profit_margin(p, fee_rate, false);
+                            (
+                                format!("{:.3}", fee.round_dp(3)),
+                                format!("{:.3}", net.round_dp(3)),
+                            )
+                        }
+                        _ => ("-".to_string(), "-".to_string()),
+                    };
+
+                    let _ = write!(
+                        html,
+                        r#"<tr class="border-b border-gray-800"><td class="py-1">{coin} Up/Down</td><td class="text-right py-1">{up}</td><td class="text-right py-1">{down}</td><td class="text-right py-1">{fee}</td><td class="text-right py-1">{net}</td><td class="text-right py-1">{time}</td></tr>"#,
+                        coin = escape_html(&mwr.coin),
+                        up = up_price,
+                        down = down_price,
+                        fee = fee_str,
+                        net = net_str,
+                        time = time_str,
+                    );
+                }
+                html.push_str("</tbody></table>");
+            }
+            html.push_str("</div>");
+        }
+
+        // Market confidence scores
+        {
+            let active_markets = self.base.active_markets.read().await;
+            let price_history = self.base.price_history.read().await;
+            let cached_asks = self.base.cached_asks.read().await;
+            let now = Utc::now();
+
+            let mut eligible: Vec<_> = active_markets.values().collect();
+            eligible.sort_by(|a, b| a.coin.cmp(&b.coin));
+
+            html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+            let _ = write!(
+                html,
+                r#"<h2 class="text-lg font-bold mb-3">Market Confidence ({})</h2>"#,
+                eligible.len()
+            );
+
+            if eligible.is_empty() {
+                html.push_str(r#"<p class="text-gray-500">No active markets</p>"#);
+            } else {
+                html.push_str(
+                    r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
+                );
+                html.push_str("<th class=\"text-left py-1\">Coin</th>");
+                html.push_str("<th class=\"text-right py-1\">Time Left</th>");
+                html.push_str("<th class=\"text-right py-1\">Ask</th>");
+                html.push_str("<th class=\"text-right py-1\">Confidence</th>");
+                html.push_str("<th class=\"text-right py-1\">Quality</th>");
+                html.push_str("</tr></thead><tbody>");
+
+                for mwr in &eligible {
+                    let time_remaining = mwr.market.seconds_remaining_at(now);
+                    let current_price = price_history
+                        .get(&mwr.coin)
+                        .and_then(|h| h.back().map(|(_, p, _)| *p));
+
+                    let (ask_str, conf_str, conf_class) = match current_price {
+                        Some(cp) => {
+                            let prediction = mwr.predict_winner(cp);
+                            let token_id = match prediction {
+                                Some(OutcomeSide::Up) | Some(OutcomeSide::Yes) => {
+                                    &mwr.market.token_ids.outcome_a
+                                }
+                                _ => &mwr.market.token_ids.outcome_b,
+                            };
+                            let ask = cached_asks.get(token_id).copied();
+                            let ask_display = ask
+                                .map(fmt_market_price)
+                                .unwrap_or_else(|| "-".to_string());
+
+                            match ask {
+                                Some(market_price) => {
+                                    let confidence =
+                                        mwr.get_confidence(cp, market_price, time_remaining);
+                                    let pct = confidence * Decimal::new(100, 0);
+                                    let cls = if confidence >= Decimal::new(90, 2) {
+                                        "text-green-400"
+                                    } else if confidence >= Decimal::new(70, 2) {
+                                        "text-yellow-400"
+                                    } else {
+                                        "text-gray-400"
+                                    };
+                                    (ask_display, format!("{:.1}%", pct), cls)
+                                }
+                                None => (ask_display, "-".to_string(), "text-gray-400"),
+                            }
+                        }
+                        None => ("-".to_string(), "-".to_string(), "text-gray-400"),
+                    };
+
+                    let quality_factor =
+                        mwr.reference_quality.quality_factor() * Decimal::new(100, 0);
+                    let quality_label = match mwr.reference_quality {
+                        ReferenceQuality::Exact => "Exact",
+                        ReferenceQuality::OnChain(_) => "OnChain",
+                        ReferenceQuality::Historical(_) => "Historical",
+                        ReferenceQuality::Current => "Current",
+                    };
+
+                    let _ = write!(
+                        html,
+                        r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="text-right py-1">{time}s</td><td class="text-right py-1">{ask}</td><td class="text-right py-1 {conf_class}">{conf}</td><td class="text-right py-1">{qlabel} ({qfactor:.0}%)</td></tr>"#,
+                        coin = escape_html(&mwr.coin),
+                        time = time_remaining,
+                        ask = ask_str,
+                        conf_class = conf_class,
+                        conf = conf_str,
+                        qlabel = quality_label,
+                        qfactor = quality_factor,
+                    );
+                }
+                html.push_str("</tbody></table>");
+            }
+            html.push_str("</div>");
+        }
+
         // Reference prices (shared context)
         render_reference_prices(&self.base, &mut html).await;
 
@@ -700,353 +869,6 @@ impl TwoSidedDashboard {
 }
 
 // ---------------------------------------------------------------------------
-// Confirmed Dashboard
-// ---------------------------------------------------------------------------
-
-/// Confirmed mode dashboard at `/strategy/crypto-arb-confirmed`.
-pub struct ConfirmedDashboard {
-    base: Arc<CryptoArbBase>,
-}
-
-impl ConfirmedDashboard {
-    pub fn new(base: Arc<CryptoArbBase>) -> Self {
-        Self { base }
-    }
-}
-
-impl DashboardViewProvider for ConfirmedDashboard {
-    fn view_name(&self) -> &str {
-        "crypto-arb-confirmed"
-    }
-
-    fn render_view(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = polyrust_core::error::Result<String>> + Send + '_>> {
-        Box::pin(self.render_view_impl())
-    }
-}
-
-impl ConfirmedDashboard {
-    async fn render_view_impl(&self) -> polyrust_core::error::Result<String> {
-        let mut html = String::with_capacity(4096);
-
-        // Header
-        html.push_str(r#"<div class="mb-4">"#);
-        html.push_str(r#"<a href="/strategy/crypto-arb" class="text-blue-400 hover:underline">&larr; Back to Overview</a>"#);
-        html.push_str(r#"<h1 class="text-xl font-bold mt-2">Confirmed Mode</h1>"#);
-
-        let status = if self.base.config.confirmed.enabled {
-            r#"<span class="text-green-400">Enabled</span>"#
-        } else {
-            r#"<span class="text-gray-500">Disabled</span>"#
-        };
-        let _ = write!(html, r#"<p class="text-sm text-gray-400">Status: {}</p>"#, status);
-        html.push_str("</div>");
-
-        // Config
-        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
-        html.push_str(r#"<h2 class="text-lg font-bold mb-3">Configuration</h2>"#);
-        html.push_str(r#"<div class="grid grid-cols-2 gap-2 text-sm">"#);
-        let _ = write!(
-            html,
-            r#"<div class="text-gray-400">Min confidence:</div><div>&ge; {}</div>"#,
-            self.base.config.confirmed.min_confidence
-        );
-        let _ = write!(
-            html,
-            r#"<div class="text-gray-400">Min margin:</div><div>&ge; {} ({:.0}%)</div>"#,
-            self.base.config.confirmed.min_margin,
-            self.base.config.confirmed.min_margin * Decimal::new(100, 0)
-        );
-        let _ = write!(
-            html,
-            r#"<div class="text-gray-400">Kelly sizing:</div><div>{}</div>"#,
-            if self.base.config.sizing.use_kelly { "Enabled" } else { "Disabled" }
-        );
-        html.push_str("</div></div>");
-
-        // Reference prices
-        render_reference_prices(&self.base, &mut html).await;
-
-        // Spike events (relevant for Confirmed mode)
-        let spike_events = self.base.spike_events.read().await;
-        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
-        let _ = write!(
-            html,
-            r#"<h2 class="text-lg font-bold mb-3">Recent Spikes ({})</h2>"#,
-            spike_events.len()
-        );
-
-        if spike_events.is_empty() {
-            html.push_str(r#"<p class="text-gray-500">No spike events detected</p>"#);
-        } else {
-            html.push_str(
-                r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
-            );
-            html.push_str("<th class=\"text-left py-1\">Coin</th>");
-            html.push_str("<th class=\"text-right py-1\">Change</th>");
-            html.push_str("<th class=\"text-right py-1\">From</th>");
-            html.push_str("<th class=\"text-right py-1\">To</th>");
-            html.push_str("<th class=\"text-right py-1\">Time</th>");
-            html.push_str("</tr></thead><tbody>");
-
-            for spike in spike_events.iter().rev().take(10) {
-                let change_class = if spike.change_pct >= Decimal::ZERO {
-                    "pnl-positive"
-                } else {
-                    "pnl-negative"
-                };
-                let change_display = spike.change_pct * Decimal::new(100, 0);
-                let ago = (chrono::Utc::now() - spike.timestamp).num_seconds();
-                let time_str = if ago < 60 {
-                    format!("{}s ago", ago)
-                } else {
-                    format!("{}m ago", ago / 60)
-                };
-
-                let _ = write!(
-                    html,
-                    r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="text-right py-1 {change_class}">{change:+.2}%</td><td class="text-right py-1">{from}</td><td class="text-right py-1">{to}</td><td class="text-right py-1">{time}</td></tr>"#,
-                    coin = escape_html(&spike.coin),
-                    change_class = change_class,
-                    change = change_display,
-                    from = fmt_usd(spike.from_price),
-                    to = fmt_usd(spike.to_price),
-                    time = time_str,
-                );
-            }
-            html.push_str("</tbody></table>");
-        }
-        html.push_str("</div>");
-
-        drop(spike_events);
-
-        // Positions
-        render_positions_for_mode(&self.base, &mut html, "confirmed").await;
-
-        // Performance
-        render_performance_for_mode(&self.base, &mut html, "confirmed").await;
-
-        Ok(html)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// CrossCorr Dashboard
-// ---------------------------------------------------------------------------
-
-/// CrossCorrelated mode dashboard at `/strategy/crypto-arb-crosscorr`.
-pub struct CrossCorrDashboard {
-    base: Arc<CryptoArbBase>,
-}
-
-impl CrossCorrDashboard {
-    pub fn new(base: Arc<CryptoArbBase>) -> Self {
-        Self { base }
-    }
-}
-
-impl DashboardViewProvider for CrossCorrDashboard {
-    fn view_name(&self) -> &str {
-        "crypto-arb-crosscorr"
-    }
-
-    fn render_view(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = polyrust_core::error::Result<String>> + Send + '_>> {
-        Box::pin(self.render_view_impl())
-    }
-}
-
-impl CrossCorrDashboard {
-    async fn render_view_impl(&self) -> polyrust_core::error::Result<String> {
-        let mut html = String::with_capacity(4096);
-
-        // Header
-        html.push_str(r#"<div class="mb-4">"#);
-        html.push_str(r#"<a href="/strategy/crypto-arb" class="text-blue-400 hover:underline">&larr; Back to Overview</a>"#);
-        html.push_str(r#"<h1 class="text-xl font-bold mt-2">Cross-Correlated Mode</h1>"#);
-
-        let status = if self.base.config.correlation.enabled {
-            r#"<span class="text-green-400">Enabled</span>"#
-        } else {
-            r#"<span class="text-gray-500">Disabled</span>"#
-        };
-        let _ = write!(html, r#"<p class="text-sm text-gray-400">Status: {}</p>"#, status);
-        html.push_str("</div>");
-
-        // Config
-        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
-        html.push_str(r#"<h2 class="text-lg font-bold mb-3">Configuration</h2>"#);
-        html.push_str(r#"<div class="text-sm mb-2">"#);
-        let _ = write!(
-            html,
-            r#"<span class="text-gray-400">Min spike:</span> {:.1}%"#,
-            self.base.config.correlation.min_spike_pct * Decimal::new(100, 0)
-        );
-        html.push_str("</div>");
-
-        html.push_str(r#"<div class="text-sm"><span class="text-gray-400">Pairs:</span> "#);
-        for (i, (leader, followers)) in self.base.config.correlation.pairs.iter().enumerate() {
-            if i > 0 {
-                html.push_str(", ");
-            }
-            let _ = write!(
-                html,
-                "{} → [{}]",
-                escape_html(leader),
-                followers
-                    .iter()
-                    .map(|f| escape_html(f))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-        html.push_str("</div></div>");
-
-        // Reference prices
-        render_reference_prices(&self.base, &mut html).await;
-
-        // Active correlation signals
-        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
-        html.push_str(r#"<h2 class="text-lg font-bold mb-3">Active Signals</h2>"#);
-
-        let pending_orders = self.base.pending_orders.read().await;
-        let open_limit_orders = self.base.open_limit_orders.read().await;
-
-        let cross_pending: Vec<_> = pending_orders
-            .values()
-            .filter(|p| matches!(&p.mode, ArbitrageMode::CrossCorrelated { .. }))
-            .collect();
-        let cross_limits: Vec<_> = open_limit_orders
-            .values()
-            .filter(|lo| matches!(&lo.mode, ArbitrageMode::CrossCorrelated { .. }))
-            .collect();
-
-        let cross_count = cross_pending.len() + cross_limits.len();
-        if cross_count == 0 {
-            html.push_str(r#"<p class="text-gray-500">No active correlation signals</p>"#);
-        } else {
-            html.push_str(
-                r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
-            );
-            html.push_str("<th class=\"text-left py-1\">Leader</th>");
-            html.push_str("<th class=\"text-left py-1\">Follower</th>");
-            html.push_str("<th class=\"text-right py-1\">Price</th>");
-            html.push_str("<th class=\"text-right py-1\">Size</th>");
-            html.push_str("<th class=\"text-left py-1\">Status</th>");
-            html.push_str("</tr></thead><tbody>");
-
-            for p in &cross_pending {
-                let leader_name = match &p.mode {
-                    ArbitrageMode::CrossCorrelated { leader } => leader.as_str(),
-                    _ => "-",
-                };
-                let _ = write!(
-                    html,
-                    r#"<tr class="border-b border-gray-800"><td class="py-1">{leader}</td><td class="py-1">{follower}</td><td class="text-right py-1">{price}</td><td class="text-right py-1">{size}</td><td class="py-1">Pending</td></tr>"#,
-                    leader = escape_html(leader_name),
-                    follower = escape_html(&p.coin),
-                    price = fmt_usd(p.price),
-                    size = p.size.round_dp(2),
-                );
-            }
-
-            for lo in &cross_limits {
-                let leader_name = match &lo.mode {
-                    ArbitrageMode::CrossCorrelated { leader } => leader.as_str(),
-                    _ => "-",
-                };
-                let _ = write!(
-                    html,
-                    r#"<tr class="border-b border-gray-800"><td class="py-1">{leader}</td><td class="py-1">{follower}</td><td class="text-right py-1">{price}</td><td class="text-right py-1">{size}</td><td class="py-1">Open Limit</td></tr>"#,
-                    leader = escape_html(leader_name),
-                    follower = escape_html(&lo.coin),
-                    price = fmt_usd(lo.price),
-                    size = lo.size.round_dp(2),
-                );
-            }
-
-            html.push_str("</tbody></table>");
-        }
-        html.push_str("</div>");
-
-        drop(pending_orders);
-        drop(open_limit_orders);
-
-        // Recent leader spikes
-        let spike_events = self.base.spike_events.read().await;
-        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
-        html.push_str(r#"<h2 class="text-lg font-bold mb-3">Leader Spikes</h2>"#);
-
-        // Filter to leader coins only
-        let leader_coins: std::collections::HashSet<_> = self
-            .base
-            .config
-            .correlation
-            .pairs
-            .iter()
-            .map(|(leader, _)| leader.as_str())
-            .collect();
-
-        let leader_spikes: Vec<_> = spike_events
-            .iter()
-            .rev()
-            .filter(|s| leader_coins.contains(s.coin.as_str()))
-            .take(10)
-            .collect();
-
-        if leader_spikes.is_empty() {
-            html.push_str(r#"<p class="text-gray-500">No leader spikes detected</p>"#);
-        } else {
-            html.push_str(
-                r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
-            );
-            html.push_str("<th class=\"text-left py-1\">Leader</th>");
-            html.push_str("<th class=\"text-right py-1\">Change</th>");
-            html.push_str("<th class=\"text-right py-1\">Time</th>");
-            html.push_str("</tr></thead><tbody>");
-
-            for spike in &leader_spikes {
-                let change_class = if spike.change_pct >= Decimal::ZERO {
-                    "pnl-positive"
-                } else {
-                    "pnl-negative"
-                };
-                let change_display = spike.change_pct * Decimal::new(100, 0);
-                let ago = (chrono::Utc::now() - spike.timestamp).num_seconds();
-                let time_str = if ago < 60 {
-                    format!("{}s ago", ago)
-                } else {
-                    format!("{}m ago", ago / 60)
-                };
-
-                let _ = write!(
-                    html,
-                    r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="text-right py-1 {change_class}">{change:+.2}%</td><td class="text-right py-1">{time}</td></tr>"#,
-                    coin = escape_html(&spike.coin),
-                    change_class = change_class,
-                    change = change_display,
-                    time = time_str,
-                );
-            }
-            html.push_str("</tbody></table>");
-        }
-        html.push_str("</div>");
-
-        drop(spike_events);
-
-        // Positions
-        render_positions_for_mode(&self.base, &mut html, "crosscorr").await;
-
-        // Performance
-        render_performance_for_mode(&self.base, &mut html, "crosscorr").await;
-
-        Ok(html)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // SSE Dashboard Update Emission
 // ---------------------------------------------------------------------------
 
@@ -1065,8 +887,6 @@ pub async fn try_emit_dashboard_updates(base: &Arc<CryptoArbBase>) -> Vec<Action
         Box::new(CryptoArbDashboard::new(Arc::clone(base))),
         Box::new(TailEndDashboard::new(Arc::clone(base))),
         Box::new(TwoSidedDashboard::new(Arc::clone(base))),
-        Box::new(ConfirmedDashboard::new(Arc::clone(base))),
-        Box::new(CrossCorrDashboard::new(Arc::clone(base))),
     ];
 
     let mut actions = Vec::with_capacity(providers.len());

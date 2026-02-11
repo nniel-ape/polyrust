@@ -70,11 +70,20 @@ pub enum OrderEvent {
         remaining_size: Decimal,
     },
     Cancelled(OrderId),
+    CancelFailed {
+        order_id: OrderId,
+        reason: String,
+    },
     Rejected {
         order_id: Option<OrderId>,
         reason: String,
         /// Token ID of the rejected order (for pending order cleanup)
         token_id: Option<TokenId>,
+    },
+    Redeemed {
+        market_id: MarketId,
+        tx_hash: String,
+        strategy_name: String,
     },
 }
 

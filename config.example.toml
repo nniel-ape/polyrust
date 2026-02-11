@@ -54,14 +54,23 @@ db_path = "polyrust.db"  # Use ":memory:" for testing
 enabled = true           # Set false + credentials for live trading
 initial_balance = 10000  # Starting USDC balance
 
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTO-CLAIM
+# ─────────────────────────────────────────────────────────────────────────────
+# Automatically redeem winning positions after market resolution on-chain
+
+[auto_claim]
+enabled = true                # Enable automatic position redemption
+poll_interval_secs = 300      # Check for resolved markets every 5 minutes
+max_retries = 10              # Max attempts before manual intervention needed
+retry_backoff_secs = 60       # Wait 1 minute between retry attempts
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # CRYPTO ARBITRAGE STRATEGY
 # ═══════════════════════════════════════════════════════════════════════════════
-# Exploits mispricing in 15-minute Up/Down crypto markets with four modes:
+# Exploits mispricing in 15-minute Up/Down crypto markets with two modes:
 #   1. Tail-End    — <2 min remaining, market >= 90% (highest confidence)
 #   2. Two-Sided   — both outcomes < $1 combined (guaranteed profit)
-#   3. Confirmed   — dynamic confidence model (standard directional)
-#   4. Cross-Correlated — follower coin triggered by leader spike
 #
 # IMPORTANT: All trading modes are DISABLED by default. Enable each mode
 # explicitly with `enabled = true` in its config section.
@@ -69,7 +78,7 @@ initial_balance = 10000  # Starting USDC balance
 # [arbitrage]
 # coins = ["BTC", "ETH", "SOL", "XRP"]  # Coins to track
 # max_positions = 5                      # Maximum concurrent positions
-# min_profit_margin = 0.03               # 3% net profit for Confirmed mode
+# min_profit_margin = 0.03               # 3% net profit margin (env: POLY_MIN_PROFIT_MARGIN, CLI: --min-profit)
 # late_window_margin = 0.02              # 2% relaxed margin (120-300s remaining)
 # scan_interval_secs = 30                # Market discovery scan interval
 # use_chainlink = true                   # On-chain Chainlink vs RTDS boundary snapshots
@@ -92,16 +101,6 @@ initial_balance = 10000  # Starting USDC balance
 # [arbitrage.twosided]
 # enabled = true                 # Enable TwoSided mode
 # combined_threshold = 0.98      # Max combined ask price (default 0.98)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Confirmed Mode
-# ─────────────────────────────────────────────────────────────────────────────
-# Directional trades with dynamic confidence model
-
-# [arbitrage.confirmed]
-# enabled = true                 # Enable Confirmed mode
-# min_confidence = 0.50          # Minimum confidence to enter (default 0.50)
-# min_margin = 0.02              # Minimum net profit margin (default 2%)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fee Model
@@ -156,21 +155,6 @@ initial_balance = 10000  # Starting USDC balance
 # time_decay = true           # Tighten stops near expiration
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cross-Market Correlation (CrossCorr) Mode
-# ─────────────────────────────────────────────────────────────────────────────
-# Leader coin spikes (BTC) generate signals for follower coins (ETH, SOL)
-# Confidence discounted by 0.7x for follower signals
-
-# [arbitrage.correlation]
-# enabled = false             # Enable CrossCorr mode (experimental, requires more capital)
-# min_spike_pct = 0.01        # 1% leader spike threshold
-# discount_factor = 0.7       # Confidence discount for follower signals
-# pairs = [
-#     ["BTC", ["ETH", "SOL"]],
-#     ["ETH", ["SOL"]]
-# ]
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Performance Tracking & Auto-Disable
 # ─────────────────────────────────────────────────────────────────────────────
 # Track win rate / P&L per mode; optionally auto-disable underperformers
@@ -180,3 +164,63 @@ initial_balance = 10000  # Starting USDC balance
 # min_win_rate = 0.40     # 40% win rate threshold
 # window_size = 50        # Rolling window for recent P&L tracking
 # auto_disable = false    # Auto-disable modes with low win rate
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Order Rounding Precision
+# ─────────────────────────────────────────────────────────────────────────────
+# Polymarket API has specific decimal precision requirements:
+# - Maker amount (USDC total): max 2 decimals
+# - Taker amount (shares): max 2 decimals (SDK LOT_SIZE_SCALE = 2)
+#
+# Only change these if the API requirements change.
+
+# [arbitrage.rounding]
+# size_decimals = 2       # Max 2 decimals (SDK LOT_SIZE_SCALE limit)
+# price_decimals = 2      # Standard tick size for 15-min markets (0.01)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BACKTESTING
+# ═══════════════════════════════════════════════════════════════════════════════
+# Historical data backtesting framework for strategy evaluation
+#
+# Backtesting evaluates strategies on historical market data without live/paper
+# trading. The framework fetches/caches data from Polymarket APIs and Goldsky
+# subgraphs, then replays events deterministically through your strategy.
+#
+# Two databases:
+#   1. backtest_data.db (persistent) — historical prices/trades cache, reused
+#   2. :memory: Store (ephemeral) — simulated trades/orders using existing schema
+#
+# Data sources (smart routing):
+#   - CLOB API (/prices-history, /trades) — last ~7 days, high-fidelity
+#   - Goldsky activity subgraph — unlimited history, lower-fidelity
+#   - Gamma API (/markets) — market discovery and metadata
+#
+# Fill mode: Immediate only (historical orderbook depth not available from
+# Polymarket APIs). Fills simulate at historical trade price with fee model.
+#
+# Run: cargo run -- --backtest
+#
+# Environment variable overrides:
+#   POLY_BACKTEST_STRATEGY         — strategy name to backtest
+#   POLY_BACKTEST_START            — start date (RFC3339 format)
+#   POLY_BACKTEST_END              — end date (RFC3339 format)
+#   POLY_BACKTEST_INITIAL_BALANCE  — starting USDC balance
+#   POLY_BACKTEST_DATA_DB_PATH     — path to historical data cache DB
+#   POLY_BACKTEST_FIDELITY_SECS    — price data granularity in seconds
+#   POLY_BACKTEST_MARKET_IDS       — comma-separated market IDs to backtest
+#   POLY_BACKTEST_FETCH_CONCURRENCY — number of markets to fetch in parallel
+
+# [backtest]
+# strategy_name = "crypto-arb"            # Strategy to backtest (must be registered)
+# market_ids = []                         # Markets to include (empty = auto-discover via Gamma API)
+# start_date = "2025-01-01T00:00:00Z"     # Backtest window start (RFC3339 format)
+# end_date = "2025-01-31T23:59:59Z"       # Backtest window end (RFC3339 format)
+# initial_balance = 1000.00               # Starting USDC balance for backtest
+# data_fidelity_secs = 60                 # Price granularity in seconds (60 = 1min, 300 = 5min, 3600 = 1hr)
+# data_db_path = "backtest_data.db"       # Persistent historical data cache (reused across runs)
+# fetch_concurrency = 10                  # Markets fetched in parallel (default 10)
+
+# Fee model (matches strategy config for realistic P&L)
+# [backtest.fees]
+# taker_fee_rate = 0.0315  # 3.15% at 50/50 probability (Polymarket dynamic fee model)

@@ -1,24 +1,37 @@
+mod verify;
+
 use std::sync::Arc;
 
 use chrono::Utc;
+use polyrust_backtest::{BacktestConfig, BacktestEngine, DataFetcher, HistoricalDataStore};
 use polyrust_core::prelude::*;
 use polyrust_dashboard::Dashboard;
 use polyrust_execution::{FillMode, LiveBackend, PaperBackend};
-use polyrust_market::{ClobFeed, DiscoveryConfig, DiscoveryFeed, MarketDataFeed, PriceFeed};
+use polyrust_market::{BinanceFeed, ClobFeed, DiscoveryConfig, DiscoveryFeed, MarketDataFeed, PriceFeed};
 use polyrust_store::Store;
 use polyrust_strategies::{
-    ArbitrageConfig, ConfirmedDashboard, ConfirmedStrategy, CrossCorrDashboard, CrossCorrStrategy,
-    CryptoArbBase, CryptoArbDashboard, TailEndDashboard, TailEndStrategy, TwoSidedDashboard,
-    TwoSidedStrategy,
+    ArbitrageConfig, CryptoArbBase, CryptoArbDashboard, ReferenceQualityLevel, TailEndDashboard,
+    TailEndStrategy, TwoSidedDashboard, TwoSidedStrategy,
 };
 use serde::Deserialize;
 
-/// Wrapper to extract arbitrage config from TOML file.
+/// Wrapper to extract backtest and arbitrage configs from TOML file.
 #[derive(Debug, Deserialize, Default)]
-struct ConfigWithArbitrage {
+struct ConfigWrapper {
     #[serde(default)]
     arbitrage: ArbitrageConfig,
+    #[serde(default)]
+    backtest: Option<BacktestConfig>,
 }
+
+/// Extract CLI argument value by key.
+#[allow(dead_code)]
+fn cli_arg(args: &[String], key: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == key)
+        .and_then(|i| args.get(i + 1).cloned())
+}
+
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -33,6 +46,27 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // Check for CLI flags
+    let args: Vec<String> = std::env::args().collect();
+    let backtest_mode = args.contains(&"--backtest".to_string());
+    let backtest_sweep_mode = args.contains(&"--backtest-sweep".to_string());
+    let verify_mode = args.contains(&"--verify".to_string());
+
+    if verify_mode {
+        info!("Starting in verify mode");
+        return verify::run_verify().await;
+    }
+
+    if backtest_sweep_mode {
+        info!("Starting in backtest sweep mode");
+        return run_backtest_sweep().await;
+    }
+
+    if backtest_mode {
+        info!("Starting in backtest mode");
+        return run_backtest().await;
+    }
+
     info!("polyrust starting");
 
     // Load configuration
@@ -41,10 +75,10 @@ async fn main() -> anyhow::Result<()> {
             let config: Config = toml::from_str(&contents)
                 .map_err(|e| warn!("failed to parse config: {e}"))
                 .unwrap_or_default();
-            let arb_wrapper: ConfigWithArbitrage = toml::from_str(&contents)
-                .map_err(|e| warn!("failed to parse arbitrage config: {e}"))
+            let wrapper: ConfigWrapper = toml::from_str(&contents)
+                .map_err(|e| warn!("failed to parse config wrapper: {e}"))
                 .unwrap_or_default();
-            (config, arb_wrapper.arbitrage)
+            (config, wrapper.arbitrage)
         }
         Err(e) => {
             info!("no config file loaded ({e}), using defaults");
@@ -96,8 +130,6 @@ async fn main() -> anyhow::Result<()> {
     info!(
         tailend_enabled = arb_config.tailend.enabled,
         twosided_enabled = arb_config.twosided.enabled,
-        confirmed_enabled = arb_config.confirmed.enabled,
-        crosscorr_enabled = arb_config.correlation.enabled,
         "Loaded arbitrage config"
     );
     let base = Arc::new(CryptoArbBase::new(
@@ -129,16 +161,6 @@ async fn main() -> anyhow::Result<()> {
         builder = builder.strategy(TwoSidedStrategy::new(Arc::clone(&base)));
     }
 
-    if arb_config.confirmed.enabled {
-        info!("Confirmed mode enabled");
-        builder = builder.strategy(ConfirmedStrategy::new(Arc::clone(&base)));
-    }
-
-    if arb_config.correlation.enabled {
-        info!("CrossCorr mode enabled");
-        builder = builder.strategy(CrossCorrStrategy::new(Arc::clone(&base)));
-    }
-
     // Always register per-mode dashboards so overview links don't 404.
     // Each dashboard already renders its enabled/disabled status.
     builder = builder.strategy(DashboardStrategyWrapper::new(
@@ -149,14 +171,6 @@ async fn main() -> anyhow::Result<()> {
         "crypto-arb-twosided-dashboard",
         Box::new(TwoSidedDashboard::new(Arc::clone(&base))),
     ));
-    builder = builder.strategy(DashboardStrategyWrapper::new(
-        "crypto-arb-confirmed-dashboard",
-        Box::new(ConfirmedDashboard::new(Arc::clone(&base))),
-    ));
-    builder = builder.strategy(DashboardStrategyWrapper::new(
-        "crypto-arb-crosscorr-dashboard",
-        Box::new(CrossCorrDashboard::new(Arc::clone(&base))),
-    ));
 
     if !arb_config.any_mode_enabled() {
         info!("No trading modes enabled — running in dashboard-only mode");
@@ -164,12 +178,33 @@ async fn main() -> anyhow::Result<()> {
 
     let mut engine = builder.build().await?;
 
+    // Start auto-claim monitor if enabled
+    if config.auto_claim.enabled {
+        info!("Auto-claim enabled (poll interval: {}s)", config.auto_claim.poll_interval_secs);
+        let claim_monitor = Arc::new(ClaimMonitor::new(
+            config.auto_claim.clone(),
+            engine.event_bus().clone(),
+            engine.execution(),
+            engine.context().clone(),
+        ));
+        tokio::spawn(async move {
+            if let Err(e) = claim_monitor.run().await {
+                error!("ClaimMonitor task failed: {e}");
+            }
+        });
+    } else {
+        info!("Auto-claim disabled");
+    }
+
     // Start market data feeds
     let event_bus = engine.event_bus().clone();
 
     let mut clob_feed = ClobFeed::new().with_command_receiver(feed_cmd_rx);
     let mut price_feed = PriceFeed::new();
-    let mut discovery_feed = DiscoveryFeed::new(DiscoveryConfig::default());
+    let mut discovery_feed = DiscoveryFeed::new(DiscoveryConfig {
+        coins: arb_config.coins.clone(),
+        ..DiscoveryConfig::default()
+    });
 
     let clob_bus = event_bus.clone();
     let price_bus = event_bus.clone();
@@ -190,6 +225,15 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         if let Err(e) = discovery_feed.start(discovery_bus).await {
             error!("discovery feed failed to start: {e}");
+        }
+    });
+
+    // Start direct Binance feed (spot + futures) alongside RTDS
+    let mut binance_feed = BinanceFeed::new(arb_config.coins.clone());
+    let binance_bus = event_bus.clone();
+    tokio::spawn(async move {
+        if let Err(e) = binance_feed.start(binance_bus).await {
+            error!("Binance feed failed to start: {e}");
         }
     });
 
@@ -314,4 +358,470 @@ impl Strategy for DashboardStrategyWrapper {
     fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> {
         Some(self.provider.as_ref())
     }
+}
+
+async fn run_backtest() -> anyhow::Result<()> {
+    use polyrust_backtest::DataFetchConfig;
+
+    // Load backtest configuration
+    let (mut backtest_config, mut arb_config) = match std::fs::read_to_string("config.toml") {
+        Ok(contents) => {
+            let wrapper: ConfigWrapper = toml::from_str(&contents)
+                .map_err(|e| warn!("failed to parse config: {e}"))
+                .unwrap_or_default();
+            let backtest_config = wrapper
+                .backtest
+                .ok_or_else(|| anyhow::anyhow!("Missing [backtest] section in config.toml"))?
+                .with_env_overrides()?;
+            (backtest_config, wrapper.arbitrage)
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Cannot run backtest without config.toml: {}",
+                e
+            ));
+        }
+    };
+
+    info!(
+        strategy = %backtest_config.strategy_name,
+        start = %backtest_config.start_date,
+        end = %backtest_config.end_date,
+        initial_balance = %backtest_config.initial_balance,
+        "Starting backtest"
+    );
+
+    // Open persistent historical data store
+    let data_store = Arc::new(HistoricalDataStore::new(&backtest_config.data_db_path).await?);
+    info!(
+        db_path = %backtest_config.data_db_path,
+        "Opened historical data store"
+    );
+
+    // Create in-memory store for backtest results (uses existing schema)
+    let results_store = Arc::new(Store::new(":memory:").await?);
+
+    // Initialize DataFetcher
+    let fetch_config = DataFetchConfig {
+        fidelity_secs: backtest_config.data_fidelity_secs,
+    };
+    let data_fetcher = DataFetcher::new(Arc::clone(&data_store), fetch_config)?;
+
+    // Fetch or verify cached data for the backtest period
+    let mut market_ids = backtest_config.market_ids.clone();
+
+    if backtest_config.offline {
+        // Offline mode: use only cached data, no network requests
+        if market_ids.is_empty() {
+            info!("Offline mode: loading cached markets from backtest_data.db");
+            let cached = data_store
+                .list_cached_markets(backtest_config.start_date, backtest_config.end_date)
+                .await?;
+            market_ids = cached.into_iter().map(|m| m.market_id).collect();
+        }
+
+        if market_ids.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Offline mode: no cached markets found for the configured date range"
+            ));
+        }
+
+        info!(
+            total_markets = market_ids.len(),
+            "Offline mode: using {} cached markets", market_ids.len()
+        );
+    } else {
+        if !market_ids.is_empty() {
+            info!(
+                market_count = market_ids.len(),
+                "Checking cached data for configured markets"
+            );
+        } else {
+            info!("No market_ids configured - discovering markets for configured coins");
+
+            // Discover markets for each coin in the arbitrage config
+            for coin in &arb_config.coins {
+                info!(coin, "Discovering markets for coin");
+                let markets = data_fetcher
+                    .discover_expired_markets(
+                        coin,
+                        backtest_config.start_date,
+                        backtest_config.end_date,
+                        backtest_config.market_duration_secs,
+                    )
+                    .await?;
+
+                info!(
+                    coin,
+                    market_count = markets.len(),
+                    "Discovered {} markets for coin", markets.len()
+                );
+
+                // Add market IDs to our list
+                for market in markets {
+                    market_ids.push(market.market_id.clone());
+
+                    // Cache the market metadata
+                    data_store.insert_historical_market(market).await?;
+                }
+            }
+
+            if market_ids.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "No markets found for configured coins in the specified date range"
+                ));
+            }
+
+            info!(
+                total_markets = market_ids.len(),
+                "Discovered {} total markets", market_ids.len()
+            );
+        }
+
+        // Fetch market data for all markets concurrently (bounded by fetch_concurrency)
+        let total_markets = market_ids.len();
+        let concurrency = backtest_config.fetch_concurrency;
+        let fetcher = Arc::new(data_fetcher);
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut completed = 0usize;
+        let mut skipped = 0usize;
+        let mut successful_ids: Vec<String> = Vec::new();
+
+        info!(
+            total_markets,
+            concurrency,
+            "Fetching market data concurrently"
+        );
+
+        for market_id in &market_ids {
+            // If at capacity, wait for one to finish before spawning
+            while tasks.len() >= concurrency {
+                if let Some(result) = tasks.join_next().await {
+                    match result {
+                        Ok(Ok(id)) => {
+                            completed += 1;
+                            successful_ids.push(id);
+                            info!(
+                                progress = format!("[{}/{}]", completed + skipped, total_markets),
+                                "Market data fetched"
+                            );
+                        }
+                        Ok(Err(e)) => {
+                            skipped += 1;
+                            warn!(
+                                error = %e,
+                                progress = format!("[{}/{}]", completed + skipped, total_markets),
+                                "Skipping market due to fetch error"
+                            );
+                        }
+                        Err(e) => {
+                            skipped += 1;
+                            warn!(
+                                error = %e,
+                                progress = format!("[{}/{}]", completed + skipped, total_markets),
+                                "Skipping market due to task panic"
+                            );
+                        }
+                    }
+                }
+            }
+            let f = Arc::clone(&fetcher);
+            let id = market_id.clone();
+            let start = backtest_config.start_date;
+            let end = backtest_config.end_date;
+            tasks.spawn(async move {
+                f.fetch_market_data(&id, start, end).await?;
+                Ok::<String, polyrust_backtest::error::BacktestError>(id)
+            });
+        }
+        // Drain remaining tasks
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok(id)) => {
+                    completed += 1;
+                    successful_ids.push(id);
+                    info!(
+                        progress = format!("[{}/{}]", completed + skipped, total_markets),
+                        "Market data fetched"
+                    );
+                }
+                Ok(Err(e)) => {
+                    skipped += 1;
+                    warn!(
+                        error = %e,
+                        progress = format!("[{}/{}]", completed + skipped, total_markets),
+                        "Skipping market due to fetch error"
+                    );
+                }
+                Err(e) => {
+                    skipped += 1;
+                    warn!(
+                        error = %e,
+                        progress = format!("[{}/{}]", completed + skipped, total_markets),
+                        "Skipping market due to task panic"
+                    );
+                }
+            }
+        }
+
+        if skipped > 0 {
+            warn!(
+                skipped,
+                completed,
+                "Some markets failed to fetch and were skipped"
+            );
+        }
+
+        market_ids = successful_ids;
+    }
+
+    // Update backtest config with successfully-fetched market_ids
+    backtest_config.market_ids = market_ids;
+
+    // Fetch historical Binance klines for real crypto prices
+    // In online mode: fetch from Binance API and cache to DB
+    // In offline mode: skip (engine will use whatever is already cached)
+    if !backtest_config.offline {
+        info!("Fetching historical Binance klines for configured coins");
+        let crypto_fetcher = DataFetcher::new(
+            Arc::clone(&data_store),
+            DataFetchConfig { fidelity_secs: backtest_config.data_fidelity_secs },
+        )?;
+        crypto_fetcher
+            .fetch_crypto_prices(
+                &arb_config.coins,
+                backtest_config.start_date,
+                backtest_config.end_date,
+            )
+            .await?;
+    } else {
+        info!("Offline mode: skipping Binance klines fetch (will use cached data if available)");
+    }
+
+    // Backtest can't produce Historical quality (record_price uses wall clock)
+    arb_config.tailend.min_reference_quality = ReferenceQualityLevel::Current;
+
+    // Instantiate strategy based on strategy_name
+    let strategy: Box<dyn Strategy> = match backtest_config.strategy_name.as_str() {
+        "crypto-arb-tailend" => {
+            let base = Arc::new(CryptoArbBase::new(arb_config.clone(), vec![]));
+            Box::new(TailEndStrategy::new(base))
+        }
+        "crypto-arb-twosided" => {
+            let base = Arc::new(CryptoArbBase::new(arb_config.clone(), vec![]));
+            Box::new(TwoSidedStrategy::new(base))
+        }
+        other => {
+            return Err(anyhow::anyhow!("Unknown strategy name: {}", other));
+        }
+    };
+
+    // Create and run backtest engine
+    info!("Initializing backtest engine");
+    let start_time = backtest_config.start_date;
+    let end_time = backtest_config.end_date;
+    let initial_balance = backtest_config.initial_balance;
+
+    let mut engine = BacktestEngine::new(
+        backtest_config.clone(),
+        strategy,
+        Arc::clone(&data_store),
+        Arc::clone(&results_store),
+    )
+    .await;
+
+    info!("Running backtest simulation");
+    let trades = engine.run().await?;
+
+    // Generate report from stored results
+    use polyrust_backtest::BacktestReport;
+    let report =
+        BacktestReport::from_engine_results(results_store, trades, initial_balance, start_time, end_time)
+            .await?;
+
+    // Print report summary
+    println!("\n{}", report.summary());
+
+    info!("Backtest complete");
+    Ok(())
+}
+
+async fn run_backtest_sweep() -> anyhow::Result<()> {
+    use polyrust_backtest::{DataFetchConfig, SweepRunner};
+
+    // Load configuration (same as run_backtest)
+    let (mut backtest_config, mut arb_config) = match std::fs::read_to_string("config.toml") {
+        Ok(contents) => {
+            let wrapper: ConfigWrapper = toml::from_str(&contents)
+                .map_err(|e| warn!("failed to parse config: {e}"))
+                .unwrap_or_default();
+            let backtest_config = wrapper
+                .backtest
+                .ok_or_else(|| anyhow::anyhow!("Missing [backtest] section in config.toml"))?
+                .with_env_overrides()?;
+            (backtest_config, wrapper.arbitrage)
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Cannot run backtest sweep without config.toml: {}",
+                e
+            ));
+        }
+    };
+
+    let sweep_config = backtest_config
+        .sweep
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Missing [backtest.sweep] section in config.toml"))?;
+
+    info!(
+        strategy = %backtest_config.strategy_name,
+        start = %backtest_config.start_date,
+        end = %backtest_config.end_date,
+        "Starting backtest parameter sweep"
+    );
+
+    // Open persistent historical data store
+    let data_store = Arc::new(HistoricalDataStore::new(&backtest_config.data_db_path).await?);
+
+    // Handle data fetching (same logic as run_backtest)
+    let mut market_ids = backtest_config.market_ids.clone();
+
+    if backtest_config.offline {
+        if market_ids.is_empty() {
+            info!("Offline mode: loading cached markets from backtest_data.db");
+            let cached = data_store
+                .list_cached_markets(backtest_config.start_date, backtest_config.end_date)
+                .await?;
+            market_ids = cached.into_iter().map(|m| m.market_id).collect();
+        }
+
+        if market_ids.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Offline mode: no cached markets found for the configured date range"
+            ));
+        }
+
+        info!(
+            total_markets = market_ids.len(),
+            "Offline mode: using {} cached markets", market_ids.len()
+        );
+    } else {
+        // Online mode: discover and fetch markets
+        let fetch_config = DataFetchConfig {
+            fidelity_secs: backtest_config.data_fidelity_secs,
+        };
+        let data_fetcher = polyrust_backtest::DataFetcher::new(Arc::clone(&data_store), fetch_config)?;
+
+        if market_ids.is_empty() {
+            info!("No market_ids configured - discovering markets for configured coins");
+            for coin in &arb_config.coins {
+                let markets = data_fetcher
+                    .discover_expired_markets(
+                        coin,
+                        backtest_config.start_date,
+                        backtest_config.end_date,
+                        backtest_config.market_duration_secs,
+                    )
+                    .await?;
+
+                for market in markets {
+                    market_ids.push(market.market_id.clone());
+                    data_store.insert_historical_market(market).await?;
+                }
+            }
+
+            if market_ids.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "No markets found for configured coins in the specified date range"
+                ));
+            }
+        }
+
+        // Fetch market data concurrently
+        let concurrency = backtest_config.fetch_concurrency;
+        let fetcher = Arc::new(data_fetcher);
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut successful_ids: Vec<String> = Vec::new();
+
+        for market_id in &market_ids {
+            while tasks.len() >= concurrency {
+                if let Some(result) = tasks.join_next().await {
+                    match result {
+                        Ok(Ok(id)) => successful_ids.push(id),
+                        Ok(Err(e)) => warn!(error = %e, "Skipping market due to fetch error"),
+                        Err(e) => warn!(error = %e, "Skipping market due to task panic"),
+                    }
+                }
+            }
+            let f = Arc::clone(&fetcher);
+            let id = market_id.clone();
+            let start = backtest_config.start_date;
+            let end = backtest_config.end_date;
+            tasks.spawn(async move {
+                f.fetch_market_data(&id, start, end).await?;
+                Ok::<String, polyrust_backtest::BacktestError>(id)
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok(id)) => successful_ids.push(id),
+                Ok(Err(e)) => warn!(error = %e, "Skipping market"),
+                Err(e) => warn!(error = %e, "Task panic"),
+            }
+        }
+        market_ids = successful_ids;
+
+        // Fetch Binance klines
+        let crypto_fetcher = polyrust_backtest::DataFetcher::new(
+            Arc::clone(&data_store),
+            DataFetchConfig {
+                fidelity_secs: backtest_config.data_fidelity_secs,
+            },
+        )?;
+        crypto_fetcher
+            .fetch_crypto_prices(
+                &arb_config.coins,
+                backtest_config.start_date,
+                backtest_config.end_date,
+            )
+            .await?;
+    }
+
+    backtest_config.market_ids = market_ids;
+
+    // Backtest can't produce Historical quality
+    arb_config.tailend.min_reference_quality = ReferenceQualityLevel::Current;
+
+    // Run sweep
+    let rank_by = sweep_config.rank_by.clone().unwrap_or_else(|| "sharpe".to_string());
+    let top_n = sweep_config.top_n.unwrap_or(20);
+    let csv_path = sweep_config.csv_export.clone();
+    let json_path = sweep_config.json_export.clone();
+
+    let runner = SweepRunner::new(sweep_config, backtest_config, arb_config, data_store);
+    let mut report = runner.run().await?;
+
+    // Sort and display
+    report.sort_by(&rank_by);
+    report.print_table(top_n);
+
+    // Sensitivity analysis
+    let sensitivity = report.sensitivity_analysis();
+    sensitivity.print_table();
+
+    // Export if configured
+    if let Some(ref path) = csv_path {
+        report.export_csv(path)?;
+        let sens_path = path.replace(".csv", "_sensitivity.csv");
+        sensitivity.export_csv(&sens_path)?;
+    }
+    if let Some(ref path) = json_path {
+        report.export_json(path)?;
+        let sens_path = path.replace(".json", "_sensitivity.json");
+        sensitivity.export_json(&sens_path)?;
+    }
+
+    info!("Backtest sweep complete");
+    Ok(())
 }

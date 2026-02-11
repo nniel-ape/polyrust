@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod claim_monitor;
 pub mod config;
 pub mod context;
 pub mod dashboard_view;
@@ -13,6 +14,7 @@ pub mod types;
 /// Prelude for convenient imports
 pub mod prelude {
     pub use crate::actions::*;
+    pub use crate::claim_monitor::ClaimMonitor;
     pub use crate::config::Config;
     pub use crate::context::*;
     pub use crate::engine::{
