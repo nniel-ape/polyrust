@@ -64,6 +64,8 @@ enabled = true                # Enable automatic position redemption
 poll_interval_secs = 300      # Check for resolved markets every 5 minutes
 max_retries = 10              # Max attempts before manual intervention needed
 retry_backoff_secs = 60       # Wait 1 minute between retry attempts
+batch_window_secs = 300       # Max wait after first resolved claim before flushing batch (0 = immediate)
+batch_min_count = 3           # Flush early when this many claims are ready (before window elapses)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CRYPTO ARBITRAGE STRATEGY

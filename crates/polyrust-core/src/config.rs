@@ -207,6 +207,13 @@ pub struct AutoClaimConfig {
     pub retry_backoff_secs: u64,
     #[serde(default = "default_gas_pause_duration")]
     pub gas_pause_duration_secs: u64,
+    /// Max seconds to wait after first resolved claim before flushing batch.
+    /// Set to 0 to disable accumulation (immediate flush, backward-compatible).
+    #[serde(default = "default_batch_window")]
+    pub batch_window_secs: u64,
+    /// Flush early when this many resolved claims are ready (before window elapses).
+    #[serde(default = "default_batch_min_count")]
+    pub batch_min_count: usize,
 }
 
 impl Default for AutoClaimConfig {
@@ -217,6 +224,8 @@ impl Default for AutoClaimConfig {
             max_retries: default_max_retries(),
             retry_backoff_secs: default_retry_backoff(),
             gas_pause_duration_secs: default_gas_pause_duration(),
+            batch_window_secs: default_batch_window(),
+            batch_min_count: default_batch_min_count(),
         }
     }
 }
@@ -235,6 +244,12 @@ fn default_retry_backoff() -> u64 {
 }
 fn default_gas_pause_duration() -> u64 {
     900 // 15 minutes
+}
+fn default_batch_window() -> u64 {
+    300 // 5 minutes
+}
+fn default_batch_min_count() -> usize {
+    3
 }
 
 impl Config {

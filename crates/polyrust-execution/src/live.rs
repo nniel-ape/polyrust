@@ -39,6 +39,7 @@ trait LiveBackendInner: Send + Sync {
     async fn get_balance(&self) -> Result<Decimal>;
     async fn is_market_resolved(&self, condition_id: &str) -> Result<bool>;
     async fn redeem_positions(&self, request: &RedeemRequest) -> Result<RedeemResult>;
+    async fn redeem_positions_batch(&self, requests: &[RedeemRequest]) -> Result<Vec<RedeemResult>>;
 }
 
 /// Concrete inner implementation parameterized by the SDK `Kind` and signer type.
@@ -174,6 +175,10 @@ impl polyrust_core::execution::ExecutionBackend for LiveBackend {
 
     async fn redeem_positions(&self, request: &RedeemRequest) -> Result<RedeemResult> {
         self.inner.redeem_positions(request).await
+    }
+
+    async fn redeem_positions_batch(&self, requests: &[RedeemRequest]) -> Result<Vec<RedeemResult>> {
+        self.inner.redeem_positions_batch(requests).await
     }
 }
 
@@ -399,6 +404,44 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
                 "CtfRedeemer not initialized (no RPC URL configured)".into(),
             )),
         }
+    }
+
+    async fn redeem_positions_batch(&self, requests: &[RedeemRequest]) -> Result<Vec<RedeemResult>> {
+        let redeemer = self.ctf_redeemer.as_ref().ok_or_else(|| {
+            PolyError::Execution("CtfRedeemer not initialized (no RPC URL configured)".into())
+        })?;
+
+        let claims: Vec<(String, bool, Vec<String>)> = requests
+            .iter()
+            .map(|r| (r.condition_id.clone(), r.neg_risk, r.token_ids.clone()))
+            .collect();
+
+        let batch_results = redeemer.redeem_batch(&claims).await?;
+
+        // Map batch results back to RedeemResult, matching by condition_id
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            let tx_hash = batch_results
+                .iter()
+                .find(|(cid, _)| *cid == request.condition_id)
+                .and_then(|(_, hash)| hash.as_ref());
+
+            results.push(match tx_hash {
+                Some(hash) => RedeemResult {
+                    market_id: request.market_id.clone(),
+                    tx_hash: format!("{:#x}", hash),
+                    success: true,
+                    message: "Position redeemed successfully".to_string(),
+                },
+                None => RedeemResult {
+                    market_id: request.market_id.clone(),
+                    tx_hash: String::new(),
+                    success: true,
+                    message: "No CTF balance".to_string(),
+                },
+            });
+        }
+        Ok(results)
     }
 }
 

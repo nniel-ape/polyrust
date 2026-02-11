@@ -18,6 +18,8 @@ const NEG_RISK_ADAPTER: Address = address!("d91E80cF2E7be2e162c6513ceD06f1dD0dA3
 const USDC_ADDRESS: Address = address!("2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
 const CTF_EXCHANGE: Address = address!("4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E");
 const NEG_RISK_EXCHANGE: Address = address!("C5d563A36AE78145C45a50134d48A1215220f80a");
+/// Gnosis Safe MultiSendCallOnly — reverts if any inner tx uses DelegateCall.
+const MULTI_SEND_CALL_ONLY: Address = address!("40A2aCCbd92BCA938b02010E17A5b8929b49130D");
 
 const MAX_RETRIES: u32 = 3;
 
@@ -48,6 +50,11 @@ sol! {
             bytes32 conditionId,
             uint256[] calldata amounts
         ) external;
+    }
+
+    #[sol(rpc)]
+    interface IMultiSend {
+        function multiSend(bytes memory transactions) external payable;
     }
 
     #[sol(rpc)]
@@ -177,7 +184,7 @@ impl CtfRedeemer {
                         }
                         .abi_encode();
                         match self
-                            .execute_safe_tx(CTF_ADDRESS, Bytes::from(calldata))
+                            .execute_safe_tx(CTF_ADDRESS, Bytes::from(calldata), 0)
                             .await
                         {
                             Ok(hash) => info!(contract = name, tx = %hash, "CTF approval set"),
@@ -209,7 +216,7 @@ impl CtfRedeemer {
                         }
                         .abi_encode();
                         match self
-                            .execute_safe_tx(USDC_ADDRESS, Bytes::from(calldata))
+                            .execute_safe_tx(USDC_ADDRESS, Bytes::from(calldata), 0)
                             .await
                         {
                             Ok(hash) => info!(contract = name, tx = %hash, "USDC approval set"),
@@ -310,10 +317,12 @@ impl CtfRedeemer {
             "Executing CTF redemption via Safe"
         );
 
-        self.execute_safe_tx(target, calldata).await.map(Some)
+        self.execute_safe_tx(target, calldata, 0).await.map(Some)
     }
 
     /// Execute a transaction through the Safe wallet.
+    ///
+    /// `operation`: 0 = Call, 1 = DelegateCall.
     ///
     /// Signs the Safe transaction hash with EIP-191 (eth_sign) and adjusts v += 4
     /// per Safe's signature encoding convention.
@@ -324,6 +333,7 @@ impl CtfRedeemer {
         &self,
         to: Address,
         data: Bytes,
+        operation: u8,
     ) -> Result<FixedBytes<32>> {
         let safe_addr = self.safe_address;
 
@@ -351,7 +361,7 @@ impl CtfRedeemer {
                 to,
                 U256::ZERO,
                 data_clone.clone(),
-                0u8,
+                operation,
                 U256::ZERO,
                 U256::ZERO,
                 U256::ZERO,
@@ -391,7 +401,7 @@ impl CtfRedeemer {
                     to,
                     U256::ZERO,
                     data.clone(),
-                    0u8,
+                    operation,
                     U256::ZERO,
                     U256::ZERO,
                     U256::ZERO,
@@ -451,6 +461,146 @@ impl CtfRedeemer {
 
         Ok((NEG_RISK_ADAPTER, Bytes::from(data)))
     }
+
+    /// Batch-redeem multiple resolved markets in a single Safe multiSend tx.
+    ///
+    /// - Single claim: delegates to `redeem()` (no multiSend overhead).
+    /// - Multiple claims: pre-filters by CTF balance, packs into multiSend,
+    ///   executes as DelegateCall. Falls back to individual redemptions on batch failure.
+    ///
+    /// Returns `(condition_id, Option<tx_hash>)` per claim. `None` means no balance.
+    pub async fn redeem_batch(
+        &self,
+        claims: &[(String, bool, Vec<String>)],
+    ) -> Result<Vec<(String, Option<FixedBytes<32>>)>> {
+        if claims.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Single claim — skip multiSend overhead
+        if claims.len() == 1 {
+            let (cid, neg_risk, token_ids) = &claims[0];
+            let result = self.redeem(cid, *neg_risk, token_ids).await?;
+            return Ok(vec![(cid.clone(), result)]);
+        }
+
+        // Pre-filter: check balances, encode calldata per claim
+        let mut inner_calls: Vec<(String, Address, Bytes)> = Vec::new();
+        let mut no_balance: Vec<String> = Vec::new();
+
+        for (cid, neg_risk, token_ids) in claims {
+            if !self.has_ctf_balance(token_ids).await? {
+                no_balance.push(cid.clone());
+                continue;
+            }
+
+            let parsed_cid = parse_condition_id(cid)?;
+            let (target, calldata) = if *neg_risk {
+                self.encode_neg_risk_redeem(parsed_cid, token_ids).await?
+            } else {
+                encode_standard_redeem(parsed_cid)
+            };
+
+            inner_calls.push((cid.clone(), target, calldata));
+        }
+
+        // Nothing to redeem after balance check
+        if inner_calls.is_empty() {
+            return Ok(no_balance.iter().map(|cid| (cid.clone(), None)).collect());
+        }
+
+        // Only one claim has balance — use direct call
+        if inner_calls.len() == 1 {
+            let (cid, target, calldata) = &inner_calls[0];
+            let tx_hash = self.execute_safe_tx(*target, calldata.clone(), 0).await?;
+            let mut results: Vec<(String, Option<FixedBytes<32>>)> =
+                no_balance.iter().map(|c| (c.clone(), None)).collect();
+            results.push((cid.clone(), Some(tx_hash)));
+            return Ok(results);
+        }
+
+        // Pack into multiSend
+        let calls: Vec<(Address, Bytes)> = inner_calls
+            .iter()
+            .map(|(_, target, data)| (*target, data.clone()))
+            .collect();
+
+        let multi_send_data = encode_multi_send_data(&calls);
+        let multi_send_calldata = IMultiSend::multiSendCall {
+            transactions: multi_send_data,
+        }
+        .abi_encode();
+
+        info!(
+            claim_count = inner_calls.len(),
+            "Executing batch redemption via multiSend"
+        );
+
+        // DelegateCall (operation=1) to MultiSendCallOnly
+        match self
+            .execute_safe_tx(
+                MULTI_SEND_CALL_ONLY,
+                Bytes::from(multi_send_calldata),
+                1,
+            )
+            .await
+        {
+            Ok(tx_hash) => {
+                info!(tx = %tx_hash, count = inner_calls.len(), "Batch redemption succeeded");
+                let mut results: Vec<(String, Option<FixedBytes<32>>)> =
+                    no_balance.iter().map(|c| (c.clone(), None)).collect();
+                for (cid, _, _) in &inner_calls {
+                    results.push((cid.clone(), Some(tx_hash)));
+                }
+                Ok(results)
+            }
+            Err(batch_err) => {
+                // Fallback: individual redemptions
+                warn!(
+                    error = %batch_err,
+                    count = inner_calls.len(),
+                    "Batch multiSend failed, falling back to individual redemptions"
+                );
+                let mut results: Vec<(String, Option<FixedBytes<32>>)> =
+                    no_balance.iter().map(|c| (c.clone(), None)).collect();
+                for (cid, target, calldata) in &inner_calls {
+                    match self.execute_safe_tx(*target, calldata.clone(), 0).await {
+                        Ok(tx_hash) => {
+                            info!(condition_id = cid, tx = %tx_hash, "Individual redemption succeeded");
+                            results.push((cid.clone(), Some(tx_hash)));
+                        }
+                        Err(e) => {
+                            warn!(condition_id = cid, error = %e, "Individual redemption failed");
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(results)
+            }
+        }
+    }
+}
+
+/// Encode inner calls into the packed bytes format expected by MultiSendCallOnly.
+///
+/// Per call: `operation(1 byte, 0=Call) || to(20 bytes) || value(32 bytes, 0) || dataLength(32 bytes) || data(N bytes)`
+fn encode_multi_send_data(calls: &[(Address, Bytes)]) -> Bytes {
+    let total_len: usize = calls
+        .iter()
+        .map(|(_, data)| 1 + 20 + 32 + 32 + data.len())
+        .sum();
+    let mut packed = Vec::with_capacity(total_len);
+
+    for (to, data) in calls {
+        packed.push(0u8); // operation = Call
+        packed.extend_from_slice(to.as_slice()); // to (20 bytes)
+        packed.extend_from_slice(&[0u8; 32]); // value (32 bytes, 0)
+        let data_len = U256::from(data.len());
+        packed.extend_from_slice(&data_len.to_be_bytes::<32>()); // dataLength (32 bytes)
+        packed.extend_from_slice(data); // data (N bytes)
+    }
+
+    Bytes::from(packed)
 }
 
 /// Retry an RPC operation with exponential backoff and RPC rotation on rate limits.
@@ -509,4 +659,72 @@ fn parse_condition_id(s: &str) -> Result<FixedBytes<32>> {
 fn parse_rpc_url(s: &str) -> Result<reqwest::Url> {
     s.parse()
         .map_err(|e| PolyError::Config(format!("Invalid RPC URL '{s}': {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_multi_send_data_empty() {
+        let result = encode_multi_send_data(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn encode_multi_send_data_single_call() {
+        let to = address!("4D97DCd97eC945f40cF65F87097ACe5EA0476045");
+        let data = Bytes::from(vec![0xAA, 0xBB, 0xCC]);
+        let packed = encode_multi_send_data(&[(to, data.clone())]);
+
+        // 1 + 20 + 32 + 32 + 3 = 88 bytes
+        assert_eq!(packed.len(), 88);
+
+        // operation byte
+        assert_eq!(packed[0], 0u8);
+
+        // to address (20 bytes)
+        assert_eq!(&packed[1..21], to.as_slice());
+
+        // value (32 bytes of zeros)
+        assert_eq!(&packed[21..53], &[0u8; 32]);
+
+        // dataLength (32 bytes, big-endian 3)
+        let mut expected_len = [0u8; 32];
+        expected_len[31] = 3;
+        assert_eq!(&packed[53..85], &expected_len);
+
+        // data
+        assert_eq!(&packed[85..88], &[0xAA, 0xBB, 0xCC]);
+    }
+
+    #[test]
+    fn encode_multi_send_data_two_calls() {
+        let to1 = address!("4D97DCd97eC945f40cF65F87097ACe5EA0476045");
+        let to2 = address!("d91E80cF2E7be2e162c6513ceD06f1dD0dA35296");
+        let data1 = Bytes::from(vec![0x11, 0x22]);
+        let data2 = Bytes::from(vec![0x33, 0x44, 0x55, 0x66]);
+
+        let packed = encode_multi_send_data(&[(to1, data1), (to2, data2)]);
+
+        // call1: 1+20+32+32+2 = 87, call2: 1+20+32+32+4 = 89, total = 176
+        assert_eq!(packed.len(), 176);
+
+        // Verify second call starts at offset 87
+        assert_eq!(packed[87], 0u8); // operation
+        assert_eq!(&packed[88..108], to2.as_slice()); // to
+    }
+
+    #[test]
+    fn encode_multi_send_data_preserves_calldata() {
+        // Use a realistic ABI-encoded calldata (standard redeem)
+        let cid = FixedBytes::<32>::from([0xAB; 32]);
+        let (target, calldata) = encode_standard_redeem(cid);
+
+        let packed = encode_multi_send_data(&[(target, calldata.clone())]);
+
+        // Extract calldata from packed bytes
+        let header_len = 1 + 20 + 32 + 32;
+        assert_eq!(&packed[header_len..], calldata.as_ref());
+    }
 }

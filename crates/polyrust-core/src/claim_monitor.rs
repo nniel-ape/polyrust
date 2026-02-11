@@ -3,7 +3,7 @@ use crate::context::StrategyContext;
 use crate::error::Result;
 use crate::event_bus::EventBus;
 use crate::events::{Event, MarketDataEvent, OrderEvent, SignalEvent};
-use crate::execution::{ExecutionBackend, RedeemRequest, RedeemResult};
+use crate::execution::{ExecutionBackend, RedeemRequest};
 use crate::types::MarketId;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
@@ -29,6 +29,8 @@ struct PendingClaim {
     _expired_at: DateTime<Utc>,
     attempts: u32,
     next_check: DateTime<Utc>,
+    /// Set when on-chain resolution is first detected; `None` while unresolved.
+    resolved_at: Option<DateTime<Utc>>,
 }
 
 /// Background monitor that polls for resolved markets and triggers redemption
@@ -211,6 +213,7 @@ impl ClaimMonitor {
             _expired_at: Utc::now(),
             attempts: 0,
             next_check: Utc::now(),
+            resolved_at: None,
         };
 
         self.pending.write().await.insert(market_id.clone(), claim);
@@ -218,7 +221,12 @@ impl ClaimMonitor {
         info!(market_id = %market_id, neg_risk, "Added market to pending claims queue");
     }
 
-    /// Check all pending claims and attempt redemption for resolved markets
+    /// Check all pending claims and attempt redemption for resolved markets.
+    ///
+    /// Three-phase polling with time-window accumulation:
+    /// 1. **Check resolution** — mark newly resolved claims with a timestamp
+    /// 2. **Accumulate** — skip redemption if batch window hasn't elapsed and count threshold not met
+    /// 3. **Flush** — batch all resolved claims into one multiSend tx
     async fn check_pending_claims(&self) -> Result<()> {
         let now = Utc::now();
 
@@ -245,13 +253,19 @@ impl ClaimMonitor {
 
         let mut to_remove = Vec::new();
 
+        // ── Phase 1: Check resolution status for unresolved claims ──
         for (market_id, claim) in pending.iter_mut() {
+            // Skip already-resolved claims (waiting in accumulation window)
+            if claim.resolved_at.is_some() {
+                continue;
+            }
+
             // Skip if not yet time to check
             if claim.next_check > now {
                 continue;
             }
 
-            // Guard: refuse to proceed with empty token_ids — retry instead of silently failing
+            // Guard: refuse to proceed with empty token_ids
             if claim.token_ids.is_empty() {
                 error!(
                     market_id = %market_id,
@@ -266,65 +280,12 @@ impl ClaimMonitor {
 
             debug!("Checking resolution status for market {}", market_id);
 
-            // Check if market has resolved on-chain
             match self.execution.is_market_resolved(&claim.condition_id).await {
                 Ok(true) => {
-                    // Market resolved! Attempt redemption
-                    info!("Market {} has resolved, attempting redemption", market_id);
-                    match self.redeem_position(claim).await {
-                        Ok(result) => {
-                            if result.success && result.tx_hash.is_empty() {
-                                // No CTF balance — nothing to redeem
-                                info!(
-                                    market_id = %market_id,
-                                    "No CTF balance for market, removing from queue"
-                                );
-                                to_remove.push(market_id.clone());
-                            } else if result.success {
-                                info!(
-                                    "Successfully redeemed market {}: tx {}",
-                                    market_id, result.tx_hash
-                                );
-                                // Publish Redeemed event
-                                let event = Event::OrderUpdate(OrderEvent::Redeemed {
-                                    market_id: market_id.clone(),
-                                    tx_hash: result.tx_hash,
-                                    strategy_name: "auto-claim".to_string(),
-                                });
-                                self.event_bus.publish(event);
-                                to_remove.push(market_id.clone());
-                            } else {
-                                warn!(
-                                    "Redemption failed for market {}: {}",
-                                    market_id, result.message
-                                );
-                                if self.handle_retry(claim) {
-                                    to_remove.push(market_id.clone());
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let err_str = e.to_string();
-                            if err_str.contains("insufficient funds for gas") {
-                                let pause_secs = self.config.gas_pause_duration_secs;
-                                let pause_until = now + Duration::seconds(pause_secs as i64);
-                                *self.gas_paused_until.write().await = Some(pause_until);
-                                warn!(
-                                    pause_secs = pause_secs,
-                                    "Insufficient MATIC — pausing redemptions for {}s",
-                                    pause_secs
-                                );
-                                break;
-                            }
-                            error!("Error redeeming market {}: {}", market_id, e);
-                            if self.handle_retry(claim) {
-                                to_remove.push(market_id.clone());
-                            }
-                        }
-                    }
+                    info!(market_id = %market_id, "Market resolved, queuing for batch redemption");
+                    claim.resolved_at = Some(now);
                 }
                 Ok(false) => {
-                    // Not yet resolved — reschedule without burning a retry
                     debug!("Market {} not yet resolved, will recheck", market_id);
                     claim.next_check =
                         now + Duration::seconds(self.config.poll_interval_secs as i64);
@@ -340,7 +301,11 @@ impl ClaimMonitor {
                             "Insufficient MATIC — pausing redemptions for {}s",
                             pause_secs
                         );
-                        break;
+                        // Remove any claims scheduled for removal so far, then bail
+                        for mid in &to_remove {
+                            pending.remove(mid);
+                        }
+                        return Ok(());
                     }
                     error!("Error checking resolution for market {}: {}", market_id, e);
                     if self.handle_retry(claim) {
@@ -350,24 +315,132 @@ impl ClaimMonitor {
             }
         }
 
+        // Remove failed claims from phase 1
+        for mid in &to_remove {
+            pending.remove(mid);
+        }
+        to_remove.clear();
+
+        // ── Phase 2: Check flush triggers ──
+        let resolved_claims: Vec<MarketId> = pending
+            .iter()
+            .filter(|(_, c)| c.resolved_at.is_some())
+            .map(|(mid, _)| mid.clone())
+            .collect();
+
+        let resolved_count = resolved_claims.len();
+        if resolved_count == 0 {
+            return Ok(());
+        }
+
+        let oldest_resolved_at = pending
+            .values()
+            .filter_map(|c| c.resolved_at)
+            .min()
+            .unwrap(); // safe: resolved_count > 0
+
+        let window_elapsed = self.config.batch_window_secs == 0
+            || (now - oldest_resolved_at).num_seconds() >= self.config.batch_window_secs as i64;
+        let count_reached = resolved_count >= self.config.batch_min_count;
+
+        if !window_elapsed && !count_reached {
+            let remaining =
+                self.config.batch_window_secs as i64 - (now - oldest_resolved_at).num_seconds();
+            info!(
+                resolved_count,
+                remaining_secs = remaining,
+                batch_min_count = self.config.batch_min_count,
+                "Accumulating batch ({} claims, {}s until window)",
+                resolved_count,
+                remaining
+            );
+            return Ok(());
+        }
+
+        // ── Phase 3: Flush batch ──
+        info!(
+            resolved_count,
+            trigger = if count_reached { "count" } else { "window" },
+            "Flushing batch redemption"
+        );
+
+        let requests: Vec<RedeemRequest> = resolved_claims
+            .iter()
+            .filter_map(|mid| {
+                pending.get(mid).map(|claim| RedeemRequest {
+                    market_id: claim.market_id.clone(),
+                    condition_id: claim.condition_id.clone(),
+                    token_ids: claim.token_ids.clone(),
+                    neg_risk: claim.neg_risk,
+                })
+            })
+            .collect();
+
+        match self.execution.redeem_positions_batch(&requests).await {
+            Ok(results) => {
+                for result in &results {
+                    if result.success && result.tx_hash.is_empty() {
+                        info!(
+                            market_id = %result.market_id,
+                            "No CTF balance for market, removing from queue"
+                        );
+                        to_remove.push(result.market_id.clone());
+                    } else if result.success {
+                        info!(
+                            "Successfully redeemed market {}: tx {}",
+                            result.market_id, result.tx_hash
+                        );
+                        let event = Event::OrderUpdate(OrderEvent::Redeemed {
+                            market_id: result.market_id.clone(),
+                            tx_hash: result.tx_hash.clone(),
+                            strategy_name: "auto-claim".to_string(),
+                        });
+                        self.event_bus.publish(event);
+                        to_remove.push(result.market_id.clone());
+                    } else {
+                        warn!(
+                            "Redemption failed for market {}: {}",
+                            result.market_id, result.message
+                        );
+                        if let Some(claim) = pending.get_mut(&result.market_id)
+                            && self.handle_retry(claim)
+                        {
+                            to_remove.push(result.market_id.clone());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("insufficient funds for gas") {
+                    let pause_secs = self.config.gas_pause_duration_secs;
+                    let pause_until = now + Duration::seconds(pause_secs as i64);
+                    *self.gas_paused_until.write().await = Some(pause_until);
+                    warn!(
+                        pause_secs = pause_secs,
+                        "Insufficient MATIC — pausing redemptions for {}s",
+                        pause_secs
+                    );
+                } else {
+                    error!("Batch redemption error: {}", e);
+                    // Retry each resolved claim individually
+                    for mid in &resolved_claims {
+                        if let Some(claim) = pending.get_mut(mid)
+                            && self.handle_retry(claim)
+                        {
+                            to_remove.push(mid.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         // Remove completed/expired claims
-        for market_id in to_remove {
-            pending.remove(&market_id);
+        for market_id in &to_remove {
+            pending.remove(market_id);
         }
 
         Ok(())
-    }
-
-    /// Attempt to redeem a position
-    async fn redeem_position(&self, claim: &PendingClaim) -> Result<RedeemResult> {
-        let request = RedeemRequest {
-            market_id: claim.market_id.clone(),
-            condition_id: claim.condition_id.clone(),
-            token_ids: claim.token_ids.clone(),
-            neg_risk: claim.neg_risk,
-        };
-
-        self.execution.redeem_positions(&request).await
     }
 
     /// Handle retry logic for failed/pending claims.
