@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{info, warn};
 
 use polyrust_strategies::{ArbitrageConfig, CryptoArbBase, ReferenceQualityLevel, TailEndStrategy};
@@ -93,11 +94,19 @@ impl SweepRunner {
             .max(1);
         info!(parallelism, "Starting sweep with bounded parallelism");
 
+        let pb = ProgressBar::new(total as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({eta}) best={msg}",
+            )
+            .unwrap(),
+        );
+        pb.set_message("N/A");
+
         let mut results: Vec<SweepResult> = Vec::with_capacity(total);
         let mut join_set: tokio::task::JoinSet<BacktestResult<SweepResult>> =
             tokio::task::JoinSet::new();
-        let mut completed = 0usize;
-        let mut first_duration: Option<f64> = None;
+        let mut best_pnl: Option<rust_decimal::Decimal> = None;
 
         for combo in combinations {
             // Bounded parallelism: wait for a slot
@@ -105,28 +114,20 @@ impl SweepRunner {
                 if let Some(result) = join_set.join_next().await {
                     match result {
                         Ok(Ok(sweep_result)) => {
-                            completed += 1;
-                            if first_duration.is_none() {
-                                first_duration = Some(sweep_result.duration_secs);
-                                let eta_secs = sweep_result.duration_secs * (total - 1) as f64
-                                    / parallelism as f64;
-                                info!(
-                                    first_run_secs = format!("{:.1}", sweep_result.duration_secs),
-                                    eta_secs = format!("{:.0}", eta_secs),
-                                    "First run complete. Estimated remaining time: {:.0}s",
-                                    eta_secs
-                                );
+                            if best_pnl.is_none_or(|b| sweep_result.total_pnl > b) {
+                                best_pnl = Some(sweep_result.total_pnl);
+                                pb.set_message(format!("{}", sweep_result.total_pnl));
                             }
-                            log_progress(completed, total, &sweep_result);
+                            pb.inc(1);
                             results.push(sweep_result);
                         }
                         Ok(Err(e)) => {
-                            completed += 1;
-                            warn!(error = %e, "Sweep run failed, skipping");
+                            pb.inc(1);
+                            pb.println(format!("Sweep run failed: {e}"));
                         }
                         Err(e) => {
-                            completed += 1;
-                            warn!(error = %e, "Sweep task panicked, skipping");
+                            pb.inc(1);
+                            pb.println(format!("Sweep task panicked: {e}"));
                         }
                     }
                 }
@@ -168,23 +169,28 @@ impl SweepRunner {
         while let Some(result) = join_set.join_next().await {
             match result {
                 Ok(Ok(sweep_result)) => {
-                    completed += 1;
-                    if first_duration.is_none() {
-                        first_duration = Some(sweep_result.duration_secs);
+                    if best_pnl.is_none_or(|b| sweep_result.total_pnl > b) {
+                        best_pnl = Some(sweep_result.total_pnl);
+                        pb.set_message(format!("{}", sweep_result.total_pnl));
                     }
-                    log_progress(completed, total, &sweep_result);
+                    pb.inc(1);
                     results.push(sweep_result);
                 }
                 Ok(Err(e)) => {
-                    completed += 1;
-                    warn!(error = %e, "Sweep run failed, skipping");
+                    pb.inc(1);
+                    pb.println(format!("Sweep run failed: {e}"));
                 }
                 Err(e) => {
-                    completed += 1;
-                    warn!(error = %e, "Sweep task panicked, skipping");
+                    pb.inc(1);
+                    pb.println(format!("Sweep task panicked: {e}"));
                 }
             }
         }
+
+        pb.finish_with_message(format!(
+            "done — best PnL: {}",
+            best_pnl.map_or("N/A".to_string(), |p| format!("{p}"))
+        ));
 
         let total_wall_time_secs = wall_start.elapsed().as_secs_f64();
         info!(
@@ -264,16 +270,6 @@ async fn run_single(
         end_balance: report.end_balance,
         duration_secs,
     })
-}
-
-fn log_progress(completed: usize, total: usize, result: &SweepResult) {
-    let pct = (completed as f64 / total as f64) * 100.0;
-    info!(
-        progress = format!("[{}/{}] {:.0}%", completed, total, pct),
-        pnl = %result.total_pnl,
-        sharpe = result.sharpe_ratio.map_or("N/A".to_string(), |s| format!("{:.4}", s)),
-        "Sweep run complete"
-    );
 }
 
 /// No-op strategy used only for event loading.

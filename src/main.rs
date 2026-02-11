@@ -32,6 +32,7 @@ fn cli_arg(args: &[String], key: &str) -> Option<String> {
         .and_then(|i| args.get(i + 1).cloned())
 }
 
+use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -360,6 +361,84 @@ impl Strategy for DashboardStrategyWrapper {
     }
 }
 
+/// Fetch market data concurrently with a progress bar, returning successfully-fetched market IDs.
+async fn fetch_markets_with_progress(
+    market_ids: &[String],
+    fetcher: Arc<DataFetcher>,
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+    concurrency: usize,
+) -> (Vec<String>, usize) {
+    let total_markets = market_ids.len();
+    let pb = ProgressBar::new(total_markets as u64);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} markets ({eta}) {msg}",
+        )
+        .unwrap(),
+    );
+    pb.set_message("fetching");
+
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut successful_ids: Vec<String> = Vec::new();
+    let mut skipped = 0usize;
+
+    for market_id in market_ids {
+        // If at capacity, wait for one to finish before spawning
+        while tasks.len() >= concurrency {
+            if let Some(result) = tasks.join_next().await {
+                match result {
+                    Ok(Ok(id)) => {
+                        successful_ids.push(id);
+                    }
+                    Ok(Err(e)) => {
+                        skipped += 1;
+                        pb.println(format!("Skipping market: {e}"));
+                    }
+                    Err(e) => {
+                        skipped += 1;
+                        pb.println(format!("Task panic: {e}"));
+                    }
+                }
+                pb.inc(1);
+            }
+        }
+        let f = Arc::clone(&fetcher);
+        let id = market_id.clone();
+        tasks.spawn(async move {
+            f.fetch_market_data(&id, start, end).await?;
+            Ok::<String, polyrust_backtest::error::BacktestError>(id)
+        });
+    }
+
+    // Drain remaining tasks
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(id)) => {
+                successful_ids.push(id);
+            }
+            Ok(Err(e)) => {
+                skipped += 1;
+                pb.println(format!("Skipping market: {e}"));
+            }
+            Err(e) => {
+                skipped += 1;
+                pb.println(format!("Task panic: {e}"));
+            }
+        }
+        pb.inc(1);
+    }
+
+    let completed = successful_ids.len();
+    pb.finish_with_message(format!("{completed} ok, {skipped} skipped"));
+
+    if skipped > 0 {
+        warn!(skipped, completed, "Some markets failed to fetch and were skipped");
+    }
+
+    (successful_ids, skipped)
+}
+
 async fn run_backtest() -> anyhow::Result<()> {
     use polyrust_backtest::DataFetchConfig;
 
@@ -479,98 +558,17 @@ async fn run_backtest() -> anyhow::Result<()> {
         }
 
         // Fetch market data for all markets concurrently (bounded by fetch_concurrency)
-        let total_markets = market_ids.len();
         let concurrency = backtest_config.fetch_concurrency;
         let fetcher = Arc::new(data_fetcher);
-        let mut tasks = tokio::task::JoinSet::new();
-        let mut completed = 0usize;
-        let mut skipped = 0usize;
-        let mut successful_ids: Vec<String> = Vec::new();
 
-        info!(
-            total_markets,
+        let (successful_ids, _skipped) = fetch_markets_with_progress(
+            &market_ids,
+            fetcher,
+            backtest_config.start_date,
+            backtest_config.end_date,
             concurrency,
-            "Fetching market data concurrently"
-        );
-
-        for market_id in &market_ids {
-            // If at capacity, wait for one to finish before spawning
-            while tasks.len() >= concurrency {
-                if let Some(result) = tasks.join_next().await {
-                    match result {
-                        Ok(Ok(id)) => {
-                            completed += 1;
-                            successful_ids.push(id);
-                            info!(
-                                progress = format!("[{}/{}]", completed + skipped, total_markets),
-                                "Market data fetched"
-                            );
-                        }
-                        Ok(Err(e)) => {
-                            skipped += 1;
-                            warn!(
-                                error = %e,
-                                progress = format!("[{}/{}]", completed + skipped, total_markets),
-                                "Skipping market due to fetch error"
-                            );
-                        }
-                        Err(e) => {
-                            skipped += 1;
-                            warn!(
-                                error = %e,
-                                progress = format!("[{}/{}]", completed + skipped, total_markets),
-                                "Skipping market due to task panic"
-                            );
-                        }
-                    }
-                }
-            }
-            let f = Arc::clone(&fetcher);
-            let id = market_id.clone();
-            let start = backtest_config.start_date;
-            let end = backtest_config.end_date;
-            tasks.spawn(async move {
-                f.fetch_market_data(&id, start, end).await?;
-                Ok::<String, polyrust_backtest::error::BacktestError>(id)
-            });
-        }
-        // Drain remaining tasks
-        while let Some(result) = tasks.join_next().await {
-            match result {
-                Ok(Ok(id)) => {
-                    completed += 1;
-                    successful_ids.push(id);
-                    info!(
-                        progress = format!("[{}/{}]", completed + skipped, total_markets),
-                        "Market data fetched"
-                    );
-                }
-                Ok(Err(e)) => {
-                    skipped += 1;
-                    warn!(
-                        error = %e,
-                        progress = format!("[{}/{}]", completed + skipped, total_markets),
-                        "Skipping market due to fetch error"
-                    );
-                }
-                Err(e) => {
-                    skipped += 1;
-                    warn!(
-                        error = %e,
-                        progress = format!("[{}/{}]", completed + skipped, total_markets),
-                        "Skipping market due to task panic"
-                    );
-                }
-            }
-        }
-
-        if skipped > 0 {
-            warn!(
-                skipped,
-                completed,
-                "Some markets failed to fetch and were skipped"
-            );
-        }
+        )
+        .await;
 
         market_ids = successful_ids;
     }
@@ -738,38 +736,18 @@ async fn run_backtest_sweep() -> anyhow::Result<()> {
             }
         }
 
-        // Fetch market data concurrently
+        // Fetch market data concurrently with progress bar
         let concurrency = backtest_config.fetch_concurrency;
         let fetcher = Arc::new(data_fetcher);
-        let mut tasks = tokio::task::JoinSet::new();
-        let mut successful_ids: Vec<String> = Vec::new();
 
-        for market_id in &market_ids {
-            while tasks.len() >= concurrency {
-                if let Some(result) = tasks.join_next().await {
-                    match result {
-                        Ok(Ok(id)) => successful_ids.push(id),
-                        Ok(Err(e)) => warn!(error = %e, "Skipping market due to fetch error"),
-                        Err(e) => warn!(error = %e, "Skipping market due to task panic"),
-                    }
-                }
-            }
-            let f = Arc::clone(&fetcher);
-            let id = market_id.clone();
-            let start = backtest_config.start_date;
-            let end = backtest_config.end_date;
-            tasks.spawn(async move {
-                f.fetch_market_data(&id, start, end).await?;
-                Ok::<String, polyrust_backtest::BacktestError>(id)
-            });
-        }
-        while let Some(result) = tasks.join_next().await {
-            match result {
-                Ok(Ok(id)) => successful_ids.push(id),
-                Ok(Err(e)) => warn!(error = %e, "Skipping market"),
-                Err(e) => warn!(error = %e, "Task panic"),
-            }
-        }
+        let (successful_ids, _skipped) = fetch_markets_with_progress(
+            &market_ids,
+            fetcher,
+            backtest_config.start_date,
+            backtest_config.end_date,
+            concurrency,
+        )
+        .await;
         market_ids = successful_ids;
 
         // Fetch Binance klines

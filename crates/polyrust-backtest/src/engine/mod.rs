@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use indicatif::{ProgressBar, ProgressStyle};
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -203,6 +204,8 @@ pub struct BacktestEngine {
     market_tokens: HashMap<String, (String, String)>,
     /// Reverse mapping: token_id -> market_id (for fill events)
     token_to_market: HashMap<String, String>,
+    /// Optional progress bar for event replay (None in sweep mode).
+    progress_bar: Option<ProgressBar>,
     // --- Funnel instrumentation counters ---
     markets_discovered: usize,
     orders_submitted: usize,
@@ -269,6 +272,7 @@ impl BacktestEngine {
             position_entries: HashMap::new(),
             market_tokens: HashMap::new(),
             token_to_market: HashMap::new(),
+            progress_bar: None,
             markets_discovered: 0,
             orders_submitted: 0,
             orders_filled: 0,
@@ -294,7 +298,27 @@ impl BacktestEngine {
         let events = self.load_events().await?;
         info!(event_count = events.len(), "Loaded historical events");
 
-        self.run_with_events(&events).await
+        // Auto-create progress bar for standalone runs (not sweep mode)
+        if self.progress_bar.is_none() {
+            let pb = ProgressBar::new(events.len() as u64);
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "[{elapsed_precise}] {bar:40.green/black} {pos}/{len} events ({eta}) {msg}",
+                )
+                .unwrap(),
+            );
+            self.progress_bar = Some(pb);
+        }
+
+        let result = self.run_with_events(&events).await;
+
+        // Finish and clear bar
+        if let Some(ref pb) = self.progress_bar {
+            pb.finish_and_clear();
+        }
+        self.progress_bar = None;
+
+        result
     }
 
     /// Run the backtest with pre-loaded events (avoids re-loading from DB).
@@ -318,9 +342,7 @@ impl BacktestEngine {
         let mut trades = Vec::new();
 
         // Replay events in chronological order
-        // Pre-acquire simulated clock once (single-threaded replay — no contention)
         let total_events = events.len();
-        let log_interval = (total_events / 20).max(1); // Log every 5%
 
         for (i, historical_event) in events.iter().enumerate() {
             self.current_time = historical_event.timestamp;
@@ -425,7 +447,7 @@ impl BacktestEngine {
                             Decimal::ZERO
                         };
 
-                        info!(
+                        debug!(
                             market_id,
                             token_id = %token_id,
                             size = %size,
@@ -457,15 +479,9 @@ impl BacktestEngine {
                 }
             }
 
-            // Progress logging
-            if (i + 1) % log_interval == 0 {
-                info!(
-                    progress = format!("{:.0}%", ((i + 1) as f64 / total_events as f64) * 100.0),
-                    events_processed = i + 1,
-                    total = total_events,
-                    trades = trades.len(),
-                    "Backtest progress"
-                );
+            // Update progress bar (if present)
+            if let Some(ref pb) = self.progress_bar {
+                pb.set_position((i + 1) as u64);
             }
         }
 
@@ -498,7 +514,7 @@ impl BacktestEngine {
             .collect();
 
         if !remaining_tokens.is_empty() {
-            info!(
+            debug!(
                 remaining = remaining_tokens.len(),
                 "Force-closing remaining positions at end of backtest"
             );
@@ -517,7 +533,7 @@ impl BacktestEngine {
                 Decimal::ZERO
             };
 
-            info!(
+            debug!(
                 token_id = %token_id,
                 size = %size,
                 last_price = %last_price,

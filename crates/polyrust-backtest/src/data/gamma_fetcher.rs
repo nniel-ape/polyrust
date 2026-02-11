@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -258,13 +259,14 @@ impl GammaFetcher {
             ts += WINDOW_SECS;
         }
 
-        info!(
-            coin,
-            prefix,
-            total_windows = slugs.len(),
-            concurrency = self.discovery_concurrency,
-            "Discovering markets via concurrent slug enumeration"
+        let pb = ProgressBar::new(slugs.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] {bar:30} {pos}/{len} ({eta}) {msg}",
+            )
+            .unwrap(),
         );
+        pb.set_message(format!("{coin} discovery"));
 
         let mut markets = Vec::new();
         let mut found = 0u64;
@@ -309,23 +311,16 @@ impl GammaFetcher {
                         missed += 1;
                     }
                     Err(e) => {
-                        warn!(error = %e, "Task panicked during slug fetch");
+                        pb.println(format!("Task panicked during slug fetch: {e}"));
                         missed += 1;
                     }
                 }
             }
 
-            // Log progress after each batch
-            if (found + missed) > 0 {
-                info!(
-                    coin,
-                    found,
-                    missed,
-                    progress = format!("{}/{}", found + missed, total_windows),
-                    "Discovery progress"
-                );
-            }
+            pb.inc(chunk.len() as u64);
         }
+
+        pb.finish_with_message(format!("{coin}: {found} found, {missed} missed"));
 
         info!(
             coin,

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use indicatif::{ProgressBar, ProgressStyle};
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -271,13 +272,12 @@ async fn fetch_binance_klines(params: KlinesFetchParams<'_>) -> BacktestResult<u
     let end_ms = end.timestamp_millis();
     let mut total = 0usize;
 
-    info!(
-        coin,
-        source,
-        start = %start,
-        end = %end,
-        "Fetching Binance klines"
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::with_template("{spinner:.green} {msg}")
+            .unwrap(),
     );
+    pb.set_message(format!("{coin} {source}: fetching klines..."));
 
     loop {
         if current_start_ms >= end_ms {
@@ -366,13 +366,8 @@ async fn fetch_binance_klines(params: KlinesFetchParams<'_>) -> BacktestResult<u
         store.insert_crypto_prices(batch).await?;
         total += batch_size;
 
-        info!(
-            coin,
-            source,
-            batch_size,
-            total,
-            "Fetched Binance klines page"
-        );
+        pb.set_message(format!("{coin} {source}: {total} klines fetched"));
+        pb.tick();
 
         // Advance past the last candle's close time
         current_start_ms = last_close_time_ms + 1;
@@ -386,7 +381,7 @@ async fn fetch_binance_klines(params: KlinesFetchParams<'_>) -> BacktestResult<u
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     }
 
-    info!(coin, source, total, "Binance klines fetch complete");
+    pb.finish_with_message(format!("{coin} {source}: {total} klines complete"));
     Ok(total)
 }
 

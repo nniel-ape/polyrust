@@ -28,6 +28,7 @@ toml = "0.8"
 rust_decimal_macros = "1"
 rand = "0.9"
 tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+indicatif = "0.17"
 
 polymarket-client-sdk = { version = "0.4", features = [
     "clob", "ws", "rtds", "data", "gamma", "tracing", "heartbeats", "ctf"
@@ -72,6 +73,7 @@ rust_decimal.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 polymarket-client-sdk.workspace = true
+indicatif.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros = "1"
