@@ -17,7 +17,8 @@ Your entry filters are already near convergence, but execution quality is the ne
 1. Hardening maker execution with `postOnly` + tick-aware pricing.
 2. Using true CLOB batch order submission (already supported by your SDK version, not used in backend).
 3. Improving data freshness control with heartbeat/sequence safeguards.
-4. Making backtests execution-realistic enough to optimize live-sensitive knobs.
+4. Adding external lead-lag signal fusion (Binance + Coinbase) for entry timing and stop-loss confirmation.
+5. Making backtests execution-realistic enough to optimize live-sensitive knobs.
 
 Current calibrated baseline is strong: around `99.65%` win rate, `0.141` Sharpe, `~0.82%` max drawdown, and `~2836` trades for the Dec 1, 2025 to Jan 31, 2026 window.
 
@@ -49,6 +50,10 @@ Research inputs used:
    - [Heartbeats](https://docs.polymarket.com/developers/Utility-Endpoints/heartbeat)
    - [Maker Rewards](https://docs.polymarket.com/developers/rewards/overview)
    - [CLOB Changelog (Jan 6, 2026)](https://docs.polymarket.com/changelog/changelog)
+6. External venue market data docs:
+   - [Binance Spot API Docs (official)](https://github.com/binance/binance-spot-api-docs)
+   - [Coinbase Exchange WebSocket Channels](https://docs.cdp.coinbase.com/exchange/websocket-feed/channels)
+   - [Coinbase Advanced Trade WebSocket Channels](https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/websocket/websocket-channels)
 
 ## Baseline Snapshot
 
@@ -143,9 +148,68 @@ Also forces reference quality to `Current`:
 
 So backtest under-represents queue/fill competition and reference-quality effects that are central to live tail-end performance.
 
+### 8) External-feed frontrun logic is high-upside, but only with strict gating
+
+Current state in repo:
+
+1. RTDS gives Binance + Chainlink crypto prices:
+   - `crates/polyrust-market/src/price_feed.rs:90`
+2. Direct Binance spot/futures streams are already wired:
+   - `crates/polyrust-market/src/binance_feed.rs:20`
+3. No Coinbase feed adapter exists yet.
+
+Opportunity:
+
+1. Use external venues as lead-lag predictors for short-lived dislocations.
+2. Trigger earlier entries when external momentum leads Polymarket repricing.
+3. Trigger earlier defensive exits when external reversal arrives before local book updates.
+
+Constraints from venue docs:
+
+1. Coinbase `level2` guarantees delivery and is the correct basis for robust mid-price reconstruction.
+2. Coinbase `ticker_batch` is 5s cadence and is too slow as a primary trigger for tail-end windows.
+3. Heartbeat channels should be consumed to detect missed messages and stale subscriptions.
+
+Sources:
+
+1. [Coinbase Exchange WebSocket Channels](https://docs.cdp.coinbase.com/exchange/websocket-feed/channels)
+2. [Coinbase Advanced Trade WebSocket Channels](https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/websocket/websocket-channels)
+
 ## Prioritized Improvement Plan
 
 ## P0: Execution Alpha Capture (Highest Impact)
+
+### P0.0 Add external lead-lag signal stack (Binance + Coinbase)
+
+Implementation shape:
+
+1. Add Coinbase feed module in `polyrust-market` (`level2` + `ticker`, optional `heartbeats`).
+2. Build composite fair price per coin from:
+   - Binance spot
+   - Binance futures mark
+   - Coinbase top-of-book mid (or L2-derived mid)
+3. Compute short-horizon lead signals:
+   - external momentum (`100ms` to `1500ms`)
+   - divergence between external fair price and Polymarket implied odds
+4. Attach confidence tags to `ExternalPrice`-derived signals (freshness, source quorum, variance).
+
+Entry gating rules:
+
+1. Freshness gate: all required sources within max staleness budget.
+2. Persistence gate: signal must hold for N consecutive ticks (avoid one-tick wicks).
+3. Liquidity gate: local CLOB spread/depth must satisfy tailend thresholds.
+
+Stop-loss gating rules:
+
+1. Fast pre-trigger from external reversal.
+2. Confirm with local CLOB deterioration before hard exit (reduce false stopouts).
+3. Override path: immediate exit if external crash exceeds hard threshold.
+
+Why this belongs in P0:
+
+1. It directly targets timing edge, which is currently the primary residual alpha.
+2. It improves both offense (earlier valid entries) and defense (faster risk-off).
+3. It uses infrastructure you partially already have (Binance streams + RTDS).
 
 ### P0.1 Add `postOnly` mode for TailEnd entry orders
 
@@ -218,6 +282,16 @@ Extend observability to include:
 
 This gives direct feedback for offset/depth policy tuning.
 
+### P1.3 Add per-source freshness and disagreement telemetry
+
+Track these metrics per coin and per minute:
+
+1. Source lag (`now - source_timestamp`) for Binance/Chainlink/Coinbase.
+2. Cross-source dispersion (max-min basis points).
+3. Signal veto counts by reason (`stale`, `disagreement`, `insufficient_persistence`).
+
+This is required to safely run external-feed frontrun logic in production.
+
 ## P2: Capital Efficiency
 
 ### P2.1 Add bounded adaptive sizing for TailEnd
@@ -277,9 +351,11 @@ Treat this plan as complete only when all are true:
 
 If starting now, run this sequence:
 
-1. Enable `postOnly` for TailEnd buys, keep all existing entry filters unchanged.
-2. Introduce tick-aware offset policy with two variants: `1 tick`, `2 ticks`.
-3. Switch backend `place_batch_orders` to real SDK `post_orders`.
-4. Run paper/live shadow comparison for 3-5 days and record fill/reject deltas.
-5. Only then tune sizing and depth-factor dynamics.
-
+1. Add Coinbase `level2` feed and build composite external fair price (no trading logic changes yet).
+2. Add freshness/persistence/disagreement gates and emit diagnostics only (shadow mode).
+3. Enable external pre-trigger for entries with strict gates; keep current stop-loss behavior unchanged.
+4. Enable external-assisted stop-loss confirmation path and compare false-positive exits.
+5. Enable `postOnly` for TailEnd buys, then add tick-aware offset (`1 tick` vs `2 ticks`).
+6. Switch backend `place_batch_orders` to real SDK `post_orders`.
+7. Run paper/live shadow comparison for 3-5 days and record fill/reject/latency deltas.
+8. Only then tune sizing and depth-factor dynamics.
