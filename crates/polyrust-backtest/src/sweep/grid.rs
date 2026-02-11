@@ -61,9 +61,9 @@ impl ParameterCombination {
                         config.tailend.max_recent_volatility = *v;
                     }
                 }
-                "tailend.fok_cooldown_secs" => {
+                "tailend.rejection_cooldown_secs" => {
                     if let ParamValue::U64(v) = value {
-                        config.tailend.fok_cooldown_secs = *v;
+                        config.tailend.rejection_cooldown_secs = *v;
                     }
                 }
                 "tailend.stale_ob_secs" => {
@@ -198,9 +198,9 @@ impl ParameterGrid {
                     .collect(),
             });
         }
-        if let Some(ref range) = config.tailend.fok_cooldown_secs {
+        if let Some(ref range) = config.tailend.rejection_cooldown_secs {
             axes.push(Axis {
-                name: "tailend.fok_cooldown_secs".to_string(),
+                name: "tailend.rejection_cooldown_secs".to_string(),
                 values: range.expand().into_iter().map(ParamValue::U64).collect(),
             });
         }

@@ -139,7 +139,7 @@ impl MarketWithReference {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ArbitrageMode {
     /// Tail-end mode: < 2 min remaining, market price >= 90%.
-    /// Uses GTC orders with aggressive pricing (0% maker fee, no USDC clamping).
+    /// Uses GTC orders with aggressive pricing above ask for immediate fills.
     TailEnd,
     /// Two-sided mode: both outcomes priced below combined $0.98.
     /// Guaranteed profit regardless of outcome. Uses batch GTC orders.
@@ -348,6 +348,37 @@ impl ModeStats {
     /// Total completed trades (won + lost).
     pub fn total_trades(&self) -> u64 {
         self.won + self.lost
+    }
+}
+
+/// Order lifecycle telemetry for queue outcome tracking.
+///
+/// Records fill times, post-only rejections, and cancel rates
+/// to inform adaptive sizing and execution quality monitoring.
+#[derive(Debug, Default)]
+pub struct OrderTelemetry {
+    /// Number of times a postOnly order was rejected (would have matched).
+    pub post_only_rejects: u64,
+    /// (seconds_to_expiry, fill_time_secs) for filled orders.
+    pub fill_times: Vec<(i64, f64)>,
+    /// Per-coin cancel count (order cancelled before fill).
+    pub cancel_before_fill: std::collections::HashMap<String, u64>,
+    /// Total orders submitted.
+    pub total_orders: u64,
+    /// Total fills received.
+    pub total_fills: u64,
+    /// Total cancels received.
+    pub total_cancels: u64,
+}
+
+impl OrderTelemetry {
+    /// Fill rate as a fraction. Returns 0 if no orders.
+    pub fn fill_rate(&self) -> f64 {
+        if self.total_orders == 0 {
+            0.0
+        } else {
+            self.total_fills as f64 / self.total_orders as f64
+        }
     }
 }
 

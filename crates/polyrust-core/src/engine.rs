@@ -230,11 +230,26 @@ impl Engine {
 
                     match &event {
                         Event::MarketData(MarketDataEvent::ExternalPrice {
-                            symbol, price, ..
+                            symbol,
+                            price,
+                            source,
+                            timestamp,
                         }) => {
                             let mut md = context.market_data.write().await;
                             md.external_prices.insert(symbol.clone(), *price);
-                            debug!(symbol = %symbol, price = %price, "Updated external price in context");
+                            // Also update per-source price map
+                            md.sourced_prices
+                                .entry(symbol.clone())
+                                .or_default()
+                                .insert(
+                                    source.clone(),
+                                    crate::context::SourcedPrice {
+                                        price: *price,
+                                        source: source.clone(),
+                                        timestamp: *timestamp,
+                                    },
+                                );
+                            debug!(symbol = %symbol, price = %price, source = %source, "Updated external price in context");
                         }
                         Event::MarketData(MarketDataEvent::MarketDiscovered(info)) => {
                             let mut md = context.market_data.write().await;

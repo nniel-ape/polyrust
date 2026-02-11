@@ -7,6 +7,14 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::RwLock;
 
+/// A price observation from a specific data source with timestamp.
+#[derive(Debug, Clone)]
+pub struct SourcedPrice {
+    pub price: Decimal,
+    pub source: String,
+    pub timestamp: DateTime<Utc>,
+}
+
 /// A thread-safe handle to a boxed strategy.
 pub type StrategyHandle = Arc<RwLock<Box<dyn Strategy>>>;
 
@@ -97,7 +105,11 @@ impl PositionState {
 pub struct MarketDataState {
     pub orderbooks: HashMap<TokenId, OrderbookSnapshot>,
     pub markets: HashMap<MarketId, MarketInfo>,
+    /// Latest external price per symbol (any source). Used for quick lookups.
     pub external_prices: HashMap<String, Decimal>,
+    /// Per-source price observations: symbol -> source -> SourcedPrice.
+    /// Used for composite fair price calculations and feed health monitoring.
+    pub sourced_prices: HashMap<String, HashMap<String, SourcedPrice>>,
 }
 
 #[derive(Debug)]

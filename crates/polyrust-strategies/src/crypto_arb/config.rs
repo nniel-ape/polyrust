@@ -67,9 +67,10 @@ pub struct TailEndConfig {
     /// Maximum recent volatility (price wick) in last 10 seconds.
     /// Filters out choppy/volatile conditions. Default: 0.01 (1%).
     pub max_recent_volatility: Decimal,
-    /// Cooldown in seconds after a FOK order is rejected before re-evaluating
+    /// Cooldown in seconds after an order is rejected before re-evaluating
     /// the same market. Prevents retry storms on every price tick. Default: 15.
-    pub fok_cooldown_secs: u64,
+    #[serde(alias = "fok_cooldown_secs")]
+    pub rejection_cooldown_secs: u64,
     /// Minimum number of price ticks required in the sustained window.
     /// Prevents a single tick from satisfying the sustained direction check.
     /// With ~5s RTDS intervals and min_sustained_secs=5, this ensures at least
@@ -87,6 +88,28 @@ pub struct TailEndConfig {
     /// Window in seconds after entry during which post-entry exit is active.
     /// Default: 10 seconds.
     pub post_entry_window_secs: i64,
+    /// Post-only flag for TailEnd GTC buy orders. When true, orders are rejected
+    /// if they would match immediately, enforcing maker behavior (0% fee).
+    /// Post-only is incompatible with aggressive pricing (above ask) — causes
+    /// 100% rejection. Default: false. Taker fee at TailEnd prices (0.90-0.99)
+    /// is only 0.06-0.57%.
+    pub post_only: bool,
+    /// Use composite fair price from multiple sources for entry gating.
+    /// When enabled, entries require min_sources fresh price feeds that agree
+    /// within max_dispersion_bps. Default: false (opt-in).
+    pub use_composite_price: bool,
+    /// Maximum staleness in seconds for a price source to be included in composite.
+    /// Default: 10.
+    pub max_source_stale_secs: i64,
+    /// Minimum number of price sources required for composite price.
+    /// Default: 2.
+    pub min_sources: usize,
+    /// Maximum dispersion across sources in basis points.
+    /// If sources disagree by more than this, entry is gated. Default: 50.
+    pub max_dispersion_bps: Decimal,
+    /// Maximum staleness in seconds for required feed sources.
+    /// Entries are gated if any required feed is staler than this. Default: 30.
+    pub feed_stale_secs: i64,
 }
 
 fn default_min_sustained_ticks() -> usize {
@@ -114,10 +137,16 @@ impl Default for TailEndConfig {
             min_sustained_secs: 5,
             min_sustained_ticks: default_min_sustained_ticks(),
             max_recent_volatility: Decimal::new(2, 2), // 0.02 = 2%
-            fok_cooldown_secs: 15,
+            rejection_cooldown_secs: 15,
             stale_ob_secs: 15,
             post_entry_exit_drop: Decimal::new(5, 2), // 0.05 (5 cents below entry)
             post_entry_window_secs: 10,
+            post_only: false,
+            use_composite_price: false,
+            max_source_stale_secs: 10,
+            min_sources: 2,
+            max_dispersion_bps: Decimal::new(50, 0),
+            feed_stale_secs: 30,
         }
     }
 }
@@ -193,10 +222,13 @@ impl Default for SpikeConfig {
 pub struct OrderConfig {
     /// Use GTC maker orders for TwoSided mode.
     pub hybrid_mode: bool,
-    /// Price offset below best ask for GTC limit orders.
+    /// Price offset below best ask for GTC limit orders (TwoSided backward compat).
     pub limit_offset: Decimal,
     /// Cancel stale GTC orders after this many seconds.
     pub max_age_secs: u64,
+    /// Number of tick steps above the best ask for TailEnd GTC orders.
+    /// Uses the market's actual tick_size for precision. Default: 1.
+    pub tick_steps_above_ask: u32,
 }
 
 impl Default for OrderConfig {
@@ -205,6 +237,7 @@ impl Default for OrderConfig {
             hybrid_mode: true,
             limit_offset: Decimal::new(1, 2), // 0.01
             max_age_secs: 30,
+            tick_steps_above_ask: 1,
         }
     }
 }
@@ -223,6 +256,10 @@ pub struct SizingConfig {
     pub max_size: Decimal,
     /// Whether to use Kelly sizing (vs fixed).
     pub use_kelly: bool,
+    /// Safety factor for orderbook depth capping.
+    /// Order size is capped to `available_depth * depth_cap_factor`.
+    /// E.g. 0.50 = cap to 50% of visible depth. Default: 0.50.
+    pub depth_cap_factor: Decimal,
 }
 
 impl Default for SizingConfig {
@@ -233,6 +270,7 @@ impl Default for SizingConfig {
             min_size: Decimal::new(2, 0),
             max_size: Decimal::new(25, 0),
             use_kelly: true,
+            depth_cap_factor: Decimal::new(50, 2), // 0.50
         }
     }
 }

@@ -996,11 +996,11 @@ fn dynamic_ask_threshold_fallback_to_legacy() {
 }
 
 // ---------------------------------------------------------------------------
-// FOK cooldown tests
+// Rejection cooldown tests
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn fok_cooldown_blocks_reevaluation() {
+async fn rejection_cooldown_blocks_reevaluation() {
     use std::sync::Arc;
 
     let config = super::config::ArbitrageConfig::default();
@@ -1009,20 +1009,20 @@ async fn fok_cooldown_blocks_reevaluation() {
     let market_id = "market-123".to_string();
 
     // Initially not cooled down
-    assert!(!base.is_fok_cooled_down(&market_id).await);
+    assert!(!base.is_rejection_cooled_down(&market_id).await);
 
     // Record a cooldown
-    base.record_fok_cooldown(&market_id, 15).await;
+    base.record_rejection_cooldown(&market_id, 15).await;
 
     // Should be cooled down now
-    assert!(base.is_fok_cooled_down(&market_id).await);
+    assert!(base.is_rejection_cooled_down(&market_id).await);
 
     // Different market should not be cooled down
-    assert!(!base.is_fok_cooled_down(&"other-market".to_string()).await);
+    assert!(!base.is_rejection_cooled_down(&"other-market".to_string()).await);
 }
 
 #[tokio::test]
-async fn fok_cooldown_expires() {
+async fn rejection_cooldown_expires() {
     use std::sync::Arc;
 
     let config = super::config::ArbitrageConfig::default();
@@ -1031,12 +1031,12 @@ async fn fok_cooldown_expires() {
     let market_id = "market-456".to_string();
 
     // Record a very short cooldown (1 second)
-    base.record_fok_cooldown(&market_id, 1).await;
-    assert!(base.is_fok_cooled_down(&market_id).await);
+    base.record_rejection_cooldown(&market_id, 1).await;
+    assert!(base.is_rejection_cooled_down(&market_id).await);
 
     // Advance simulated time by 2 seconds to expire the cooldown
     *base.last_event_time.write().await = Utc::now() + chrono::Duration::seconds(2);
-    assert!(!base.is_fok_cooled_down(&market_id).await);
+    assert!(!base.is_rejection_cooled_down(&market_id).await);
 }
 
 // ---------------------------------------------------------------------------

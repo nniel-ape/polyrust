@@ -81,7 +81,8 @@ pub struct TailEndSweepParams {
     pub max_spread_bps: Option<ParamRange>,
     pub min_sustained_secs: Option<IntParamRange>,
     pub max_recent_volatility: Option<ParamRange>,
-    pub fok_cooldown_secs: Option<IntParamRange>,
+    #[serde(alias = "fok_cooldown_secs")]
+    pub rejection_cooldown_secs: Option<IntParamRange>,
     pub stale_ob_secs: Option<IntParamRange>,
     /// Per-bucket dynamic threshold sweep.
     /// Keys are time bucket seconds (e.g., 120, 90, 60, 30).

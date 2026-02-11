@@ -35,6 +35,7 @@ pub struct LiveBackend {
 #[async_trait]
 trait LiveBackendInner: Send + Sync {
     async fn place_order(&self, order: &OrderRequest) -> Result<OrderResult>;
+    async fn place_orders_batch(&self, orders: &[OrderRequest]) -> Result<Vec<OrderResult>>;
     async fn cancel_order(&self, order_id: &str) -> Result<()>;
     async fn cancel_all_orders(&self) -> Result<()>;
     async fn get_open_orders(&self) -> Result<Vec<Order>>;
@@ -71,6 +72,7 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
         order_type: OrderType,
         tick_size: Decimal,
         fee_rate_bps: u32,
+        post_only: bool,
     ) -> Result<polymarket_client_sdk::clob::types::response::PostOrderResponse> {
         let signable = build_signable_order(
             token_id,
@@ -80,6 +82,7 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
             order_type,
             tick_size,
             fee_rate_bps,
+            post_only,
             self.signer_address,
             self.funder,
             self.signature_type,
@@ -302,13 +305,7 @@ impl polyrust_core::execution::ExecutionBackend for LiveBackend {
     }
 
     async fn place_batch_orders(&self, orders: &[OrderRequest]) -> Result<Vec<OrderResult>> {
-        // SDK does not expose a batch endpoint; fall back to sequential placement.
-        // Rounding is handled inside build_signable_order.
-        let mut results = Vec::with_capacity(orders.len());
-        for order in orders {
-            results.push(self.inner.place_order(order).await?);
-        }
-        Ok(results)
+        self.inner.place_orders_batch(orders).await
     }
 
     async fn is_market_resolved(&self, condition_id: &str) -> Result<bool> {
@@ -331,6 +328,104 @@ impl polyrust_core::execution::ExecutionBackend for LiveBackend {
 impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendInner
     for LiveBackendImpl<K, S>
 {
+    async fn place_orders_batch(&self, orders: &[OrderRequest]) -> Result<Vec<OrderResult>> {
+        if orders.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Build + sign all orders
+        let mut signed_orders = Vec::with_capacity(orders.len());
+        for order in orders {
+            let token_id = SdkU256::from_str(&order.token_id)
+                .map_err(|e| PolyError::Execution(format!("Invalid token_id: {e}")))?;
+            self.client.set_neg_risk(token_id, order.neg_risk);
+
+            let fee_rate_bps = self
+                .client
+                .fee_rate_bps(token_id)
+                .await
+                .map(|r| r.base_fee)
+                .unwrap_or(order.fee_rate_bps);
+
+            let signable = build_signable_order(
+                token_id,
+                order.price,
+                order.size,
+                order.side,
+                order.order_type,
+                order.tick_size,
+                fee_rate_bps,
+                order.post_only,
+                self.signer_address,
+                self.funder,
+                self.signature_type,
+            );
+
+            let signed = self
+                .client
+                .sign(&self.signer, signable)
+                .await
+                .map_err(|e| PolyError::Sdk(format!("Failed to sign order: {e}")))?;
+            signed_orders.push((signed, order));
+        }
+
+        // Post all orders in a single batch request
+        let sdk_signed: Vec<_> = signed_orders.into_iter().map(|(s, _)| s).collect();
+        match self.client.post_orders(sdk_signed).await {
+            Ok(responses) => {
+                let results: Vec<OrderResult> = responses
+                    .into_iter()
+                    .zip(orders.iter())
+                    .map(|(resp, order)| {
+                        let result = OrderResult {
+                            success: resp.success,
+                            order_id: if resp.order_id.is_empty() {
+                                None
+                            } else {
+                                Some(resp.order_id.clone())
+                            },
+                            token_id: order.token_id.clone(),
+                            price: order.price,
+                            size: order.size,
+                            side: order.side,
+                            status: Some(match resp.status {
+                                polymarket_client_sdk::clob::types::OrderStatusType::Matched => {
+                                    "Filled".to_string()
+                                }
+                                other => format!("{:?}", other),
+                            }),
+                            message: resp.error_msg.unwrap_or_else(|| "ok".to_string()),
+                        };
+                        if result.success {
+                            info!(order_id = ?result.order_id, "Batch order placed successfully");
+                        } else {
+                            warn!(
+                                order_id = ?result.order_id,
+                                message = %result.message,
+                                "Batch order placement failed"
+                            );
+                        }
+                        result
+                    })
+                    .collect();
+                Ok(results)
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    count = orders.len(),
+                    "Batch post_orders failed, falling back to sequential"
+                );
+                // Fallback: sequential placement
+                let mut results = Vec::with_capacity(orders.len());
+                for order in orders {
+                    results.push(self.place_order(order).await?);
+                }
+                Ok(results)
+            }
+        }
+    }
+
     async fn place_order(&self, order: &OrderRequest) -> Result<OrderResult> {
         let token_id = SdkU256::from_str(&order.token_id)
             .map_err(|e| PolyError::Execution(format!("Invalid token_id: {e}")))?;
@@ -363,6 +458,7 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
                 order.order_type,
                 order.tick_size,
                 fee_rate_bps,
+                order.post_only,
             )
             .await
         {
@@ -386,6 +482,7 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
                     order.order_type,
                     order.tick_size,
                     fee_rate_bps,
+                    order.post_only,
                 )
                 .await?
             }

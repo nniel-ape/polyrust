@@ -5,9 +5,8 @@
 //! - Predicted winner's ask >= 0.90
 //! - Confidence: 1.0 (fixed, highest priority)
 //!
-//! Uses GTC orders with aggressive pricing (at/above ask) for immediate fills.
-//! GTC avoids the FOK USDC clamping issue at extreme prices (>0.99) and gets
-//! 0% maker fee instead of ~0.06% taker fee.
+//! Uses GTC orders with aggressive pricing (above ask) for immediate fills.
+//! Taker fee at TailEnd prices (0.90-0.99) is negligible (0.06-0.57%).
 
 use std::sync::Arc;
 
@@ -238,7 +237,7 @@ impl TailEndStrategy {
         }
 
         let profit_margin = Decimal::ONE - ask_price;
-        let estimated_fee = Decimal::ZERO; // GTC maker fee = 0%
+        let estimated_fee = taker_fee(ask_price, self.base.config.fee.taker_fee_rate);
         let net_margin = profit_margin - estimated_fee;
 
         // Apply quality factor to confidence (reduces position size via Kelly sizing)
@@ -400,6 +399,39 @@ impl TailEndStrategy {
         let (_, promote_actions) = self.base.record_price(symbol, price, source, now).await;
         let mut result = promote_actions;
 
+        // Composite price gating: if enabled, use composite fair price for entry evaluation
+        let effective_price = if self.base.config.tailend.use_composite_price {
+            match self
+                .base
+                .composite_fair_price(
+                    symbol,
+                    ctx,
+                    self.base.config.tailend.max_source_stale_secs,
+                    self.base.config.tailend.min_sources,
+                    self.base.config.tailend.max_dispersion_bps,
+                )
+                .await
+            {
+                Some(composite) => {
+                    debug!(
+                        coin = %symbol,
+                        composite_price = %composite.price,
+                        sources = composite.sources_used,
+                        max_lag_ms = composite.max_lag_ms,
+                        dispersion_bps = %composite.dispersion_bps,
+                        "Using composite fair price for TailEnd evaluation"
+                    );
+                    composite.price
+                }
+                None => {
+                    self.base.record_tailend_skip("composite_stale").await;
+                    return result;
+                }
+            }
+        } else {
+            price
+        };
+
         // Fast pre-filter: skip coins where no market is near expiration.
         // This avoids acquiring active_markets lock + iterating for 99%+ of events.
         {
@@ -435,13 +467,13 @@ impl TailEndStrategy {
                 continue;
             }
 
-            // Skip if in FOK rejection cooldown
-            if self.base.is_fok_cooled_down(&market_id).await {
+            // Skip if in rejection cooldown
+            if self.base.is_rejection_cooled_down(&market_id).await {
                 debug!(
                     market = %market_id,
-                    "TailEnd skip: FOK rejection cooldown active"
+                    "TailEnd skip: rejection cooldown active"
                 );
-                self.base.record_tailend_skip("fok_cooldown").await;
+                self.base.record_tailend_skip("rejection_cooldown").await;
                 continue;
             }
 
@@ -465,7 +497,7 @@ impl TailEndStrategy {
                 markets.get(&market_id).cloned()
             };
 
-            let opp = match self.evaluate_opportunity(&market_id, price, ctx).await {
+            let opp = match self.evaluate_opportunity(&market_id, effective_price, ctx).await {
                 Some(opp) => opp,
                 None => {
                     self.base.release_reservation(&market_id).await;
@@ -513,9 +545,9 @@ impl TailEndStrategy {
                     None => Decimal::ZERO,
                 }
             };
-            // 50% safety margin — 80% was still too aggressive for competitive tail-end windows
+            // Safety margin from config — 80% was still too aggressive for competitive tail-end windows
             // where multiple bots race for the same asks during ~1-5s total latency
-            let safe_available = available * Decimal::new(50, 2);
+            let safe_available = available * self.base.config.sizing.depth_cap_factor;
             if safe_available < size {
                 warn!(
                     market = %market_id,
@@ -533,17 +565,18 @@ impl TailEndStrategy {
                 continue;
             }
 
-            // TailEnd uses GTC orders with aggressive pricing (at/above ask).
-            // GTC avoids FOK USDC clamping at extreme prices and gets 0% maker fee.
-            let limit_offset = self.base.config.order.limit_offset;
-            let aggressive_price = (opp.buy_price + limit_offset).min(Decimal::new(99, 2));
-            let (neg_risk, tick_size, fee_rate_bps) = match &market_info {
-                Some(m) => (
-                    m.market.neg_risk,
-                    Some(m.market.tick_size),
-                    Some(m.market.fee_rate_bps),
-                ),
-                None => (false, None, None),
+            // TailEnd uses GTC orders with aggressive pricing (above ask).
+            // Taker fee at these prices (0.90-0.99) is negligible (0.06-0.57%).
+            // Tick-aware pricing: step N ticks above the best ask using the market's tick_size.
+            let tick_size = market_info
+                .as_ref()
+                .map(|m| m.market.tick_size)
+                .unwrap_or(Decimal::new(1, 2));
+            let tick_steps = Decimal::from(self.base.config.order.tick_steps_above_ask);
+            let aggressive_price = (opp.buy_price + tick_size * tick_steps).min(Decimal::new(99, 2));
+            let (neg_risk, fee_rate_bps) = match &market_info {
+                Some(m) => (m.market.neg_risk, Some(m.market.fee_rate_bps)),
+                None => (false, None),
             };
             let mut order = OrderRequest::new(
                 opp.token_id.clone(),
@@ -553,12 +586,11 @@ impl TailEndStrategy {
                 OrderType::Gtc,
                 neg_risk,
             );
-            if let Some(ts) = tick_size {
-                order = order.with_tick_size(ts);
-            }
+            order = order.with_tick_size(tick_size);
             if let Some(fr) = fee_rate_bps {
                 order = order.with_fee_rate_bps(fr);
             }
+            order = order.with_post_only(self.base.config.tailend.post_only);
 
             info!(
                 mode = ?opp.mode,
@@ -595,6 +627,12 @@ impl TailEndStrategy {
                         fee_rate_bps: market.market.fee_rate_bps,
                     },
                 );
+            }
+
+            // Track order submission in telemetry
+            {
+                let mut telem = self.base.order_telemetry.lock().unwrap();
+                telem.total_orders += 1;
             }
 
             result.push(Action::PlaceOrder(order));
@@ -748,6 +786,22 @@ impl TailEndStrategy {
             "TailEnd GTC order filled"
         );
 
+        // Track fill in telemetry
+        {
+            let now_real = self.base.event_time().await;
+            let fill_time = (now_real - lo.placed_at).num_milliseconds() as f64 / 1000.0;
+            let mut telem = self.base.order_telemetry.lock().unwrap();
+            telem.total_fills += 1;
+            // Approximate seconds to expiry at fill time
+            let markets = self.base.active_markets.try_read();
+            if let Ok(markets) = markets
+                && let Some(mwr) = markets.get(&lo.market_id)
+            {
+                let secs_to_expiry = mwr.market.seconds_remaining_at(now_real);
+                telem.fill_times.push((secs_to_expiry, fill_time));
+            }
+        }
+
         let now = self.base.event_time().await;
         let position =
             ArbitragePosition::from_limit_order(&lo, price, size, Some(order_id.to_string()), now);
@@ -827,13 +881,13 @@ impl Strategy for TailEndStrategy {
                         pending.remove(token_id);
                         drop(pending);
 
-                        let cooldown = self.base.config.tailend.fok_cooldown_secs;
-                        self.base.record_fok_cooldown(&market_id, cooldown).await;
+                        let cooldown = self.base.config.tailend.rejection_cooldown_secs;
+                        self.base.record_rejection_cooldown(&market_id, cooldown).await;
                         warn!(
                             token_id = %token_id,
                             market = %market_id,
                             cooldown_secs = cooldown,
-                            "TailEnd FOK order rejected, cooldown applied"
+                            "TailEnd order rejected, cooldown applied"
                         );
                     }
 

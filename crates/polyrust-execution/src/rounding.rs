@@ -179,6 +179,7 @@ pub fn build_signable_order(
     order_type: OrderType,
     tick_size: Decimal,
     fee_rate_bps: u32,
+    post_only: bool,
     signer_address: SdkAddress,
     funder: Option<SdkAddress>,
     signature_type: SignatureType,
@@ -256,7 +257,7 @@ pub fn build_signable_order(
     SignableOrder::builder()
         .order(order)
         .order_type(sdk_order_type)
-        .post_only(false)
+        .post_only(post_only)
         .build()
 }
 
@@ -481,6 +482,7 @@ mod tests {
             OrderType::Fok,
             dec!(0.01),
             0, // fee_rate_bps
+            false, // post_only
             SdkAddress::ZERO,
             None,
             SignatureType::Eoa,
@@ -508,6 +510,7 @@ mod tests {
             OrderType::Gtc,
             dec!(0.01),
             0,
+            false,
             SdkAddress::ZERO,
             None,
             SignatureType::Eoa,
@@ -534,6 +537,7 @@ mod tests {
             OrderType::Gtc,
             dec!(0.01),
             0,
+            false,
             signer,
             Some(funder),
             SignatureType::GnosisSafe,
@@ -557,6 +561,7 @@ mod tests {
             OrderType::Fok,
             dec!(0.01),
             0,
+            false,
             SdkAddress::ZERO,
             None,
             SignatureType::Eoa,
@@ -583,6 +588,7 @@ mod tests {
             OrderType::Fok,
             dec!(0.001),
             0,
+            false,
             SdkAddress::ZERO,
             None,
             SignatureType::Eoa,
@@ -603,6 +609,7 @@ mod tests {
             OrderType::Fok,
             dec!(0.001),
             0,
+            false,
             SdkAddress::ZERO,
             None,
             SignatureType::Eoa,
@@ -635,6 +642,7 @@ mod tests {
             OrderType::Gtc,
             dec!(0.01),
             0,
+            false,
             SdkAddress::ZERO,
             None,
             SignatureType::Eoa,
@@ -661,6 +669,7 @@ mod tests {
             OrderType::Fok,
             dec!(0.01),
             0,
+            false,
             SdkAddress::ZERO,
             None,
             SignatureType::Eoa,
@@ -683,6 +692,7 @@ mod tests {
             OrderType::Fok,
             dec!(0.01),
             0,
+            false,
             SdkAddress::ZERO,
             None,
             SignatureType::Eoa,
@@ -707,6 +717,7 @@ mod tests {
             OrderType::Fok,
             dec!(0.01),
             0,
+            false,
             SdkAddress::ZERO,
             None,
             SignatureType::Eoa,
@@ -731,6 +742,7 @@ mod tests {
             OrderType::Fok,
             dec!(0.01),
             0,
+            false,
             SdkAddress::ZERO,
             None,
             SignatureType::Eoa,
@@ -754,6 +766,7 @@ mod tests {
             OrderType::Fok,
             dec!(0.001),
             0,
+            false,
             SdkAddress::ZERO,
             None,
             SignatureType::Eoa,
@@ -776,6 +789,7 @@ mod tests {
             OrderType::Fok,
             dec!(0.01),
             0,
+            false,
             SdkAddress::ZERO,
             None,
             SignatureType::Eoa,
@@ -808,6 +822,7 @@ mod tests {
             OrderType::Fok,
             dec!(0.01),
             0,
+            false,
             SdkAddress::ZERO,
             None,
             SignatureType::Eoa,

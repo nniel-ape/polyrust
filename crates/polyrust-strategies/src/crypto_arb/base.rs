@@ -23,8 +23,21 @@ use polyrust_market::ChainlinkHistoricalClient;
 use crate::crypto_arb::config::{ArbitrageConfig, SizingConfig};
 use crate::crypto_arb::types::{
     ArbitrageMode, ArbitragePosition, BoundarySnapshot, MarketWithReference, ModeStats,
-    OpenLimitOrder, PendingOrder, ReferenceQuality, SpikeEvent,
+    OpenLimitOrder, OrderTelemetry, PendingOrder, ReferenceQuality, SpikeEvent,
 };
+
+/// Result of a composite fair price calculation from multiple data sources.
+#[derive(Debug, Clone)]
+pub struct CompositePriceResult {
+    /// Weighted average price across sources.
+    pub price: Decimal,
+    /// Number of sources that contributed.
+    pub sources_used: usize,
+    /// Maximum lag in milliseconds across contributing sources.
+    pub max_lag_ms: i64,
+    /// Maximum dispersion from composite in basis points.
+    pub dispersion_bps: Decimal,
+}
 
 /// Metadata about why a stop-loss was triggered, for diagnostic logging.
 #[derive(Debug, Clone)]
@@ -205,9 +218,9 @@ pub struct CryptoArbBase {
     /// Throttle for periodic pipeline status summary (~60 seconds).
     /// Uses real wall-clock time (not simulated) to rate-limit output.
     pub last_status_log: RwLock<Option<tokio::time::Instant>>,
-    /// FOK rejection cooldowns per market — prevents retry storms.
+    /// Order rejection cooldowns per market — prevents retry storms.
     /// Uses `DateTime<Utc>` so backtests with simulated time work correctly.
-    pub fok_cooldowns: RwLock<HashMap<MarketId, DateTime<Utc>>>,
+    pub rejection_cooldowns: RwLock<HashMap<MarketId, DateTime<Utc>>>,
     /// Stop-loss rejection cooldowns per token — prevents retry storms on sell failures.
     pub stop_loss_cooldowns: RwLock<HashMap<TokenId, DateTime<Utc>>>,
     /// Stale market cooldowns — prevents re-entry after a position was removed as stale.
@@ -224,6 +237,14 @@ pub struct CryptoArbBase {
     /// Holds a market_id → (mode, slot_count) mapping for markets currently being evaluated.
     /// Protects the gap between exposure check and pending_orders.insert().
     pub market_reservations: RwLock<HashMap<MarketId, (ArbitrageMode, usize)>>,
+    /// Order lifecycle telemetry (fill times, rejects, cancels).
+    pub order_telemetry: std::sync::Mutex<OrderTelemetry>,
+    /// Last time each feed source was seen (source name -> timestamp).
+    /// Updated on every price event via `record_price`. Used for stale-feed gating.
+    pub feed_last_seen: RwLock<HashMap<String, DateTime<Utc>>>,
+    /// Signal veto counters for diagnostics.
+    /// Tracks why entries were vetoed (stale feeds, dispersion, etc.).
+    pub signal_veto_stats: std::sync::Mutex<HashMap<&'static str, u64>>,
     /// Coins configured for this strategy.
     coins: HashSet<String>,
     /// Last event timestamp from the strategy context (simulated or real).
@@ -259,12 +280,15 @@ impl CryptoArbBase {
             cached_asks: RwLock::new(HashMap::new()),
             last_dashboard_emit: RwLock::new(None),
             last_status_log: RwLock::new(None),
-            fok_cooldowns: RwLock::new(HashMap::new()),
+            rejection_cooldowns: RwLock::new(HashMap::new()),
             stop_loss_cooldowns: RwLock::new(HashMap::new()),
             stale_market_cooldowns: RwLock::new(HashMap::new()),
             tailend_skip_stats: std::sync::Mutex::new(HashMap::new()),
             coin_nearest_expiry: RwLock::new(HashMap::new()),
             market_reservations: RwLock::new(HashMap::new()),
+            order_telemetry: std::sync::Mutex::new(OrderTelemetry::default()),
+            feed_last_seen: RwLock::new(HashMap::new()),
+            signal_veto_stats: std::sync::Mutex::new(HashMap::new()),
             coins,
             last_event_time: RwLock::new(Utc::now()),
         }
@@ -296,6 +320,12 @@ impl CryptoArbBase {
         source: &str,
         now: DateTime<Utc>,
     ) -> (Option<Decimal>, Vec<Action>) {
+        // Update feed health tracking
+        {
+            let mut seen = self.feed_last_seen.write().await;
+            seen.insert(source.to_string(), now);
+        }
+
         // Record price history with source (keep last PRICE_HISTORY_SIZE entries).
         // Deduplicate: when multiple strategy handlers share this base, the same
         // ExternalPrice event triggers record_price once per handler. Skip the
@@ -469,6 +499,119 @@ impl CryptoArbBase {
         let down_wick = (min_price - reference_price).abs() / reference_price;
 
         Some(up_wick.max(down_wick))
+    }
+
+    // -------------------------------------------------------------------------
+    // Feed health monitoring
+    // -------------------------------------------------------------------------
+
+    /// Check if all required feeds have been seen within the staleness threshold.
+    pub async fn are_feeds_fresh(
+        &self,
+        required: &[&str],
+        max_stale_secs: i64,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let seen = self.feed_last_seen.read().await;
+        for &source in required {
+            match seen.get(source) {
+                Some(ts) => {
+                    if (now - *ts).num_seconds() > max_stale_secs {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// Increment a signal veto counter.
+    pub fn record_signal_veto(&self, reason: &'static str) {
+        let mut stats = self.signal_veto_stats.lock().unwrap();
+        *stats.entry(reason).or_insert(0) += 1;
+    }
+
+    // -------------------------------------------------------------------------
+    // Composite fair price
+    // -------------------------------------------------------------------------
+
+    /// Compute a weighted composite fair price from multiple data sources.
+    ///
+    /// Weights: binance-futures 0.5, binance-spot 0.3, coinbase 0.2
+    /// Rejects sources staler than `max_stale_secs`.
+    /// Returns None if fewer than min_sources are fresh, or dispersion exceeds max.
+    pub async fn composite_fair_price(
+        &self,
+        coin: &str,
+        ctx: &StrategyContext,
+        max_stale_secs: i64,
+        min_sources: usize,
+        max_dispersion_bps: Decimal,
+    ) -> Option<CompositePriceResult> {
+        let now = ctx.now().await;
+        let md = ctx.market_data.read().await;
+        let sources = md.sourced_prices.get(coin)?;
+
+        static WEIGHTS: &[(&str, Decimal)] = &[
+            // Use const-compatible Decimal construction
+            ("binance-futures", Decimal::from_parts(5, 0, 0, false, 1)), // 0.5
+            ("binance-spot", Decimal::from_parts(3, 0, 0, false, 1)),    // 0.3
+            ("coinbase", Decimal::from_parts(2, 0, 0, false, 1)),        // 0.2
+        ];
+
+        let mut weighted_sum = Decimal::ZERO;
+        let mut total_weight = Decimal::ZERO;
+        let mut prices = Vec::new();
+        let mut max_lag_ms: i64 = 0;
+        let mut sources_used = 0usize;
+
+        for &(source_name, weight) in WEIGHTS {
+            if let Some(sp) = sources.get(source_name) {
+                let age_secs = (now - sp.timestamp).num_seconds();
+                if age_secs > max_stale_secs {
+                    continue;
+                }
+                weighted_sum += sp.price * weight;
+                total_weight += weight;
+                prices.push(sp.price);
+                sources_used += 1;
+                let lag_ms = (now - sp.timestamp).num_milliseconds();
+                if lag_ms > max_lag_ms {
+                    max_lag_ms = lag_ms;
+                }
+            }
+        }
+
+        if sources_used < min_sources || total_weight.is_zero() {
+            return None;
+        }
+
+        let composite_price = weighted_sum / total_weight;
+
+        // Compute dispersion in basis points: max deviation from composite
+        let dispersion_bps = prices
+            .iter()
+            .map(|p| {
+                if composite_price.is_zero() {
+                    Decimal::ZERO
+                } else {
+                    ((*p - composite_price).abs() / composite_price) * Decimal::new(10000, 0)
+                }
+            })
+            .max()
+            .unwrap_or(Decimal::ZERO);
+
+        if dispersion_bps > max_dispersion_bps {
+            return None;
+        }
+
+        Some(CompositePriceResult {
+            price: composite_price,
+            sources_used,
+            max_lag_ms,
+            dispersion_bps,
+        })
     }
 
     // -------------------------------------------------------------------------
@@ -1371,18 +1514,18 @@ impl CryptoArbBase {
     // Order management
     // -------------------------------------------------------------------------
 
-    /// Record a FOK rejection cooldown for a market.
-    pub async fn record_fok_cooldown(&self, market_id: &MarketId, cooldown_secs: u64) {
+    /// Record a rejection cooldown for a market.
+    pub async fn record_rejection_cooldown(&self, market_id: &MarketId, cooldown_secs: u64) {
         let now = self.event_time().await;
         let expires_at = now + chrono::Duration::seconds(cooldown_secs as i64);
-        let mut cooldowns = self.fok_cooldowns.write().await;
+        let mut cooldowns = self.rejection_cooldowns.write().await;
         cooldowns.insert(market_id.clone(), expires_at);
     }
 
-    /// Check if a market is still in FOK rejection cooldown.
-    pub async fn is_fok_cooled_down(&self, market_id: &MarketId) -> bool {
+    /// Check if a market is still in rejection cooldown.
+    pub async fn is_rejection_cooled_down(&self, market_id: &MarketId) -> bool {
         let now = self.event_time().await;
-        let cooldowns = self.fok_cooldowns.read().await;
+        let cooldowns = self.rejection_cooldowns.read().await;
         if let Some(expires_at) = cooldowns.get(market_id) {
             now < *expires_at
         } else {
@@ -1634,6 +1777,13 @@ impl CryptoArbBase {
                 );
                 lo.cancel_pending = true;
                 actions.push(Action::CancelOrder(order_id.clone()));
+                // Track cancel in telemetry
+                let mut telem = self.order_telemetry.lock().unwrap();
+                telem.total_cancels += 1;
+                *telem
+                    .cancel_before_fill
+                    .entry(lo.coin.clone())
+                    .or_insert(0) += 1;
             }
         }
         actions
@@ -1724,6 +1874,53 @@ impl CryptoArbBase {
                 stats = %summary.join(", "),
                 "TailEnd skip stats (last 60s)"
             );
+        }
+
+        // Drain signal veto stats
+        let veto_stats: HashMap<&'static str, u64> = {
+            let mut stats = self.signal_veto_stats.lock().unwrap();
+            std::mem::take(&mut *stats)
+        };
+        if !veto_stats.is_empty() {
+            let summary: Vec<String> = veto_stats.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            info!(
+                stats = %summary.join(", "),
+                "Signal veto stats (last 60s)"
+            );
+        }
+
+        // Log order telemetry snapshot
+        {
+            let telem = self.order_telemetry.lock().unwrap();
+            if telem.total_orders > 0 {
+                info!(
+                    total_orders = telem.total_orders,
+                    total_fills = telem.total_fills,
+                    total_cancels = telem.total_cancels,
+                    post_only_rejects = telem.post_only_rejects,
+                    fill_rate = format!("{:.1}%", telem.fill_rate() * 100.0),
+                    "Order telemetry"
+                );
+            }
+        }
+
+        // Log per-source feed lag
+        {
+            let now = Utc::now();
+            let seen = self.feed_last_seen.read().await;
+            let lag_summary: Vec<String> = seen
+                .iter()
+                .map(|(source, ts)| {
+                    let lag_ms = (now - *ts).num_milliseconds();
+                    format!("{source}={lag_ms}ms")
+                })
+                .collect();
+            if !lag_summary.is_empty() {
+                info!(
+                    feeds = %lag_summary.join(", "),
+                    "Feed source lag"
+                );
+            }
         }
     }
 }

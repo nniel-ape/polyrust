@@ -57,6 +57,9 @@ pub struct OrderRequest {
     pub tick_size: Decimal,
     /// Fee rate in basis points (default: 0)
     pub fee_rate_bps: u32,
+    /// Post-only flag: if true, the order is rejected if it would match immediately.
+    /// Enforces maker behavior (0% fee). Default: false.
+    pub post_only: bool,
 }
 
 impl OrderRequest {
@@ -78,6 +81,7 @@ impl OrderRequest {
             neg_risk,
             tick_size: Decimal::new(1, 2), // 0.01 default
             fee_rate_bps: 0,
+            post_only: false,
         }
     }
 
@@ -90,6 +94,12 @@ impl OrderRequest {
     /// Set the fee rate in basis points for this order
     pub fn with_fee_rate_bps(mut self, fee_rate_bps: u32) -> Self {
         self.fee_rate_bps = fee_rate_bps;
+        self
+    }
+
+    /// Set the post-only flag for this order
+    pub fn with_post_only(mut self, post_only: bool) -> Self {
+        self.post_only = post_only;
         self
     }
 }

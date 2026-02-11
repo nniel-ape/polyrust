@@ -243,6 +243,15 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Start Coinbase feed for cross-exchange price diversity
+    let mut coinbase_feed = polyrust_market::CoinbaseFeed::new(arb_config.coins.clone());
+    let coinbase_bus = event_bus.clone();
+    tokio::spawn(async move {
+        if let Err(e) = coinbase_feed.start(coinbase_bus).await {
+            error!("Coinbase feed failed to start: {e}");
+        }
+    });
+
     // Start trade persistence task
     let persistence_store = Arc::clone(&store);
     let persistence_bus = event_bus.clone();
