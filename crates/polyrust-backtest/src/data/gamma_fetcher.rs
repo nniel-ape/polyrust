@@ -96,19 +96,21 @@ impl GammaFetcher {
     ///
     /// # Arguments
     /// * `slug_pattern` - Slug substring to search for (e.g., "btc", "eth-15min")
-    pub async fn fetch_markets_by_slug(&self, slug_pattern: &str) -> BacktestResult<Vec<HistoricalMarket>> {
-        info!(slug_pattern, "Fetching markets from Gamma API by slug pattern");
-
-        let url = format!(
-            "{}/markets?slug_contains={}",
-            GAMMA_BASE_URL, slug_pattern
+    pub async fn fetch_markets_by_slug(
+        &self,
+        slug_pattern: &str,
+    ) -> BacktestResult<Vec<HistoricalMarket>> {
+        info!(
+            slug_pattern,
+            "Fetching markets from Gamma API by slug pattern"
         );
 
+        let url = format!("{}/markets?slug_contains={}", GAMMA_BASE_URL, slug_pattern);
+
         let response = self.fetch_with_retry(&url).await?;
-        let markets: Vec<GammaMarket> = response
-            .json()
-            .await
-            .map_err(|e| BacktestError::Network(format!("Failed to parse markets response: {}", e)))?;
+        let markets: Vec<GammaMarket> = response.json().await.map_err(|e| {
+            BacktestError::Network(format!("Failed to parse markets response: {}", e))
+        })?;
 
         info!(count = markets.len(), "Received markets from Gamma API");
 
@@ -124,7 +126,10 @@ impl GammaFetcher {
             self.store.insert_historical_market(market.clone()).await?;
         }
 
-        info!(cached = historical_markets.len(), "Cached markets to database");
+        info!(
+            cached = historical_markets.len(),
+            "Cached markets to database"
+        );
         Ok(historical_markets)
     }
 
@@ -132,22 +137,26 @@ impl GammaFetcher {
     ///
     /// # Arguments
     /// * `condition_id` - Market condition ID
-    pub async fn fetch_market_by_id(&self, condition_id: &str) -> BacktestResult<Option<HistoricalMarket>> {
+    pub async fn fetch_market_by_id(
+        &self,
+        condition_id: &str,
+    ) -> BacktestResult<Option<HistoricalMarket>> {
         info!(condition_id, "Fetching market from Gamma API by ID");
 
         let url = format!("{}/markets/{}", GAMMA_BASE_URL, condition_id);
 
         let response = self.fetch_with_retry(&url).await?;
-        let market: GammaMarket = response
-            .json()
-            .await
-            .map_err(|e| BacktestError::Network(format!("Failed to parse market response: {}", e)))?;
+        let market: GammaMarket = response.json().await.map_err(|e| {
+            BacktestError::Network(format!("Failed to parse market response: {}", e))
+        })?;
 
         let historical_market = Self::convert_to_historical_market(market)?;
 
         // Cache if we got a valid market
         if let Some(ref hist_market) = historical_market {
-            self.store.insert_historical_market(hist_market.clone()).await?;
+            self.store
+                .insert_historical_market(hist_market.clone())
+                .await?;
         }
 
         Ok(historical_market)
@@ -185,13 +194,18 @@ impl GammaFetcher {
             })?;
 
         // Try batch approach first: single slug_contains query + local filtering
-        info!(coin, prefix, "Trying batch market discovery via slug_contains");
-        let batch_markets = self.fetch_expired_markets_batch(prefix, start_date, end_date).await?;
+        info!(
+            coin,
+            prefix, "Trying batch market discovery via slug_contains"
+        );
+        let batch_markets = self
+            .fetch_expired_markets_batch(prefix, start_date, end_date)
+            .await?;
 
         // Estimate expected markets: one per 15-min window in the date range
         let expected_count = (end_date - start_date).num_seconds() / 900;
-        let is_likely_complete = expected_count <= 0
-            || batch_markets.len() as i64 >= (expected_count * 4 / 5); // >= 80% of expected
+        let is_likely_complete =
+            expected_count <= 0 || batch_markets.len() as i64 >= (expected_count * 4 / 5); // >= 80% of expected
 
         if !batch_markets.is_empty() && is_likely_complete {
             info!(
@@ -211,7 +225,8 @@ impl GammaFetcher {
             expected = expected_count,
             "Batch may be truncated, falling back to concurrent slug enumeration"
         );
-        self.fetch_expired_markets_concurrent(coin, prefix, start_date, end_date).await
+        self.fetch_expired_markets_concurrent(coin, prefix, start_date, end_date)
+            .await
     }
 
     /// Batch discovery: fetch all markets matching the slug prefix in one call,
@@ -322,12 +337,7 @@ impl GammaFetcher {
 
         pb.finish_with_message(format!("{coin}: {found} found, {missed} missed"));
 
-        info!(
-            coin,
-            found,
-            missed,
-            "Discovery complete"
-        );
+        info!(coin, found, missed, "Discovery complete");
 
         Ok(markets)
     }
@@ -339,10 +349,12 @@ impl GammaFetcher {
 
         match self.fetch_with_retry(&url).await {
             Ok(response) => {
-                let market: GammaMarket = response
-                    .json()
-                    .await
-                    .map_err(|e| BacktestError::Network(format!("Failed to parse market response for slug {}: {}", slug, e)))?;
+                let market: GammaMarket = response.json().await.map_err(|e| {
+                    BacktestError::Network(format!(
+                        "Failed to parse market response for slug {}: {}",
+                        slug, e
+                    ))
+                })?;
                 Ok(Some(market))
             }
             Err(_) => Ok(None), // 404 or other error — slug doesn't exist
@@ -351,11 +363,15 @@ impl GammaFetcher {
 
     /// Convert Gamma API market to HistoricalMarket struct.
     /// Falls back to parsing start_date from slug timestamp if missing from API.
-    fn convert_to_historical_market(market: GammaMarket) -> BacktestResult<Option<HistoricalMarket>> {
+    fn convert_to_historical_market(
+        market: GammaMarket,
+    ) -> BacktestResult<Option<HistoricalMarket>> {
         // Parse start_date: API field → slug timestamp fallback
         let start_date = match market.start_date {
             Some(ref date_str) => DateTime::parse_from_rfc3339(date_str)
-                .map_err(|e| BacktestError::InvalidInput(format!("Failed to parse start_date: {}", e)))?
+                .map_err(|e| {
+                    BacktestError::InvalidInput(format!("Failed to parse start_date: {}", e))
+                })?
                 .with_timezone(&Utc),
             None => match parse_slug_timestamp(&market.slug) {
                 Some(ts) => ts,
@@ -368,7 +384,9 @@ impl GammaFetcher {
 
         let end_date = match market.end_date {
             Some(ref date_str) => DateTime::parse_from_rfc3339(date_str)
-                .map_err(|e| BacktestError::InvalidInput(format!("Failed to parse end_date: {}", e)))?
+                .map_err(|e| {
+                    BacktestError::InvalidInput(format!("Failed to parse end_date: {}", e))
+                })?
                 .with_timezone(&Utc),
             None => {
                 debug!(condition_id = %market.condition_id, "Skipping market with no end_date");
@@ -415,7 +433,10 @@ impl GammaFetcher {
                         return Ok(response);
                     } else {
                         let status = response.status();
-                        let error_text = response.text().await.unwrap_or_else(|_| "unknown".to_string());
+                        let error_text = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "unknown".to_string());
 
                         if attempts >= MAX_RETRIES {
                             return Err(BacktestError::Network(format!(
@@ -435,7 +456,10 @@ impl GammaFetcher {
                 }
                 Err(e) => {
                     if attempts >= MAX_RETRIES {
-                        return Err(BacktestError::Network(format!("Request failed after {} retries: {}", MAX_RETRIES, e)));
+                        return Err(BacktestError::Network(format!(
+                            "Request failed after {} retries: {}",
+                            MAX_RETRIES, e
+                        )));
                     }
 
                     warn!(
@@ -623,7 +647,10 @@ mod tests {
                 }
             }
             Err(e) => {
-                println!("Live API test failed (this is OK if API is unavailable): {}", e);
+                println!(
+                    "Live API test failed (this is OK if API is unavailable): {}",
+                    e
+                );
             }
         }
     }
@@ -638,20 +665,27 @@ mod tests {
         let end_date = Utc::now();
         let start_date = end_date - chrono::Duration::days(7);
 
-        let markets = fetcher.fetch_expired_markets("BTC", start_date, end_date, None).await;
+        let markets = fetcher
+            .fetch_expired_markets("BTC", start_date, end_date, None)
+            .await;
 
         match markets {
             Ok(data) => {
                 println!("Fetched {} expired BTC markets", data.len());
 
                 for market in data.iter().take(3) {
-                    println!("Expired market: {} - {} (ended: {})",
-                        market.market_id, market.slug, market.end_date);
+                    println!(
+                        "Expired market: {} - {} (ended: {})",
+                        market.market_id, market.slug, market.end_date
+                    );
                     assert!(market.end_date >= start_date && market.end_date <= end_date);
                 }
             }
             Err(e) => {
-                println!("Live API test failed (this is OK if API is unavailable): {}", e);
+                println!(
+                    "Live API test failed (this is OK if API is unavailable): {}",
+                    e
+                );
             }
         }
     }

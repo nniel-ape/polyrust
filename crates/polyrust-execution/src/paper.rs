@@ -9,8 +9,8 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use polyrust_core::error::{PolyError, Result};
-use polyrust_core::types::*;
 use polyrust_core::execution::{RedeemRequest, RedeemResult};
+use polyrust_core::types::*;
 
 /// Fill mode for paper trading orders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

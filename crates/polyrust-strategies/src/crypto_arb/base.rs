@@ -111,11 +111,7 @@ pub fn parse_slug_timestamp(slug: &str) -> Option<i64> {
     let last_segment = slug.rsplit('-').next()?;
     let ts: i64 = last_segment.parse().ok()?;
     // Sanity: must be a reasonable unix timestamp (after 2020)
-    if ts > 1_577_836_800 {
-        Some(ts)
-    } else {
-        None
-    }
+    if ts > 1_577_836_800 { Some(ts) } else { None }
 }
 
 /// Escape a string for safe inclusion in HTML content.
@@ -224,6 +220,10 @@ pub struct CryptoArbBase {
     /// to skip ExternalPrice events for coins where no market is near expiration.
     /// Updated on market discovered/expired.
     pub coin_nearest_expiry: RwLock<HashMap<String, DateTime<Utc>>>,
+    /// Atomic market reservations to prevent race conditions between strategies.
+    /// Holds a market_id → (mode, slot_count) mapping for markets currently being evaluated.
+    /// Protects the gap between exposure check and pending_orders.insert().
+    pub market_reservations: RwLock<HashMap<MarketId, (ArbitrageMode, usize)>>,
     /// Coins configured for this strategy.
     coins: HashSet<String>,
     /// Last event timestamp from the strategy context (simulated or real).
@@ -264,6 +264,7 @@ impl CryptoArbBase {
             stale_market_cooldowns: RwLock::new(HashMap::new()),
             tailend_skip_stats: std::sync::Mutex::new(HashMap::new()),
             coin_nearest_expiry: RwLock::new(HashMap::new()),
+            market_reservations: RwLock::new(HashMap::new()),
             coins,
             last_event_time: RwLock::new(Utc::now()),
         }
@@ -295,7 +296,6 @@ impl CryptoArbBase {
         source: &str,
         now: DateTime<Utc>,
     ) -> (Option<Decimal>, Vec<Action>) {
-
         // Record price history with source (keep last PRICE_HISTORY_SIZE entries).
         // Deduplicate: when multiple strategy handlers share this base, the same
         // ExternalPrice event triggers record_price once per handler. Skip the
@@ -351,6 +351,19 @@ impl CryptoArbBase {
             // Prune old boundary snapshots
             drop(boundaries);
             self.prune_boundary_snapshots(symbol, now).await;
+
+            // Boundary just captured — try upgrading Current→Exact for this coin's markets
+            self.try_upgrade_quality(symbol).await;
+        } else {
+            // Startup warm-up: try Historical upgrade during first ~10 price entries per coin.
+            // After warm-up, this path goes dormant to avoid per-tick overhead.
+            let history_len = {
+                let history = self.price_history.read().await;
+                history.get(symbol).map(|e| e.len()).unwrap_or(0)
+            };
+            if history_len <= 10 {
+                self.try_upgrade_quality(symbol).await;
+            }
         }
 
         // Promote any pending markets for this coin
@@ -365,21 +378,21 @@ impl CryptoArbBase {
     /// Get the latest price for a coin from price history.
     pub async fn get_latest_price(&self, coin: &str) -> Option<Decimal> {
         let history = self.price_history.read().await;
-        history
-            .get(coin)
-            .and_then(|h| h.back().map(|(_, p, _)| *p))
+        history.get(coin).and_then(|h| h.back().map(|(_, p, _)| *p))
     }
 
     /// Check if price has favored the given direction for at least `min_sustained_secs`.
     ///
     /// Returns true if for the last `min_sustained_secs`, all prices consistently
-    /// indicate the same outcome (above reference for Up, below for Down).
+    /// indicate the same outcome (above reference for Up, below for Down),
+    /// AND there are at least `min_ticks` entries in the window.
     pub async fn check_sustained_direction(
         &self,
         coin: &str,
         reference_price: Decimal,
         predicted: OutcomeSide,
         min_sustained_secs: u64,
+        min_ticks: usize,
         now: DateTime<Utc>,
     ) -> bool {
         let history = self.price_history.read().await;
@@ -392,24 +405,26 @@ impl CryptoArbBase {
         // Get all entries within the sustained window
         let window_entries: Vec<_> = entries.iter().filter(|(ts, _, _)| *ts >= cutoff).collect();
 
-        // Need at least 1 entry to confirm direction
-        if window_entries.is_empty() {
+        // Need at least min_ticks entries to confirm direction
+        if window_entries.len() < min_ticks {
             debug!(
                 coin = %coin,
+                entries = window_entries.len(),
+                min_ticks = min_ticks,
                 min_sustained_secs = min_sustained_secs,
-                "Sustained direction check failed: no entries in window"
+                "Sustained direction check failed: insufficient ticks in window"
             );
             return false;
         }
 
         // Check if ALL entries in the window favor the predicted direction
         match predicted {
-            OutcomeSide::Up | OutcomeSide::Yes => {
-                window_entries.iter().all(|(_, price, _)| *price > reference_price)
-            }
-            OutcomeSide::Down | OutcomeSide::No => {
-                window_entries.iter().all(|(_, price, _)| *price < reference_price)
-            }
+            OutcomeSide::Up | OutcomeSide::Yes => window_entries
+                .iter()
+                .all(|(_, price, _)| *price > reference_price),
+            OutcomeSide::Down | OutcomeSide::No => window_entries
+                .iter()
+                .all(|(_, price, _)| *price < reference_price),
         }
     }
 
@@ -465,7 +480,12 @@ impl CryptoArbBase {
     ///
     /// Returns `Some(change_pct)` if the absolute percentage change exceeds
     /// `spike.threshold_pct`, otherwise `None`.
-    pub async fn detect_spike(&self, coin: &str, current_price: Decimal, now: DateTime<Utc>) -> Option<Decimal> {
+    pub async fn detect_spike(
+        &self,
+        coin: &str,
+        current_price: Decimal,
+        now: DateTime<Utc>,
+    ) -> Option<Decimal> {
         let history = self.price_history.read().await;
         let entries = history.get(coin)?;
         let window = chrono::Duration::seconds(self.config.spike.window_secs as i64);
@@ -641,6 +661,120 @@ impl CryptoArbBase {
         });
     }
 
+    /// Retroactively upgrade reference quality for active markets of a coin.
+    ///
+    /// Called after `record_price()` captures a boundary snapshot or during
+    /// startup warm-up (first ~10 price entries). Upgrades markets that were
+    /// activated with `Current` quality to `Exact` (via boundary snapshot) or
+    /// `Historical` (via price history lookup).
+    ///
+    /// Lock safety: reads boundary_prices and price_history first, drops those
+    /// locks, then acquires active_markets write lock.
+    pub async fn try_upgrade_quality(&self, coin: &str) {
+        // 1. Snapshot boundary prices for this coin (read lock, then drop)
+        let boundary_snapshot: Vec<(String, BoundarySnapshot)> = {
+            let boundaries = self.boundary_prices.read().await;
+            let prefix = format!("{coin}-");
+            boundaries
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+
+        // 2. Clone price history for this coin (read lock, then drop)
+        let history_entries = {
+            let history = self.price_history.read().await;
+            history.get(coin).cloned()
+        };
+
+        // 3. Write-lock active_markets and upgrade qualifying entries
+        let mut markets = self.active_markets.write().await;
+        for mwr in markets.values_mut() {
+            if mwr.coin != coin {
+                continue;
+            }
+
+            // Already at best quality — nothing to upgrade
+            if mwr.reference_quality == ReferenceQuality::Exact {
+                continue;
+            }
+
+            let key = format!("{coin}-{}", mwr.window_ts);
+
+            // Try boundary snapshot → Exact upgrade
+            if let Some((_, snap)) = boundary_snapshot.iter().find(|(k, _)| k == &key) {
+                let snap_staleness = snap.timestamp.timestamp().abs_diff(mwr.window_ts);
+                if snap_staleness <= BOUNDARY_TOLERANCE_SECS as u64 {
+                    let old_quality = mwr.reference_quality;
+                    let old_price = mwr.reference_price;
+                    mwr.reference_quality = ReferenceQuality::Exact;
+                    mwr.reference_price = snap.price;
+                    info!(
+                        coin = %coin,
+                        market = %mwr.market.id,
+                        old_quality = ?old_quality,
+                        new_quality = ?ReferenceQuality::Exact,
+                        old_price = %old_price,
+                        new_price = %snap.price,
+                        "Retroactively upgraded reference quality (boundary snapshot)"
+                    );
+                    continue;
+                }
+            }
+
+            // Only try Historical upgrade if currently at Current
+            if mwr.reference_quality != ReferenceQuality::Current {
+                continue;
+            }
+
+            // Try historical price lookup → Historical upgrade
+            if let Some(entries) = &history_entries {
+                let target = DateTime::from_timestamp(mwr.window_ts, 0);
+                if let Some(target_dt) = target {
+                    let mut best: Option<(u64, Decimal, bool)> = None;
+                    for (ts, price, source) in entries {
+                        let staleness = (*ts - target_dt).num_seconds().unsigned_abs();
+                        if staleness >= 30 {
+                            continue;
+                        }
+                        let is_preferred = source.eq_ignore_ascii_case("chainlink")
+                            || source.eq_ignore_ascii_case("binance-futures");
+                        let is_better = match best {
+                            None => true,
+                            Some((prev_stale, _, prev_pref)) => {
+                                if is_preferred && !prev_pref && staleness < prev_stale + 5 {
+                                    true
+                                } else if !is_preferred && prev_pref && prev_stale < staleness + 5 {
+                                    false
+                                } else {
+                                    staleness < prev_stale
+                                }
+                            }
+                        };
+                        if is_better {
+                            best = Some((staleness, *price, is_preferred));
+                        }
+                    }
+                    if let Some((staleness, price, _)) = best {
+                        let old_price = mwr.reference_price;
+                        mwr.reference_quality = ReferenceQuality::Historical(staleness);
+                        mwr.reference_price = price;
+                        info!(
+                            coin = %coin,
+                            market = %mwr.market.id,
+                            old_quality = ?ReferenceQuality::Current,
+                            new_quality = ?ReferenceQuality::Historical(staleness),
+                            old_price = %old_price,
+                            new_price = %price,
+                            "Retroactively upgraded reference quality (historical lookup)"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Market lifecycle (discovery, promotion, expiry)
     // -------------------------------------------------------------------------
@@ -708,7 +842,8 @@ impl CryptoArbBase {
         drop(md);
 
         let now = ctx.now().await;
-        self.activate_market(market, &coin, current_price, now).await
+        self.activate_market(market, &coin, current_price, now)
+            .await
     }
 
     /// Handle a market expiration. Removes from active markets, resolves open positions.
@@ -734,6 +869,12 @@ impl CryptoArbBase {
             "Market expired, removing from active markets"
         );
 
+        // Clean up any stale reservation for this market
+        {
+            let mut reservations = self.market_reservations.write().await;
+            reservations.remove(market_id);
+        }
+
         // Resolve any remaining positions
         let removed = {
             let mut positions = self.positions.write().await;
@@ -744,17 +885,12 @@ impl CryptoArbBase {
             let current_crypto = self.get_latest_price(&market.coin).await;
             for pos in &positions {
                 let won = match (&pos.side, current_crypto) {
-                    (OutcomeSide::Up | OutcomeSide::Yes, Some(cp)) => {
-                        cp > pos.reference_price
-                    }
-                    (OutcomeSide::Down | OutcomeSide::No, Some(cp)) => {
-                        cp <= pos.reference_price
-                    }
+                    (OutcomeSide::Up | OutcomeSide::Yes, Some(cp)) => cp > pos.reference_price,
+                    (OutcomeSide::Down | OutcomeSide::No, Some(cp)) => cp <= pos.reference_price,
                     _ => false,
                 };
                 let pnl = if won {
-                    (Decimal::ONE - pos.entry_price) * pos.size
-                        - (pos.estimated_fee * pos.size)
+                    (Decimal::ONE - pos.entry_price) * pos.size - (pos.estimated_fee * pos.size)
                 } else {
                     -(pos.entry_price * pos.size) - (pos.estimated_fee * pos.size)
                 };
@@ -819,9 +955,9 @@ impl CryptoArbBase {
             .or_else(|| parse_slug_timestamp(&market.slug))
             .unwrap_or(boundary_ts);
 
-        let (reference_price, reference_quality) =
-            self.find_best_reference(coin, window_ts, current_price)
-                .await;
+        let (reference_price, reference_quality) = self
+            .find_best_reference(coin, window_ts, current_price)
+            .await;
 
         let mwr = MarketWithReference {
             market: market.clone(),
@@ -829,6 +965,7 @@ impl CryptoArbBase {
             reference_quality,
             discovery_time: now,
             coin: coin.to_string(),
+            window_ts,
         };
 
         info!(
@@ -924,9 +1061,11 @@ impl CryptoArbBase {
         let positions = self.positions.read().await;
         let pending = self.pending_orders.read().await;
         let limits = self.open_limit_orders.read().await;
+        let reservations = self.market_reservations.read().await;
 
         let total_positions: usize = positions.values().map(|v| v.len()).sum();
-        let total = total_positions + pending.len() + limits.len();
+        let reserved_slots: usize = reservations.values().map(|(_, slots)| slots).sum();
+        let total = total_positions + pending.len() + limits.len() + reserved_slots;
 
         total < self.config.max_positions
     }
@@ -935,11 +1074,7 @@ impl CryptoArbBase {
     ///
     /// Returns `true` if the size is valid (>= min_order_size), `false` otherwise.
     /// Logs a warning if the size is below minimum to help diagnose config issues.
-    pub async fn validate_min_order_size(
-        &self,
-        market_id: &MarketId,
-        size: Decimal,
-    ) -> bool {
+    pub async fn validate_min_order_size(&self, market_id: &MarketId, size: Decimal) -> bool {
         let markets = self.active_markets.read().await;
         let market = match markets.get(market_id) {
             Some(m) => &m.market,
@@ -959,7 +1094,8 @@ impl CryptoArbBase {
         }
     }
 
-    /// Check if market already has a position, pending order, or open limit order.
+    /// Check if market already has a position, pending order, open limit order,
+    /// or active reservation.
     pub async fn has_market_exposure(&self, market_id: &MarketId) -> bool {
         let positions = self.positions.read().await;
         if positions.contains_key(market_id) {
@@ -976,7 +1112,66 @@ impl CryptoArbBase {
             return true;
         }
 
+        let reservations = self.market_reservations.read().await;
+        if reservations.contains_key(market_id) {
+            return true;
+        }
+
         false
+    }
+
+    /// Atomically check exposure + position limits and reserve a market for trading.
+    ///
+    /// Returns `true` if the reservation succeeded (no existing exposure,
+    /// position limit not exceeded). The reservation prevents other strategy
+    /// tasks from entering the same market concurrently.
+    ///
+    /// `slot_count` is the number of position slots this trade will use
+    /// (1 for TailEnd, 2 for TwoSided).
+    pub async fn try_reserve_market(
+        &self,
+        market_id: &MarketId,
+        mode: ArbitrageMode,
+        slot_count: usize,
+    ) -> bool {
+        // Acquire all locks in a consistent order to prevent deadlocks
+        let positions = self.positions.read().await;
+        let pending = self.pending_orders.read().await;
+        let limits = self.open_limit_orders.read().await;
+        let mut reservations = self.market_reservations.write().await;
+
+        // Check no existing exposure (same logic as has_market_exposure, inline)
+        if positions.contains_key(market_id)
+            || pending.values().any(|p| &p.market_id == market_id)
+            || limits.values().any(|lo| &lo.market_id == market_id)
+            || reservations.contains_key(market_id)
+        {
+            return false;
+        }
+
+        // Check position limit (reservations track slot counts)
+        let total_positions: usize = positions.values().map(|v| v.len()).sum();
+        let reserved_slots: usize = reservations.values().map(|(_, slots)| slots).sum();
+        let total = total_positions + pending.len() + limits.len() + reserved_slots;
+        if total + slot_count > self.config.max_positions {
+            return false;
+        }
+
+        reservations.insert(market_id.clone(), (mode, slot_count));
+        true
+    }
+
+    /// Release a market reservation (called on early-exit paths before order placement).
+    pub async fn release_reservation(&self, market_id: &MarketId) {
+        let mut reservations = self.market_reservations.write().await;
+        reservations.remove(market_id);
+    }
+
+    /// Consume a market reservation (called just before inserting into pending_orders).
+    /// This transfers the "slot" from reservations to pending_orders atomically.
+    pub async fn consume_reservation(&self, market_id: &MarketId) {
+        let mut reservations = self.market_reservations.write().await;
+        reservations.remove(market_id);
     }
 
     // -------------------------------------------------------------------------
@@ -1047,10 +1242,13 @@ impl CryptoArbBase {
         // Read time_remaining from active_markets, then drop the lock before
         // acquiring price_history (via get_latest_price) to avoid inconsistent
         // lock ordering with record_price which acquires them in reverse order.
-        let time_remaining = {
+        let (time_remaining, neg_risk) = {
             let markets = self.active_markets.read().await;
             let market = markets.get(&pos.market_id)?;
-            market.market.seconds_remaining_at(now)
+            (
+                market.market.seconds_remaining_at(now),
+                market.market.neg_risk,
+            )
         };
 
         // Don't trigger stop-loss when time remaining is below configured threshold
@@ -1131,7 +1329,7 @@ impl CryptoArbBase {
                 pos.size,
                 OrderSide::Sell,
                 OrderType::Fok,
-                false, // neg_risk
+                neg_risk,
             )
             .with_tick_size(pos.tick_size)
             .with_fee_rate_bps(pos.fee_rate_bps);
@@ -1232,9 +1430,18 @@ impl CryptoArbBase {
 
     /// Handle a rejected stop-loss sell order.
     ///
-    /// If the reason indicates a permanent balance/allowance issue, removes the stale
-    /// position to prevent retry loops. Otherwise applies a cooldown for transient errors.
-    pub async fn handle_stop_loss_rejection(&self, token_id: &TokenId, reason: &str, mode_name: &str) {
+    /// Balance/allowance failures are treated as retryable: they are often caused by
+    /// short-lived CLOB cache lag right after fills. Keep the position and retry later.
+    /// Other failures are also cooled down as transient.
+    pub async fn handle_stop_loss_rejection(
+        &self,
+        token_id: &TokenId,
+        reason: &str,
+        mode_name: &str,
+    ) {
+        const BALANCE_ALLOWANCE_RETRY_COOLDOWN_SECS: u64 = 10;
+        const TRANSIENT_RETRY_COOLDOWN_SECS: u64 = 30;
+
         let mut pending_sl = self.pending_stop_loss.write().await;
         pending_sl.remove(token_id);
 
@@ -1243,21 +1450,12 @@ impl CryptoArbBase {
                 token_id = %token_id,
                 mode = mode_name,
                 reason = %reason,
-                "Removing stale position: balance/allowance insufficient"
+                cooldown_secs = BALANCE_ALLOWANCE_RETRY_COOLDOWN_SECS,
+                "Stop-loss sell rejected (balance/allowance), keeping position and scheduling retry"
             );
             drop(pending_sl);
-            if let Some(pos) = self.remove_position_by_token(token_id).await {
-                let cooldown = self.config.stop_loss.stale_market_cooldown_secs;
-                self.record_stale_market_cooldown(&pos.market_id, cooldown)
-                    .await;
-                info!(
-                    token_id = %token_id,
-                    market = %pos.market_id,
-                    mode = mode_name,
-                    cooldown_secs = cooldown,
-                    "Stale position removed after stop-loss rejection, market cooldown applied"
-                );
-            }
+            self.record_stop_loss_cooldown(token_id, BALANCE_ALLOWANCE_RETRY_COOLDOWN_SECS)
+                .await;
         } else {
             warn!(
                 token_id = %token_id,
@@ -1266,7 +1464,8 @@ impl CryptoArbBase {
                 "Stop-loss sell rejected (transient), cooldown applied"
             );
             drop(pending_sl);
-            self.record_stop_loss_cooldown(token_id, 30).await;
+            self.record_stop_loss_cooldown(token_id, TRANSIENT_RETRY_COOLDOWN_SECS)
+                .await;
         }
     }
 
@@ -1301,11 +1500,25 @@ impl CryptoArbBase {
                         order_id = %order_id,
                         market = %lo.market_id,
                         mode = %lo.mode,
-                        "Detected matched fill from cancel failure"
+                        "Detected matched fill from cancel failure — creating position"
                     );
+                    let now = self.event_time().await;
+                    let position = ArbitragePosition::from_limit_order(
+                        &lo,
+                        lo.price,
+                        lo.size,
+                        Some(order_id.to_string()),
+                        now,
+                    );
+                    self.record_position(position).await;
                     actions.push(Action::EmitSignal {
                         signal_type: "matched-fill".to_string(),
-                        payload: serde_json::json!({ "market_id": lo.market_id }),
+                        payload: serde_json::json!({
+                            "order_id": order_id,
+                            "market_id": lo.market_id,
+                            "token_id": lo.token_id,
+                            "mode": lo.mode.to_string(),
+                        }),
                     });
                 }
                 return (true, actions);
@@ -1322,6 +1535,77 @@ impl CryptoArbBase {
             return (true, vec![]);
         }
         (false, vec![])
+    }
+
+    /// Reconcile tracked limit orders against the CLOB's actual open order set.
+    ///
+    /// Orders in `open_limit_orders` that are NOT in `clob_open_ids` (and not
+    /// already cancel_pending) are assumed to have been filled by a counterparty.
+    /// For each detected fill, creates an `ArbitragePosition` and emits a
+    /// "reconciled-fill" signal.
+    ///
+    /// Returns actions (signals) for each detected fill.
+    pub async fn reconcile_limit_orders(
+        &self,
+        clob_open_ids: &HashSet<String>,
+    ) -> Vec<Action> {
+        let mut limits = self.open_limit_orders.write().await;
+        let mut actions = Vec::new();
+        let now = self.event_time().await;
+
+        // Collect order IDs that are missing from the CLOB (presumably filled)
+        let missing: Vec<String> = limits
+            .keys()
+            .filter(|oid| {
+                let lo = &limits[*oid];
+                !lo.cancel_pending && !clob_open_ids.contains(*oid)
+            })
+            .cloned()
+            .collect();
+
+        for order_id in missing {
+            let lo = limits.remove(&order_id).unwrap();
+            info!(
+                order_id = %order_id,
+                market = %lo.market_id,
+                token = %lo.token_id,
+                price = %lo.price,
+                size = %lo.size,
+                mode = %lo.mode,
+                "Reconciled fill: order missing from CLOB, creating position"
+            );
+
+            let position = ArbitragePosition::from_limit_order(
+                &lo,
+                lo.price,
+                lo.size,
+                Some(order_id.clone()),
+                now,
+            );
+            // Must drop limits lock before calling record_position (which acquires positions lock)
+            // So we collect positions and record after the loop
+            actions.push((position, order_id, lo));
+        }
+        drop(limits);
+
+        let mut result_actions = Vec::new();
+        for (position, order_id, lo) in actions {
+            self.record_position(position).await;
+            result_actions.push(Action::EmitSignal {
+                signal_type: "reconciled-fill".to_string(),
+                payload: serde_json::json!({
+                    "order_id": order_id,
+                    "market_id": lo.market_id,
+                    "token_id": lo.token_id,
+                    "price": lo.price.to_string(),
+                    "size": lo.size.to_string(),
+                    "side": format!("{:?}", lo.side),
+                    "mode": lo.mode.to_string(),
+                }),
+            });
+        }
+
+        result_actions
     }
 
     /// Cancel GTC limit orders that have been open longer than `max_age_secs`.
@@ -1416,13 +1700,7 @@ impl CryptoArbBase {
         let active_count = self.active_markets.read().await.len();
         let pending_count = self.pending_discovery.read().await.len();
         let coins_with_prices = self.price_history.read().await.len();
-        let open_positions: usize = self
-            .positions
-            .read()
-            .await
-            .values()
-            .map(|v| v.len())
-            .sum();
+        let open_positions: usize = self.positions.read().await.values().map(|v| v.len()).sum();
         let pending_orders = self.pending_orders.read().await.len();
 
         // Drain TailEnd skip stats for this period
@@ -1441,10 +1719,7 @@ impl CryptoArbBase {
         );
 
         if !skip_stats.is_empty() {
-            let summary: Vec<String> = skip_stats
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect();
+            let summary: Vec<String> = skip_stats.iter().map(|(k, v)| format!("{k}={v}")).collect();
             info!(
                 stats = %summary.join(", "),
                 "TailEnd skip stats (last 60s)"

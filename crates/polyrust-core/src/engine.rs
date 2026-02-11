@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, warn};
 
 /// Commands sent from the engine to market data feeds (e.g., ClobFeed).
@@ -195,8 +195,7 @@ impl Engine {
             tokio::spawn(async move {
                 // Deferred removal: keep expired markets in context for 30s so
                 // in-flight fill responses and ClaimMonitor can still look them up.
-                let mut deferred_removals: StdHashMap<MarketId, DateTime<Utc>> =
-                    StdHashMap::new();
+                let mut deferred_removals: StdHashMap<MarketId, DateTime<Utc>> = StdHashMap::new();
                 const DEFER_SECS: i64 = 30;
 
                 loop {
@@ -254,8 +253,7 @@ impl Engine {
                                 md.orderbooks.remove(&token_b);
                             }
                             drop(md);
-                            let deadline =
-                                Utc::now() + chrono::Duration::seconds(DEFER_SECS);
+                            let deadline = Utc::now() + chrono::Duration::seconds(DEFER_SECS);
                             deferred_removals.insert(id.clone(), deadline);
                             debug!(
                                 market_id = %id,
@@ -269,6 +267,54 @@ impl Engine {
                                 .insert(snapshot.token_id.clone(), snapshot.clone());
                         }
                         _ => {}
+                    }
+                }
+            })
+        };
+
+        // Spawn order reconciliation task (detects GTC fills by comparing CLOB
+        // open orders against strategy-tracked orders)
+        let reconcile_handle = {
+            let interval_secs = self.config.engine.reconcile_interval_secs;
+            let execution = Arc::clone(&self.execution);
+            let event_bus = self.event_bus.clone();
+            let mut shutdown_rx = self.event_bus.subscribe();
+            tokio::spawn(async move {
+                if interval_secs == 0 {
+                    // Reconciliation disabled — wait for shutdown
+                    loop {
+                        match shutdown_rx.recv().await {
+                            Some(Event::System(SystemEvent::EngineStopping)) | None => break,
+                            _ => {}
+                        }
+                    }
+                    return;
+                }
+                let mut interval = tokio::time::interval(
+                    std::time::Duration::from_secs(interval_secs),
+                );
+                // Don't fire immediately on startup (let orders settle first)
+                interval.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            match execution.get_open_orders().await {
+                                Ok(orders) => {
+                                    let ids: Vec<String> = orders.iter().map(|o| o.id.clone()).collect();
+                                    event_bus.publish(Event::System(
+                                        SystemEvent::OpenOrderSnapshot(ids),
+                                    ));
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "Order reconciliation: failed to fetch open orders");
+                                }
+                            }
+                        }
+                        event = shutdown_rx.recv() => {
+                            if matches!(event, Some(Event::System(SystemEvent::EngineStopping)) | None) {
+                                break;
+                            }
+                        }
                     }
                 }
             })
@@ -313,7 +359,9 @@ impl Engine {
                                 .await
                                 {
                                     let msg = e.to_string();
-                                    if msg.contains("not enough balance") || msg.contains("allowance") {
+                                    if msg.contains("not enough balance")
+                                        || msg.contains("allowance")
+                                    {
                                         warn!(
                                             strategy = %name,
                                             error = %e,
@@ -392,6 +440,12 @@ impl Engine {
                 error!(error = %e, "context-update task panicked during shutdown");
             }
         }
+        match reconcile_handle.await {
+            Ok(()) => {}
+            Err(e) => {
+                error!(error = %e, "reconciliation task panicked during shutdown");
+            }
+        }
 
         info!("engine stopped");
         Ok(())
@@ -438,7 +492,9 @@ pub async fn execute_action(
                         let mut bal = context.balance.write().await;
                         bal.available_usdc = balance;
                     } else {
-                        warn!("Failed to sync balance after order placement - shared context may have stale data");
+                        warn!(
+                            "Failed to sync balance after order placement - shared context may have stale data"
+                        );
                     }
                     if result.success {
                         event_bus.publish(Event::OrderUpdate(OrderEvent::Placed(result.clone())));
@@ -508,11 +564,14 @@ pub async fn execute_action(
                         let mut bal = context.balance.write().await;
                         bal.available_usdc = balance;
                     } else {
-                        warn!("Failed to sync balance after batch order placement - shared context may have stale data");
+                        warn!(
+                            "Failed to sync balance after batch order placement - shared context may have stale data"
+                        );
                     }
                     for result in results {
                         if result.success {
-                            event_bus.publish(Event::OrderUpdate(OrderEvent::Placed(result.clone())));
+                            event_bus
+                                .publish(Event::OrderUpdate(OrderEvent::Placed(result.clone())));
 
                             // If order was immediately filled, publish Filled event for trade persistence
                             if result.status.as_deref() == Some("Filled")
@@ -572,37 +631,39 @@ pub async fn execute_action(
                 }
             }
         }
-        Action::CancelOrder(id) => {
-            match execution.cancel_order(id).await {
-                Ok(()) => {
-                    if let Ok(balance) = execution.get_balance().await {
-                        let mut bal = context.balance.write().await;
-                        bal.available_usdc = balance;
-                    } else {
-                        warn!("Failed to sync balance after order cancellation - shared context may have stale data");
-                    }
-                    event_bus.publish(Event::OrderUpdate(OrderEvent::Cancelled(id.clone())));
-                }
-                Err(e) => {
+        Action::CancelOrder(id) => match execution.cancel_order(id).await {
+            Ok(()) => {
+                if let Ok(balance) = execution.get_balance().await {
+                    let mut bal = context.balance.write().await;
+                    bal.available_usdc = balance;
+                } else {
                     warn!(
-                        order_id = %id,
-                        error = %e,
-                        "Cancel order failed (order may have been matched)"
+                        "Failed to sync balance after order cancellation - shared context may have stale data"
                     );
-                    event_bus.publish(Event::OrderUpdate(OrderEvent::CancelFailed {
-                        order_id: id.clone(),
-                        reason: e.to_string(),
-                    }));
                 }
+                event_bus.publish(Event::OrderUpdate(OrderEvent::Cancelled(id.clone())));
             }
-        }
+            Err(e) => {
+                warn!(
+                    order_id = %id,
+                    error = %e,
+                    "Cancel order failed (order may have been matched)"
+                );
+                event_bus.publish(Event::OrderUpdate(OrderEvent::CancelFailed {
+                    order_id: id.clone(),
+                    reason: e.to_string(),
+                }));
+            }
+        },
         Action::CancelAllOrders => {
             execution.cancel_all_orders().await?;
             if let Ok(balance) = execution.get_balance().await {
                 let mut bal = context.balance.write().await;
                 bal.available_usdc = balance;
             } else {
-                warn!("Failed to sync balance after cancel all orders - shared context may have stale data");
+                warn!(
+                    "Failed to sync balance after cancel all orders - shared context may have stale data"
+                );
             }
         }
         Action::Log { level, message } => match level {

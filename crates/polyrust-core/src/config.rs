@@ -24,6 +24,11 @@ pub struct EngineConfig {
     pub event_bus_capacity: usize,
     #[serde(default = "default_health_interval")]
     pub health_check_interval_secs: u64,
+    /// Order reconciliation interval in seconds (0 = disabled). Default: 15.
+    /// Periodically polls open orders from the execution backend and publishes
+    /// OpenOrderSnapshot events so strategies can detect filled GTC orders.
+    #[serde(default = "default_reconcile_interval")]
+    pub reconcile_interval_secs: u64,
 }
 
 impl Default for EngineConfig {
@@ -31,6 +36,7 @@ impl Default for EngineConfig {
         Self {
             event_bus_capacity: default_event_bus_capacity(),
             health_check_interval_secs: default_health_interval(),
+            reconcile_interval_secs: default_reconcile_interval(),
         }
     }
 }
@@ -40,6 +46,9 @@ fn default_event_bus_capacity() -> usize {
 }
 fn default_health_interval() -> u64 {
     30
+}
+fn default_reconcile_interval() -> u64 {
+    15
 }
 
 #[derive(Clone, Deserialize)]
@@ -53,10 +62,20 @@ pub struct PolymarketConfig {
     /// Tried in order with automatic failover.
     #[serde(default = "default_rpc_urls")]
     pub rpc_urls: Vec<String>,
+    /// Relayer API URL for gasless transactions.
+    /// Defaults to "https://relayer-v2.polymarket.com".
+    pub relayer_url: Option<String>,
+    /// Route Safe transactions through Polymarket's gas-sponsored relayer.
+    /// Defaults to true when builder credentials are present.
+    #[serde(default = "default_use_relayer")]
+    pub use_relayer: bool,
 }
 
 fn default_rpc_urls() -> Vec<String> {
     vec!["https://polygon-rpc.com".to_string()]
+}
+fn default_use_relayer() -> bool {
+    true
 }
 
 impl Default for PolymarketConfig {
@@ -68,6 +87,8 @@ impl Default for PolymarketConfig {
             builder_api_secret: None,
             builder_api_passphrase: None,
             rpc_urls: default_rpc_urls(),
+            relayer_url: None,
+            use_relayer: default_use_relayer(),
         }
     }
 }
@@ -78,7 +99,7 @@ impl Serialize for PolymarketConfig {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("PolymarketConfig", 6)?;
+        let mut s = serializer.serialize_struct("PolymarketConfig", 8)?;
         s.serialize_field(
             "private_key",
             &self.private_key.as_ref().map(|_| "[REDACTED]"),
@@ -97,6 +118,8 @@ impl Serialize for PolymarketConfig {
             &self.builder_api_passphrase.as_ref().map(|_| "[REDACTED]"),
         )?;
         s.serialize_field("rpc_urls", &self.rpc_urls)?;
+        s.serialize_field("relayer_url", &self.relayer_url)?;
+        s.serialize_field("use_relayer", &self.use_relayer)?;
         s.end()
     }
 }
@@ -122,6 +145,8 @@ impl std::fmt::Debug for PolymarketConfig {
                 &self.builder_api_passphrase.as_ref().map(|_| "[REDACTED]"),
             )
             .field("rpc_urls", &self.rpc_urls)
+            .field("relayer_url", &self.relayer_url)
+            .field("use_relayer", &self.use_relayer)
             .finish()
     }
 }
@@ -288,6 +313,14 @@ impl Config {
         }
         if let Ok(v) = std::env::var("POLY_PAPER_TRADING") {
             self.paper.enabled = v == "true" || v == "1";
+        }
+        // POLY_RELAYER_URL — custom relayer endpoint
+        if let Ok(v) = std::env::var("POLY_RELAYER_URL") {
+            self.polymarket.relayer_url = Some(v);
+        }
+        // POLY_USE_RELAYER — enable/disable relayer
+        if let Ok(v) = std::env::var("POLY_USE_RELAYER") {
+            self.polymarket.use_relayer = v == "true" || v == "1";
         }
         // POLY_RPC_URLS — comma-separated list of RPC endpoints
         if let Ok(urls) = std::env::var("POLY_RPC_URLS") {

@@ -267,7 +267,14 @@ impl ChainlinkHistoricalClient {
         }
 
         // --- Select the closest round ---
-        self.select_closest(coin, target_timestamp, state.before, state.after, decimals, rounds_checked)
+        self.select_closest(
+            coin,
+            target_timestamp,
+            state.before,
+            state.after,
+            decimals,
+            rounds_checked,
+        )
     }
 
     // -- Private helpers ----------------------------------------------------
@@ -444,7 +451,10 @@ impl ChainlinkHistoricalClient {
         }
         let decimals = result[31]; // last byte of 32-byte uint8 slot
 
-        self.decimals_cache.write().unwrap().insert(coin.to_string(), decimals);
+        self.decimals_cache
+            .write()
+            .unwrap()
+            .insert(coin.to_string(), decimals);
         Ok(decimals)
     }
 
@@ -568,26 +578,24 @@ impl ChainlinkHistoricalClient {
         }
 
         // slot 0 — roundId (uint80, fits in u128)
-        let round_id = u128::from_be_bytes(
-            data[16..32].try_into().expect("16 bytes for u128"),
-        );
+        let round_id = u128::from_be_bytes(data[16..32].try_into().expect("16 bytes for u128"));
 
         // slot 1 — answer (int256; for prices always positive, fits in i128)
-        let answer = i128::from_be_bytes(
-            data[48..64].try_into().expect("16 bytes for i128"),
-        );
+        let answer = i128::from_be_bytes(data[48..64].try_into().expect("16 bytes for i128"));
 
         // slot 3 — updatedAt (uint256, fits in u64)
-        let updated_at = u64::from_be_bytes(
-            data[120..128].try_into().expect("8 bytes for u64"),
-        );
+        let updated_at = u64::from_be_bytes(data[120..128].try_into().expect("8 bytes for u64"));
 
         // Sanity: zero timestamp means the round doesn't exist
         if updated_at == 0 {
-            return Err(ChainlinkError::Rpc("round not found (zero timestamp)".into()));
+            return Err(ChainlinkError::Rpc(
+                "round not found (zero timestamp)".into(),
+            ));
         }
         if answer <= 0 {
-            return Err(ChainlinkError::Decode("invalid price (non-positive answer)".into()));
+            return Err(ChainlinkError::Decode(
+                "invalid price (non-positive answer)".into(),
+            ));
         }
 
         Ok(RoundData {
@@ -755,7 +763,10 @@ mod tests {
 
         let price = ChainlinkHistoricalClient::raw_to_decimal(rd.answer, decimals);
         assert!(price > Decimal::new(1_000, 0), "BTC price {price} too low");
-        assert!(price < Decimal::new(1_000_000, 0), "BTC price {price} too high");
+        assert!(
+            price < Decimal::new(1_000_000, 0),
+            "BTC price {price} too high"
+        );
 
         // Timestamp should be recent (within last hour)
         let now = std::time::SystemTime::now()
@@ -768,7 +779,10 @@ mod tests {
             now - rd.updated_at
         );
 
-        println!("BTC latest: ${price} at ts={} (round_id={})", rd.updated_at, rd.round_id);
+        println!(
+            "BTC latest: ${price} at ts={} (round_id={})",
+            rd.updated_at, rd.round_id
+        );
     }
 
     #[tokio::test]
@@ -781,7 +795,10 @@ mod tests {
         let rd = client.call_latest_round_data("ETH").await.unwrap();
         let price = ChainlinkHistoricalClient::raw_to_decimal(rd.answer, decimals);
         assert!(price > Decimal::new(100, 0), "ETH price {price} too low");
-        assert!(price < Decimal::new(100_000, 0), "ETH price {price} too high");
+        assert!(
+            price < Decimal::new(100_000, 0),
+            "ETH price {price} too high"
+        );
 
         println!("ETH latest: ${price} at ts={}", rd.updated_at);
     }
@@ -794,7 +811,10 @@ mod tests {
         let decimals = client.fetch_decimals("SOL").await.unwrap();
         let price = ChainlinkHistoricalClient::raw_to_decimal(rd.answer, decimals);
         assert!(price > Decimal::new(1, 0), "SOL price {price} too low");
-        assert!(price < Decimal::new(10_000, 0), "SOL price {price} too high");
+        assert!(
+            price < Decimal::new(10_000, 0),
+            "SOL price {price} too high"
+        );
 
         println!("SOL latest: ${price} at ts={}", rd.updated_at);
     }
@@ -817,8 +837,16 @@ mod tests {
             .unwrap();
 
         // Sanity checks
-        assert!(price.price > Decimal::new(1_000, 0), "BTC price {0} too low", price.price);
-        assert!(price.price < Decimal::new(1_000_000, 0), "BTC price {0} too high", price.price);
+        assert!(
+            price.price > Decimal::new(1_000, 0),
+            "BTC price {0} too low",
+            price.price
+        );
+        assert!(
+            price.price < Decimal::new(1_000_000, 0),
+            "BTC price {0} too high",
+            price.price
+        );
 
         // The returned timestamp should be within ~60s of target
         let diff = price.timestamp.abs_diff(target);
@@ -885,7 +913,10 @@ mod tests {
                 price.price, diff, price.decimals, price.round_id
             );
 
-            assert!(price.price > Decimal::ZERO, "{coin} price should be positive");
+            assert!(
+                price.price > Decimal::ZERO,
+                "{coin} price should be positive"
+            );
             assert!(diff < 120, "{coin} diff {diff}s too large");
         }
     }

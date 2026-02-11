@@ -15,9 +15,8 @@ mod types;
 
 pub use base::CryptoArbBase;
 pub use config::{
-    ArbitrageConfig, FeeConfig, OrderConfig, PerformanceConfig,
-    ReferenceQualityLevel, SizingConfig, SpikeConfig, StopLossConfig, TailEndConfig,
-    TwoSidedConfig,
+    ArbitrageConfig, FeeConfig, OrderConfig, PerformanceConfig, ReferenceQualityLevel,
+    SizingConfig, SpikeConfig, StopLossConfig, TailEndConfig, TwoSidedConfig,
 };
 pub use dashboard::{CryptoArbDashboard, TailEndDashboard, TwoSidedDashboard};
 pub use tailend::TailEndStrategy;

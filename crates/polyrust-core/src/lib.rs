@@ -17,13 +17,13 @@ pub mod prelude {
     pub use crate::claim_monitor::ClaimMonitor;
     pub use crate::config::Config;
     pub use crate::context::*;
+    pub use crate::dashboard_view::DashboardViewProvider;
     pub use crate::engine::{
         Engine, FeedCommand, FeedCommandReceiver, FeedCommandSender, feed_command_channel,
     };
     pub use crate::error::{PolyError, Result};
     pub use crate::event_bus::EventBus;
     pub use crate::events::*;
-    pub use crate::dashboard_view::DashboardViewProvider;
     pub use crate::execution::ExecutionBackend;
     pub use crate::strategy::Strategy;
     pub use crate::types::*;

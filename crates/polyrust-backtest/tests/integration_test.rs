@@ -38,9 +38,7 @@ impl Strategy for SimpleTestStrategy {
     async fn on_event(&mut self, event: &Event, ctx: &StrategyContext) -> Result<Vec<Action>> {
         match event {
             Event::MarketData(MarketDataEvent::PriceChange {
-                token_id,
-                price,
-                ..
+                token_id, price, ..
             }) => {
                 if let Some(last) = self.last_price {
                     let balance = ctx.balance.read().await;
@@ -169,13 +167,14 @@ async fn test_full_backtest_pipeline() {
     };
 
     // Create in-memory results store
-    let results_store = Arc::new(Store::new(":memory:").await.expect("Failed to create store"));
+    let results_store = Arc::new(
+        Store::new(":memory:")
+            .await
+            .expect("Failed to create store"),
+    );
 
     // Initialize data fetcher
-    let fetch_config = DataFetchConfig {
-        fidelity_secs: 60,
-
-    };
+    let fetch_config = DataFetchConfig { fidelity_secs: 60 };
     let data_fetcher =
         DataFetcher::new(Arc::clone(&data_store), fetch_config).expect("Failed to create fetcher");
 
@@ -231,7 +230,11 @@ async fn test_backtest_with_no_data() {
             .await
             .expect("Failed to create data store"),
     );
-    let results_store = Arc::new(Store::new(":memory:").await.expect("Failed to create store"));
+    let results_store = Arc::new(
+        Store::new(":memory:")
+            .await
+            .expect("Failed to create store"),
+    );
 
     let config = BacktestConfig {
         strategy_name: "test".to_string(),
@@ -313,10 +316,7 @@ async fn test_data_fetcher_integration() {
         .expect("Failed to insert trades");
 
     // Test DataFetcher
-    let fetch_config = DataFetchConfig {
-        fidelity_secs: 60,
-
-    };
+    let fetch_config = DataFetchConfig { fidelity_secs: 60 };
     let fetcher = DataFetcher::new(data_store, fetch_config).expect("Failed to create fetcher");
     let cached = fetcher
         .get_cached_data(

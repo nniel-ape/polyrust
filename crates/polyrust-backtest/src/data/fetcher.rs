@@ -4,11 +4,11 @@ use rust_decimal::Decimal;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+use crate::data::store::DataFetchLog;
 use crate::data::{
     GammaFetcher, HistoricalCryptoPrice, HistoricalDataStore, HistoricalMarket, HistoricalPrice,
     HistoricalTrade, SubgraphFetcher,
 };
-use crate::data::store::DataFetchLog;
 use crate::error::{BacktestError, BacktestResult};
 
 /// Configuration for data fetching behavior.
@@ -20,9 +20,7 @@ pub struct DataFetchConfig {
 
 impl Default for DataFetchConfig {
     fn default() -> Self {
-        Self {
-            fidelity_secs: 60,
-        }
+        Self { fidelity_secs: 60 }
     }
 }
 
@@ -45,10 +43,7 @@ pub struct DataFetcher {
 
 impl DataFetcher {
     /// Create a new DataFetcher with the given store and config.
-    pub fn new(
-        store: Arc<HistoricalDataStore>,
-        config: DataFetchConfig,
-    ) -> BacktestResult<Self> {
+    pub fn new(store: Arc<HistoricalDataStore>, config: DataFetchConfig) -> BacktestResult<Self> {
         let gamma_fetcher = Arc::new(GammaFetcher::new(Arc::clone(&store))?);
         let subgraph_fetcher = SubgraphFetcher::new(Arc::clone(&store))?;
 
@@ -82,13 +77,22 @@ impl DataFetcher {
             Some(m) => vec![m.token_a, m.token_b],
             None => {
                 // Fallback: treat market_id as a single token ID (backwards compat)
-                info!(market_id, "Market not found in store, using as token_id directly");
+                info!(
+                    market_id,
+                    "Market not found in store, using as token_id directly"
+                );
                 vec![market_id.to_string()]
             }
         };
 
         let token_refs: Vec<&str> = token_ids.iter().map(|s| s.as_str()).collect();
-        info!(market_id, ?token_refs, ?start, ?end, "Fetching market data from orderbook subgraph");
+        info!(
+            market_id,
+            ?token_refs,
+            ?start,
+            ?end,
+            "Fetching market data from orderbook subgraph"
+        );
 
         let trades = self
             .subgraph_fetcher
@@ -116,8 +120,14 @@ impl DataFetcher {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> BacktestResult<CachedMarketData> {
-        let prices = self.store.get_historical_prices(token_id, start, end).await?;
-        let trades = self.store.get_historical_trades(token_id, start, end).await?;
+        let prices = self
+            .store
+            .get_historical_prices(token_id, start, end)
+            .await?;
+        let trades = self
+            .store
+            .get_historical_trades(token_id, start, end)
+            .await?;
 
         Ok(CachedMarketData { prices, trades })
     }
@@ -127,7 +137,10 @@ impl DataFetcher {
     ///
     /// # Arguments
     /// * `slug_pattern` - Slug substring to search for (e.g., "btc", "eth-15min")
-    pub async fn discover_markets(&self, slug_pattern: &str) -> BacktestResult<Vec<HistoricalMarket>> {
+    pub async fn discover_markets(
+        &self,
+        slug_pattern: &str,
+    ) -> BacktestResult<Vec<HistoricalMarket>> {
         self.gamma_fetcher.fetch_markets_by_slug(slug_pattern).await
     }
 
@@ -146,7 +159,9 @@ impl DataFetcher {
         end: DateTime<Utc>,
         duration_filter: Option<u64>,
     ) -> BacktestResult<Vec<HistoricalMarket>> {
-        self.gamma_fetcher.fetch_expired_markets(coin, start, end, duration_filter).await
+        self.gamma_fetcher
+            .fetch_expired_markets(coin, start, end, duration_filter)
+            .await
     }
 
     /// Fetch historical crypto prices (Binance 1m klines) for the given coins.
@@ -170,7 +185,9 @@ impl DataFetcher {
                 let count = fetch_binance_klines(KlinesFetchParams {
                     client: &client,
                     store: &self.store,
-                    base_url: &format!("https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m"),
+                    base_url: &format!(
+                        "https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m"
+                    ),
                     coin,
                     source: "binance-spot",
                     start,
@@ -191,7 +208,11 @@ impl DataFetcher {
                     })
                     .await?;
             } else {
-                info!(coin, source = "binance-spot", "Crypto klines already cached, skipping");
+                info!(
+                    coin,
+                    source = "binance-spot",
+                    "Crypto klines already cached, skipping"
+                );
             }
 
             // Fetch futures klines
@@ -200,7 +221,9 @@ impl DataFetcher {
                 let count = fetch_binance_klines(KlinesFetchParams {
                     client: &client,
                     store: &self.store,
-                    base_url: &format!("https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=1m"),
+                    base_url: &format!(
+                        "https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=1m"
+                    ),
                     coin,
                     source: "binance-futures",
                     start,
@@ -221,7 +244,11 @@ impl DataFetcher {
                     })
                     .await?;
             } else {
-                info!(coin, source = "binance-futures", "Crypto klines already cached, skipping");
+                info!(
+                    coin,
+                    source = "binance-futures",
+                    "Crypto klines already cached, skipping"
+                );
             }
         }
 
@@ -236,9 +263,14 @@ impl DataFetcher {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> BacktestResult<bool> {
-        let logs = self.store.get_fetch_log(source, &coin.to_uppercase()).await?;
+        let logs = self
+            .store
+            .get_fetch_log(source, &coin.to_uppercase())
+            .await?;
         // Consider fetched if any log entry covers the entire requested range
-        Ok(logs.iter().any(|log| log.start_ts <= start && log.end_ts >= end))
+        Ok(logs
+            .iter()
+            .any(|log| log.start_ts <= start && log.end_ts >= end))
     }
 }
 
@@ -273,10 +305,7 @@ async fn fetch_binance_klines(params: KlinesFetchParams<'_>) -> BacktestResult<u
     let mut total = 0usize;
 
     let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::with_template("{spinner:.green} {msg}")
-            .unwrap(),
-    );
+    pb.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());
     pb.set_message(format!("{coin} {source}: fetching klines..."));
 
     loop {
@@ -284,15 +313,13 @@ async fn fetch_binance_klines(params: KlinesFetchParams<'_>) -> BacktestResult<u
             break;
         }
 
-        let url = format!(
-            "{base_url}&startTime={current_start_ms}&endTime={end_ms}&limit={page_limit}"
-        );
+        let url =
+            format!("{base_url}&startTime={current_start_ms}&endTime={end_ms}&limit={page_limit}");
 
-        let resp = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| BacktestError::DataFetch(format!("Binance klines request failed: {e}")))?;
+        let resp =
+            client.get(&url).send().await.map_err(|e| {
+                BacktestError::DataFetch(format!("Binance klines request failed: {e}"))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -314,10 +341,9 @@ async fn fetch_binance_klines(params: KlinesFetchParams<'_>) -> BacktestResult<u
             )));
         }
 
-        let klines: Vec<Vec<serde_json::Value>> = resp
-            .json()
-            .await
-            .map_err(|e| BacktestError::DataFetch(format!("Failed to parse klines response: {e}")))?;
+        let klines: Vec<Vec<serde_json::Value>> = resp.json().await.map_err(|e| {
+            BacktestError::DataFetch(format!("Failed to parse klines response: {e}"))
+        })?;
 
         if klines.is_empty() {
             break;
@@ -339,11 +365,21 @@ async fn fetch_binance_klines(params: KlinesFetchParams<'_>) -> BacktestResult<u
                 v.as_str().and_then(|s| s.parse().ok())
             };
 
-            let Some(open) = parse_dec(&kline[1]) else { continue };
-            let Some(high) = parse_dec(&kline[2]) else { continue };
-            let Some(low) = parse_dec(&kline[3]) else { continue };
-            let Some(close) = parse_dec(&kline[4]) else { continue };
-            let Some(volume) = parse_dec(&kline[5]) else { continue };
+            let Some(open) = parse_dec(&kline[1]) else {
+                continue;
+            };
+            let Some(high) = parse_dec(&kline[2]) else {
+                continue;
+            };
+            let Some(low) = parse_dec(&kline[3]) else {
+                continue;
+            };
+            let Some(close) = parse_dec(&kline[4]) else {
+                continue;
+            };
+            let Some(volume) = parse_dec(&kline[5]) else {
+                continue;
+            };
 
             let timestamp = DateTime::from_timestamp_millis(open_time_ms);
             let Some(ts) = timestamp else { continue };
@@ -455,8 +491,14 @@ mod tests {
             source: "clob".to_string(),
         }];
 
-        store.insert_historical_prices(test_prices.clone()).await.unwrap();
-        store.insert_historical_trades(test_trades.clone()).await.unwrap();
+        store
+            .insert_historical_prices(test_prices.clone())
+            .await
+            .unwrap();
+        store
+            .insert_historical_trades(test_trades.clone())
+            .await
+            .unwrap();
 
         let config = DataFetchConfig::default();
         let fetcher = DataFetcher::new(Arc::clone(&store), config).unwrap();
@@ -470,5 +512,4 @@ mod tests {
         assert_eq!(data.prices.len(), 2);
         assert_eq!(data.trades.len(), 1);
     }
-
 }

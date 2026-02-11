@@ -70,6 +70,12 @@ pub struct TailEndConfig {
     /// Cooldown in seconds after a FOK order is rejected before re-evaluating
     /// the same market. Prevents retry storms on every price tick. Default: 15.
     pub fok_cooldown_secs: u64,
+    /// Minimum number of price ticks required in the sustained window.
+    /// Prevents a single tick from satisfying the sustained direction check.
+    /// With ~5s RTDS intervals and min_sustained_secs=5, this ensures at least
+    /// 2 ticks confirm the direction. Default: 2.
+    #[serde(default = "default_min_sustained_ticks")]
+    pub min_sustained_ticks: usize,
     /// Maximum age in seconds for an orderbook snapshot to be considered fresh.
     /// Rejects opportunities if the orderbook is older than this.
     /// Docker adds network latency, so 15s is more realistic than 5s. Default: 15.
@@ -83,12 +89,16 @@ pub struct TailEndConfig {
     pub post_entry_window_secs: i64,
 }
 
+fn default_min_sustained_ticks() -> usize {
+    2
+}
+
 fn default_time_thresholds() -> Vec<(u64, Decimal)> {
     vec![
-        (120, Decimal::new(90, 2)),  // 0.90 at 120s
-        (90, Decimal::new(92, 2)),   // 0.92 at 90s
-        (60, Decimal::new(93, 2)),   // 0.93 at 60s
-        (30, Decimal::new(95, 2)),   // 0.95 at 30s
+        (120, Decimal::new(90, 2)), // 0.90 at 120s
+        (90, Decimal::new(92, 2)),  // 0.92 at 90s
+        (60, Decimal::new(93, 2)),  // 0.93 at 60s
+        (30, Decimal::new(95, 2)),  // 0.95 at 30s
     ]
 }
 
@@ -102,6 +112,7 @@ impl Default for TailEndConfig {
             dynamic_thresholds: default_time_thresholds(),
             max_spread_bps: Decimal::new(200, 0), // 200 bps = 2%
             min_sustained_secs: 5,
+            min_sustained_ticks: default_min_sustained_ticks(),
             max_recent_volatility: Decimal::new(2, 2), // 0.02 = 2%
             fok_cooldown_secs: 15,
             stale_ob_secs: 15,
@@ -230,7 +241,10 @@ impl SizingConfig {
     /// Validate sizing configuration values.
     pub fn validate(&self) -> Result<(), String> {
         if self.base_size <= Decimal::ZERO {
-            return Err(format!("base_size must be positive, got {}", self.base_size));
+            return Err(format!(
+                "base_size must be positive, got {}",
+                self.base_size
+            ));
         }
         if self.min_size <= Decimal::ZERO {
             return Err(format!("min_size must be positive, got {}", self.min_size));
@@ -281,8 +295,8 @@ pub struct StopLossConfig {
 impl Default for StopLossConfig {
     fn default() -> Self {
         Self {
-            reversal_pct: Decimal::new(5, 3),       // 0.005
-            min_drop: Decimal::new(5, 2),           // 0.05
+            reversal_pct: Decimal::new(5, 3), // 0.005
+            min_drop: Decimal::new(5, 2),     // 0.05
             trailing_enabled: true,
             trailing_distance: Decimal::new(3, 2), // 0.03
             time_decay: true,
@@ -437,6 +451,11 @@ impl ArbitrageConfig {
             && let Ok(secs) = v.parse::<u64>()
         {
             self.tailend.min_sustained_secs = secs;
+        }
+        if let Ok(v) = std::env::var("POLY_TAILEND_MIN_SUSTAINED_TICKS")
+            && let Ok(ticks) = v.parse::<usize>()
+        {
+            self.tailend.min_sustained_ticks = ticks;
         }
         if let Ok(v) = std::env::var("POLY_TAILEND_MAX_VOLATILITY")
             && let Ok(d) = v.parse::<Decimal>()

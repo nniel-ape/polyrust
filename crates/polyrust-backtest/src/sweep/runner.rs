@@ -224,22 +224,17 @@ async fn run_single(
 
     // Create fresh strategy
     let base = Arc::new(CryptoArbBase::new(arb_config, vec![]));
-    let strategy: Box<dyn polyrust_core::strategy::Strategy> =
-        Box::new(TailEndStrategy::new(base));
+    let strategy: Box<dyn polyrust_core::strategy::Strategy> = Box::new(TailEndStrategy::new(base));
 
     // Create engine without Store (no SQLite overhead)
     let start_balance = backtest_config.initial_balance;
     let start_time = backtest_config.start_date;
     let end_time = backtest_config.end_date;
 
-    let mut engine =
-        BacktestEngine::new_without_store(backtest_config, strategy, data_store).await;
+    let mut engine = BacktestEngine::new_without_store(backtest_config, strategy, data_store).await;
 
     // Inject token maps so MarketExpired settlement works (maps built by loader engine)
-    engine.set_token_maps(
-        (*market_tokens).clone(),
-        (*token_to_market).clone(),
-    );
+    engine.set_token_maps((*market_tokens).clone(), (*token_to_market).clone());
 
     // Call on_start before replay
     engine

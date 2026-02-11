@@ -1,8 +1,8 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
-use askama::filters::{escape, Html as HtmlEscaper};
 use askama::Template;
+use askama::filters::{Html as HtmlEscaper, escape};
 use axum::extract::{Path, State};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
@@ -276,20 +276,20 @@ pub async fn strategy_view(
             .replace('"', "&quot;");
         return Ok((
             axum::http::StatusCode::NOT_FOUND,
-            Html(format!(
-                "<h1>Strategy '{}' not found</h1>",
-                escaped_name
-            )),
+            Html(format!("<h1>Strategy '{}' not found</h1>", escaped_name)),
         )
             .into_response());
     };
 
     let strategy = strategy_handle.read().await;
-    let provider = strategy.dashboard_view().ok_or_else(|| {
-        AppError(format!("Strategy '{}' has no dashboard view", name))
-    })?;
+    let provider = strategy
+        .dashboard_view()
+        .ok_or_else(|| AppError(format!("Strategy '{}' has no dashboard view", name)))?;
 
-    let content_html = provider.render_view().await.map_err(|e| AppError(e.to_string()))?;
+    let content_html = provider
+        .render_view()
+        .await
+        .map_err(|e| AppError(e.to_string()))?;
     // Drop the read lock before acquiring another for strategy_names
     drop(strategy);
     drop(views);
@@ -341,10 +341,7 @@ pub async fn sse_events(
         if let Event::Signal(signal) = &event
             && signal.signal_type == "dashboard-update"
         {
-            let view_name = signal
-                .payload
-                .get("view_name")
-                .and_then(|v| v.as_str())?;
+            let view_name = signal.payload.get("view_name").and_then(|v| v.as_str())?;
             let html = signal
                 .payload
                 .get("rendered_html")

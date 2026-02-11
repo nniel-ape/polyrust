@@ -105,10 +105,7 @@ impl BacktestReport {
             .collect();
 
         // Compute realized P&L (sum of all closing trades)
-        let realized_pnl: Decimal = trades
-            .iter()
-            .filter_map(|t| t.realized_pnl)
-            .sum();
+        let realized_pnl: Decimal = trades.iter().filter_map(|t| t.realized_pnl).sum();
 
         // For now, we don't track unrealized P&L in backtest (all positions are closed)
         let unrealized_pnl = Decimal::ZERO;
@@ -257,7 +254,10 @@ impl BacktestReport {
         // Trade breakdown
         let total_trades = trades.len();
         let opening_trades = trades.iter().filter(|t| t.side == OrderSide::Buy).count();
-        let closing_trades_list: Vec<_> = trades.iter().filter(|t| t.side == OrderSide::Sell).collect();
+        let closing_trades_list: Vec<_> = trades
+            .iter()
+            .filter(|t| t.side == OrderSide::Sell)
+            .collect();
 
         let closing_trades = closing_trades_list.len();
         let winning_trades = closing_trades_list
@@ -268,7 +268,10 @@ impl BacktestReport {
             .iter()
             .filter(|t| t.realized_pnl.unwrap_or(Decimal::ZERO) < Decimal::ZERO)
             .count();
-        let expired_worthless = closing_trades_list.iter().filter(|t| t.price == Decimal::ZERO).count();
+        let expired_worthless = closing_trades_list
+            .iter()
+            .filter(|t| t.price == Decimal::ZERO)
+            .count();
 
         // Per close-reason breakdown
         let is_win = |t: &&BacktestTrade| t.realized_pnl.unwrap_or(Decimal::ZERO) > Decimal::ZERO;
@@ -301,7 +304,11 @@ impl BacktestReport {
         let force_closed_wins = force_list.iter().filter(|t| is_win(t)).count();
         let force_closed_worthless = force_list.iter().filter(|t| is_worthless(t)).count();
 
-        let markets_traded = trades.iter().map(|t| &t.token_id).collect::<HashSet<_>>().len();
+        let markets_traded = trades
+            .iter()
+            .map(|t| &t.token_id)
+            .collect::<HashSet<_>>()
+            .len();
 
         let win_rate = if closing_trades > 0 {
             Decimal::from(winning_trades as u64) / Decimal::from(closing_trades as u64)
@@ -380,17 +387,15 @@ impl BacktestReport {
     ///
     /// Returns None if insufficient data (<2 trades with P&L).
     fn compute_sharpe_ratio(trades: &[BacktestTrade]) -> Option<Decimal> {
-        let pnls: Vec<Decimal> = trades
-            .iter()
-            .filter_map(|t| t.realized_pnl)
-            .collect();
+        let pnls: Vec<Decimal> = trades.iter().filter_map(|t| t.realized_pnl).collect();
 
         if pnls.len() < 2 {
             return None;
         }
 
         // Compute mean return
-        let mean: Decimal = pnls.iter().copied().sum::<Decimal>() / Decimal::from(pnls.len() as u64);
+        let mean: Decimal =
+            pnls.iter().copied().sum::<Decimal>() / Decimal::from(pnls.len() as u64);
 
         // Compute standard deviation
         let variance: Decimal = pnls
@@ -422,9 +427,11 @@ impl BacktestReport {
         let mut s = String::new();
 
         s.push_str("=== Backtest Report ===\n");
-        s.push_str(&format!("Period: {} to {}\n",
+        s.push_str(&format!(
+            "Period: {} to {}\n",
             self.start_time.format("%Y-%m-%d %H:%M:%S"),
-            self.end_time.format("%Y-%m-%d %H:%M:%S")));
+            self.end_time.format("%Y-%m-%d %H:%M:%S")
+        ));
         s.push_str(&format!("Duration: {} hours\n", self.duration.num_hours()));
         s.push('\n');
 
@@ -433,40 +440,60 @@ impl BacktestReport {
         s.push_str(&format!("End balance:   ${:.2}\n", self.end_balance));
 
         let pnl_pct = if self.start_balance > Decimal::ZERO {
-            format!("{:.2}%", self.total_pnl / self.start_balance * Decimal::from(100))
+            format!(
+                "{:.2}%",
+                self.total_pnl / self.start_balance * Decimal::from(100)
+            )
         } else {
             "N/A".to_string()
         };
-        s.push_str(&format!("Total P&L:     ${:.2} ({})\n",
-            self.total_pnl,
-            pnl_pct));
+        s.push_str(&format!(
+            "Total P&L:     ${:.2} ({})\n",
+            self.total_pnl, pnl_pct
+        ));
         s.push_str(&format!("Realized P&L:  ${:.2}\n", self.realized_pnl));
         s.push_str(&format!("Unrealized P&L: ${:.2}\n", self.unrealized_pnl));
         s.push('\n');
 
         s.push_str("--- Trade Statistics ---\n");
-        s.push_str(&format!("Total orders:     {}  ({} buys, {} sells)\n",
-            self.total_trades, self.opening_trades, self.closing_trades));
-        s.push_str(&format!("Closing trades:   {}  ({} wins, {} losses, {} expired worthless)\n",
-            self.closing_trades, self.winning_trades, self.losing_trades, self.expired_worthless));
+        s.push_str(&format!(
+            "Total orders:     {}  ({} buys, {} sells)\n",
+            self.total_trades, self.opening_trades, self.closing_trades
+        ));
+        s.push_str(&format!(
+            "Closing trades:   {}  ({} wins, {} losses, {} expired worthless)\n",
+            self.closing_trades, self.winning_trades, self.losing_trades, self.expired_worthless
+        ));
         if self.strategy_exits > 0 {
-            s.push_str(&format!("  Strategy exits: {}  ({} wins, {} losses)\n",
-                self.strategy_exits, self.strategy_wins, self.strategy_losses));
+            s.push_str(&format!(
+                "  Strategy exits: {}  ({} wins, {} losses)\n",
+                self.strategy_exits, self.strategy_wins, self.strategy_losses
+            ));
         }
         if self.settled_trades > 0 {
-            s.push_str(&format!("  Settled (expiry): {}  ({} wins, {} expired worthless)\n",
-                self.settled_trades, self.settled_wins, self.settled_worthless));
+            s.push_str(&format!(
+                "  Settled (expiry): {}  ({} wins, {} expired worthless)\n",
+                self.settled_trades, self.settled_wins, self.settled_worthless
+            ));
         }
         if self.force_closed_trades > 0 {
-            s.push_str(&format!("  Force-closed:   {}  ({} wins, {} expired worthless)\n",
-                self.force_closed_trades, self.force_closed_wins, self.force_closed_worthless));
+            s.push_str(&format!(
+                "  Force-closed:   {}  ({} wins, {} expired worthless)\n",
+                self.force_closed_trades, self.force_closed_wins, self.force_closed_worthless
+            ));
         }
-        s.push_str(&format!("Win rate:         {:.2}%\n", self.win_rate * Decimal::from(100)));
+        s.push_str(&format!(
+            "Win rate:         {:.2}%\n",
+            self.win_rate * Decimal::from(100)
+        ));
         s.push_str(&format!("Markets traded:   {}\n", self.markets_traded));
         s.push('\n');
 
         s.push_str("--- Risk Metrics ---\n");
-        s.push_str(&format!("Max drawdown:   {:.2}%\n", self.max_drawdown * Decimal::from(100)));
+        s.push_str(&format!(
+            "Max drawdown:   {:.2}%\n",
+            self.max_drawdown * Decimal::from(100)
+        ));
         if let Some(sharpe) = self.sharpe_ratio {
             s.push_str(&format!("Sharpe ratio:   {:.4}\n", sharpe));
         } else {
@@ -610,17 +637,15 @@ mod tests {
 
     #[test]
     fn compute_sharpe_ratio_insufficient_data() {
-        let trades = vec![
-            BacktestTrade {
-                timestamp: DateTime::from_timestamp(1000, 0).unwrap(),
-                token_id: "token1".to_string(),
-                side: OrderSide::Sell,
-                price: dec!(0.6),
-                size: dec!(10),
-                realized_pnl: Some(dec!(10)),
-                close_reason: None,
-            },
-        ];
+        let trades = vec![BacktestTrade {
+            timestamp: DateTime::from_timestamp(1000, 0).unwrap(),
+            token_id: "token1".to_string(),
+            side: OrderSide::Sell,
+            price: dec!(0.6),
+            size: dec!(10),
+            realized_pnl: Some(dec!(10)),
+            close_reason: None,
+        }];
 
         let sharpe = BacktestReport::compute_sharpe_ratio(&trades);
         assert!(sharpe.is_none());
@@ -690,15 +715,10 @@ mod tests {
         };
         store.insert_trade(&trade).await.unwrap();
 
-        let report = BacktestReport::from_engine_results(
-            store,
-            vec![],
-            dec!(1000),
-            start_time,
-            end_time,
-        )
-        .await
-        .unwrap();
+        let report =
+            BacktestReport::from_engine_results(store, vec![], dec!(1000), start_time, end_time)
+                .await
+                .unwrap();
 
         let summary = report.summary();
 
@@ -719,15 +739,10 @@ mod tests {
         let start_time = DateTime::from_timestamp(1000, 0).unwrap();
         let end_time = DateTime::from_timestamp(5000, 0).unwrap();
 
-        let report = BacktestReport::from_engine_results(
-            store,
-            vec![],
-            dec!(1000),
-            start_time,
-            end_time,
-        )
-        .await
-        .unwrap();
+        let report =
+            BacktestReport::from_engine_results(store, vec![], dec!(1000), start_time, end_time)
+                .await
+                .unwrap();
 
         let json = report.to_json();
 

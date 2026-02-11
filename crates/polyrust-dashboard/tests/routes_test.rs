@@ -47,7 +47,9 @@ impl DashboardViewProvider for MockViewStrategy {
         "mock-view"
     }
 
-    fn render_view(&self) -> Pin<Box<dyn Future<Output = polyrust_core::error::Result<String>> + Send + '_>> {
+    fn render_view(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = polyrust_core::error::Result<String>> + Send + '_>> {
         Box::pin(async {
             Ok("<div class=\"mock-content\">Mock strategy dashboard</div>".to_string())
         })
@@ -62,7 +64,11 @@ impl Strategy for MockViewStrategy {
     fn description(&self) -> &str {
         "Mock strategy for testing"
     }
-    async fn on_event(&mut self, _event: &Event, _ctx: &StrategyContext) -> polyrust_core::error::Result<Vec<Action>> {
+    async fn on_event(
+        &mut self,
+        _event: &Event,
+        _ctx: &StrategyContext,
+    ) -> polyrust_core::error::Result<Vec<Action>> {
         Ok(vec![])
     }
     fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> {
@@ -350,11 +356,7 @@ async fn nav_links_absent_when_no_strategy_views() {
 
 /// Read SSE frames from a response body until we find one matching `predicate`,
 /// or fail after the given timeout.
-async fn read_sse_until(
-    body: Body,
-    timeout_ms: u64,
-    predicate: impl Fn(&str) -> bool,
-) -> String {
+async fn read_sse_until(body: Body, timeout_ms: u64, predicate: impl Fn(&str) -> bool) -> String {
     let mut stream = BodyStream::new(body);
     let mut collected = String::new();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);

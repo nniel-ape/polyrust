@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use polymarket_client_sdk::POLYGON;
 use polymarket_client_sdk::auth::{LocalSigner, Signer};
 use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, OrdersRequest};
-use polymarket_client_sdk::clob::types::{OrderStatusType, Side as SdkSide, SignatureType};
+use polymarket_client_sdk::clob::types::{
+    AssetType, OrderStatusType, Side as SdkSide, SignatureType,
+};
 use polymarket_client_sdk::clob::{Client, Config as SdkConfig};
 use polymarket_client_sdk::types::{Address as SdkAddress, U256 as SdkU256};
 use rust_decimal::Decimal;
@@ -14,8 +16,9 @@ use polyrust_core::config::Config;
 use polyrust_core::error::{PolyError, Result};
 use polyrust_core::types::*;
 
-use crate::rounding::build_signable_order;
 use crate::ctf_redeemer::CtfRedeemer;
+use crate::relayer::RelayerClient;
+use crate::rounding::build_signable_order;
 use polyrust_core::execution::{RedeemRequest, RedeemResult};
 
 /// Live execution backend using rs-clob-client for real Polymarket orders.
@@ -39,7 +42,8 @@ trait LiveBackendInner: Send + Sync {
     async fn get_balance(&self) -> Result<Decimal>;
     async fn is_market_resolved(&self, condition_id: &str) -> Result<bool>;
     async fn redeem_positions(&self, request: &RedeemRequest) -> Result<RedeemResult>;
-    async fn redeem_positions_batch(&self, requests: &[RedeemRequest]) -> Result<Vec<RedeemResult>>;
+    async fn redeem_positions_batch(&self, requests: &[RedeemRequest])
+    -> Result<Vec<RedeemResult>>;
 }
 
 /// Concrete inner implementation parameterized by the SDK `Kind` and signer type.
@@ -54,6 +58,88 @@ struct LiveBackendImpl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + 
     signature_type: SignatureType,
     /// CTF redeemer for on-chain position redemption
     ctf_redeemer: Option<CtfRedeemer>,
+}
+
+impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendImpl<K, S> {
+    #[allow(clippy::too_many_arguments)]
+    async fn sign_and_post_order(
+        &self,
+        token_id: SdkU256,
+        price: Decimal,
+        size: Decimal,
+        side: OrderSide,
+        order_type: OrderType,
+        tick_size: Decimal,
+        fee_rate_bps: u32,
+    ) -> Result<polymarket_client_sdk::clob::types::response::PostOrderResponse> {
+        let signable = build_signable_order(
+            token_id,
+            price,
+            size,
+            side,
+            order_type,
+            tick_size,
+            fee_rate_bps,
+            self.signer_address,
+            self.funder,
+            self.signature_type,
+        );
+
+        debug!(
+            token_id = %token_id,
+            side = ?side,
+            price = %price,
+            size = %size,
+            order_type = ?order_type,
+            fee_rate_bps = fee_rate_bps,
+            "Signing order (direct construction)"
+        );
+
+        let signed = self
+            .client
+            .sign(&self.signer, signable)
+            .await
+            .map_err(|e| PolyError::Sdk(format!("Failed to sign order: {e}")))?;
+
+        self.client
+            .post_order(signed)
+            .await
+            .map_err(|e| PolyError::Sdk(format!("Failed to post order: {e}")))
+    }
+
+    async fn refresh_conditional_balance_allowance(&self, token_id: SdkU256) {
+        let request = BalanceAllowanceRequest::builder()
+            .asset_type(AssetType::Conditional)
+            .token_id(token_id)
+            .signature_type(self.signature_type)
+            .build();
+
+        if let Err(e) = self.client.update_balance_allowance(request.clone()).await {
+            warn!(
+                token_id = %token_id,
+                error = %e,
+                "Failed to force conditional balance/allowance refresh"
+            );
+        }
+
+        match self.client.balance_allowance(request).await {
+            Ok(resp) => {
+                debug!(
+                    token_id = %token_id,
+                    conditional_balance = %resp.balance,
+                    allowance_targets = resp.allowances.len(),
+                    "Conditional balance/allowance snapshot refreshed"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    token_id = %token_id,
+                    error = %e,
+                    "Failed to read conditional balance/allowance"
+                );
+            }
+        }
+    }
 }
 
 impl LiveBackend {
@@ -99,18 +185,57 @@ impl LiveBackend {
             "LiveBackend authenticated with Polymarket"
         );
 
+        // Build gasless relayer if builder credentials are available
+        let relayer = if config.polymarket.use_relayer
+            && config.polymarket.builder_api_key.is_some()
+            && config.polymarket.builder_api_secret.is_some()
+            && config.polymarket.builder_api_passphrase.is_some()
+        {
+            let safe_addr_str = config.polymarket.safe_address.as_deref().unwrap_or("");
+            let safe_addr: alloy::primitives::Address = safe_addr_str
+                .parse()
+                .map_err(|e| PolyError::Config(format!("Invalid Safe address for relayer: {e}")))?;
+            let relayer_signer: alloy::signers::local::PrivateKeySigner = private_key
+                .parse()
+                .map_err(|e| PolyError::Config(format!("Invalid private key for relayer: {e}")))?;
+            match RelayerClient::new(&config.polymarket, &relayer_signer, safe_addr) {
+                Ok(r) => {
+                    info!("Gasless relayer enabled (builder API)");
+                    Some(r)
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to initialize relayer, will use direct RPC only");
+                    None
+                }
+            }
+        } else {
+            debug!("Relayer not configured (missing builder credentials or disabled)");
+            None
+        };
+
         // Initialize CtfRedeemer if we have RPC URLs
         let ctf_redeemer = if !config.polymarket.rpc_urls.is_empty() {
-            match CtfRedeemer::new(&config.polymarket.rpc_urls, private_key, config.polymarket.safe_address.as_deref().unwrap_or("")) {
+            match CtfRedeemer::new_with_relayer(
+                &config.polymarket.rpc_urls,
+                private_key,
+                config.polymarket.safe_address.as_deref().unwrap_or(""),
+                relayer,
+            ) {
                 Ok(redeemer) => {
-                    info!(rpc_count = config.polymarket.rpc_urls.len(), "CtfRedeemer initialized");
+                    info!(
+                        rpc_count = config.polymarket.rpc_urls.len(),
+                        "CtfRedeemer initialized"
+                    );
                     if let Err(e) = redeemer.ensure_approvals().await {
                         warn!("Token approval check failed: {e} (sells may fail)");
                     }
                     Some(redeemer)
                 }
                 Err(e) => {
-                    warn!("Failed to initialize CtfRedeemer: {} (redemption disabled)", e);
+                    warn!(
+                        "Failed to initialize CtfRedeemer: {} (redemption disabled)",
+                        e
+                    );
                     None
                 }
             }
@@ -118,6 +243,23 @@ impl LiveBackend {
             warn!("No RPC URLs configured, redemption disabled");
             None
         };
+
+        // Pre-flight USDC balance check (non-fatal)
+        match authenticated
+            .balance_allowance(BalanceAllowanceRequest::default())
+            .await
+        {
+            Ok(resp) => {
+                if resp.balance.is_zero() {
+                    warn!("USDC balance is zero — live trading will fail until funded");
+                } else {
+                    info!(balance = %resp.balance, "USDC balance available");
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to query USDC balance (non-fatal)");
+            }
+        }
 
         Ok(Self {
             inner: Box::new(LiveBackendImpl {
@@ -177,7 +319,10 @@ impl polyrust_core::execution::ExecutionBackend for LiveBackend {
         self.inner.redeem_positions(request).await
     }
 
-    async fn redeem_positions_batch(&self, requests: &[RedeemRequest]) -> Result<Vec<RedeemResult>> {
+    async fn redeem_positions_batch(
+        &self,
+        requests: &[RedeemRequest],
+    ) -> Result<Vec<RedeemResult>> {
         self.inner.redeem_positions_batch(requests).await
     }
 }
@@ -204,44 +349,48 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
         let price = order.price;
         let size = order.size;
 
-        // Construct SignableOrder directly, bypassing SDK's OrderBuilder.
-        // FOK orders use RAW price (immediate fill, tick alignment irrelevant).
-        // GTC/GTD orders use tick-rounded price (rest in book at tick boundaries).
-        // See rounding.rs for full precision rules.
-        let signable = build_signable_order(
-            token_id,
-            price,
-            size,
-            order.side,
-            order.order_type,
-            order.tick_size,
-            fee_rate_bps,
-            self.signer_address,
-            self.funder,
-            self.signature_type,
-        );
+        if order.side == OrderSide::Sell {
+            // Fresh fills may not be reflected in CLOB cache immediately; refresh before sell.
+            self.refresh_conditional_balance_allowance(token_id).await;
+        }
 
-        debug!(
-            token_id = %order.token_id,
-            side = ?order.side,
-            price = %price,
-            size = %size,
-            order_type = ?order.order_type,
-            fee_rate_bps = fee_rate_bps,
-            "Signing order (direct construction)"
-        );
-
-        let signed = self
-            .client
-            .sign(&self.signer, signable)
+        let response = match self
+            .sign_and_post_order(
+                token_id,
+                price,
+                size,
+                order.side,
+                order.order_type,
+                order.tick_size,
+                fee_rate_bps,
+            )
             .await
-            .map_err(|e| PolyError::Sdk(format!("Failed to sign order: {e}")))?;
-
-        let response = self
-            .client
-            .post_order(signed)
-            .await
-            .map_err(|e| PolyError::Sdk(format!("Failed to post order: {e}")))?;
+        {
+            Ok(r) => r,
+            Err(e)
+                if order.side == OrderSide::Sell && is_balance_allowance_error(&e.to_string()) =>
+            {
+                warn!(
+                    token_id = %order.token_id,
+                    side = ?order.side,
+                    order_type = ?order.order_type,
+                    error = %e,
+                    "Sell rejected with balance/allowance; refreshing and retrying once"
+                );
+                self.refresh_conditional_balance_allowance(token_id).await;
+                self.sign_and_post_order(
+                    token_id,
+                    price,
+                    size,
+                    order.side,
+                    order.order_type,
+                    order.tick_size,
+                    fee_rate_bps,
+                )
+                .await?
+            }
+            Err(e) => return Err(e),
+        };
 
         let result = OrderResult {
             success: response.success,
@@ -406,7 +555,10 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
         }
     }
 
-    async fn redeem_positions_batch(&self, requests: &[RedeemRequest]) -> Result<Vec<RedeemResult>> {
+    async fn redeem_positions_batch(
+        &self,
+        requests: &[RedeemRequest],
+    ) -> Result<Vec<RedeemResult>> {
         let redeemer = self.ctf_redeemer.as_ref().ok_or_else(|| {
             PolyError::Execution("CtfRedeemer not initialized (no RPC URL configured)".into())
         })?;
@@ -488,6 +640,11 @@ fn map_sdk_order_to_domain(
         status: map_sdk_order_status(&sdk_order.status),
         created_at: sdk_order.created_at,
     }
+}
+
+fn is_balance_allowance_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("not enough balance") || lower.contains("allowance")
 }
 
 #[cfg(test)]

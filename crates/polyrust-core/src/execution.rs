@@ -52,7 +52,10 @@ pub trait ExecutionBackend: Send + Sync {
     }
 
     /// Batch-redeem multiple resolved positions. Default: sequential fallback.
-    async fn redeem_positions_batch(&self, requests: &[RedeemRequest]) -> Result<Vec<RedeemResult>> {
+    async fn redeem_positions_batch(
+        &self,
+        requests: &[RedeemRequest],
+    ) -> Result<Vec<RedeemResult>> {
         let mut results = Vec::with_capacity(requests.len());
         for request in requests {
             results.push(self.redeem_positions(request).await?);
@@ -90,7 +93,10 @@ impl ExecutionBackend for Box<dyn ExecutionBackend> {
     async fn redeem_positions(&self, request: &RedeemRequest) -> Result<RedeemResult> {
         (**self).redeem_positions(request).await
     }
-    async fn redeem_positions_batch(&self, requests: &[RedeemRequest]) -> Result<Vec<RedeemResult>> {
+    async fn redeem_positions_batch(
+        &self,
+        requests: &[RedeemRequest],
+    ) -> Result<Vec<RedeemResult>> {
         (**self).redeem_positions_batch(requests).await
     }
 }

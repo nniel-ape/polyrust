@@ -34,8 +34,8 @@ struct CombinedStreamMsg {
 // Spot miniTicker payload
 #[derive(Deserialize)]
 struct MiniTickerData {
-    s: String,       // symbol e.g. "BTCUSDT"
-    c: String,       // close price
+    s: String, // symbol e.g. "BTCUSDT"
+    c: String, // close price
     #[serde(rename = "E")]
     event_time: u64, // event time in ms
 }
@@ -43,8 +43,8 @@ struct MiniTickerData {
 // Futures markPrice payload
 #[derive(Deserialize)]
 struct MarkPriceData {
-    s: String,       // symbol e.g. "BTCUSDT"
-    p: String,       // mark price
+    s: String, // symbol e.g. "BTCUSDT"
+    p: String, // mark price
     #[serde(rename = "E")]
     event_time: u64, // event time in ms
 }
@@ -195,10 +195,8 @@ async fn run_ws_loop(source: &str, url: &str, bus: EventBus, parser: StreamParse
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                            if let Ok(combined) =
-                                serde_json::from_str::<CombinedStreamMsg>(&text)
-                                && let Some((symbol, price, timestamp)) =
-                                    parser(&combined.data)
+                            if let Ok(combined) = serde_json::from_str::<CombinedStreamMsg>(&text)
+                                && let Some((symbol, price, timestamp)) = parser(&combined.data)
                             {
                                 debug!(
                                     source,
@@ -208,14 +206,12 @@ async fn run_ws_loop(source: &str, url: &str, bus: EventBus, parser: StreamParse
                                     "Binance price update"
                                 );
 
-                                bus.publish(Event::MarketData(
-                                    MarketDataEvent::ExternalPrice {
-                                        symbol,
-                                        price,
-                                        source: source.to_string(),
-                                        timestamp,
-                                    },
-                                ));
+                                bus.publish(Event::MarketData(MarketDataEvent::ExternalPrice {
+                                    symbol,
+                                    price,
+                                    source: source.to_string(),
+                                    timestamp,
+                                }));
                             }
                         }
                         Ok(tokio_tungstenite::tungstenite::Message::Ping(payload)) => {

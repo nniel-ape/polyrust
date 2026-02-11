@@ -37,10 +37,7 @@ impl StrategyContext {
 
     /// Returns the current time: simulated clock if set, otherwise Utc::now().
     pub async fn now(&self) -> DateTime<Utc> {
-        self.simulated_clock
-            .read()
-            .await
-            .unwrap_or_else(Utc::now)
+        self.simulated_clock.read().await.unwrap_or_else(Utc::now)
     }
 
     /// Returns the view names of all strategies that have custom dashboard views.

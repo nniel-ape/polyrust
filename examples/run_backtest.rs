@@ -128,9 +128,14 @@ async fn main() -> anyhow::Result<()> {
     let trades = engine.run().await?;
 
     // Generate report from results
-    let report =
-        BacktestReport::from_engine_results(results_store, trades, initial_balance, start_time, end_time)
-            .await?;
+    let report = BacktestReport::from_engine_results(
+        results_store,
+        trades,
+        initial_balance,
+        start_time,
+        end_time,
+    )
+    .await?;
 
     // Print results
     println!("\n{}", report.summary());

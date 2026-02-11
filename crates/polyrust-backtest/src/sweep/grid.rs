@@ -135,12 +135,8 @@ impl ParameterCombination {
 
         // Merge swept dynamic_thresholds into base config (preserve non-swept buckets)
         if has_threshold_params {
-            let mut merged: BTreeMap<u64, Decimal> = config
-                .tailend
-                .dynamic_thresholds
-                .iter()
-                .copied()
-                .collect();
+            let mut merged: BTreeMap<u64, Decimal> =
+                config.tailend.dynamic_thresholds.iter().copied().collect();
             for (secs, val) in threshold_entries {
                 merged.insert(secs, val);
             }
@@ -179,7 +175,11 @@ impl ParameterGrid {
         if let Some(ref range) = config.tailend.max_spread_bps {
             axes.push(Axis {
                 name: "tailend.max_spread_bps".to_string(),
-                values: range.expand().into_iter().map(ParamValue::Decimal).collect(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
             });
         }
         if let Some(ref range) = config.tailend.min_sustained_secs {
@@ -191,7 +191,11 @@ impl ParameterGrid {
         if let Some(ref range) = config.tailend.max_recent_volatility {
             axes.push(Axis {
                 name: "tailend.max_recent_volatility".to_string(),
-                values: range.expand().into_iter().map(ParamValue::Decimal).collect(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
             });
         }
         if let Some(ref range) = config.tailend.fok_cooldown_secs {
@@ -210,7 +214,11 @@ impl ParameterGrid {
         if let Some(ref range) = config.tailend.post_entry_exit_drop {
             axes.push(Axis {
                 name: "tailend.post_entry_exit_drop".to_string(),
-                values: range.expand().into_iter().map(ParamValue::Decimal).collect(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
             });
         }
         if let Some(ref range) = config.tailend.post_entry_window_secs {
@@ -225,12 +233,19 @@ impl ParameterGrid {
             for (secs_str, range) in dt {
                 // Validate that key parses as u64
                 if secs_str.parse::<u64>().is_err() {
-                    tracing::warn!(key = secs_str, "Ignoring non-numeric dynamic_thresholds key");
+                    tracing::warn!(
+                        key = secs_str,
+                        "Ignoring non-numeric dynamic_thresholds key"
+                    );
                     continue;
                 }
                 axes.push(Axis {
                     name: format!("tailend.dynamic_thresholds.{}", secs_str),
-                    values: range.expand().into_iter().map(ParamValue::Decimal).collect(),
+                    values: range
+                        .expand()
+                        .into_iter()
+                        .map(ParamValue::Decimal)
+                        .collect(),
                 });
             }
         }
@@ -239,19 +254,31 @@ impl ParameterGrid {
         if let Some(ref range) = config.sizing.kelly_multiplier {
             axes.push(Axis {
                 name: "sizing.kelly_multiplier".to_string(),
-                values: range.expand().into_iter().map(ParamValue::Decimal).collect(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
             });
         }
         if let Some(ref range) = config.sizing.min_size {
             axes.push(Axis {
                 name: "sizing.min_size".to_string(),
-                values: range.expand().into_iter().map(ParamValue::Decimal).collect(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
             });
         }
         if let Some(ref range) = config.sizing.max_size {
             axes.push(Axis {
                 name: "sizing.max_size".to_string(),
-                values: range.expand().into_iter().map(ParamValue::Decimal).collect(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
             });
         }
 
@@ -259,19 +286,31 @@ impl ParameterGrid {
         if let Some(ref range) = config.stop_loss.reversal_pct {
             axes.push(Axis {
                 name: "stop_loss.reversal_pct".to_string(),
-                values: range.expand().into_iter().map(ParamValue::Decimal).collect(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
             });
         }
         if let Some(ref range) = config.stop_loss.min_drop {
             axes.push(Axis {
                 name: "stop_loss.min_drop".to_string(),
-                values: range.expand().into_iter().map(ParamValue::Decimal).collect(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
             });
         }
         if let Some(ref range) = config.stop_loss.trailing_distance {
             axes.push(Axis {
                 name: "stop_loss.trailing_distance".to_string(),
-                values: range.expand().into_iter().map(ParamValue::Decimal).collect(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
             });
         }
         if let Some(ref range) = config.stop_loss.min_remaining_secs {
@@ -316,10 +355,7 @@ impl ParameterGrid {
             }
 
             params.reverse();
-            result.push(ParameterCombination {
-                index: idx,
-                params,
-            });
+            result.push(ParameterCombination { index: idx, params });
         }
 
         result
@@ -351,11 +387,7 @@ mod tests {
     fn grid_single_axis() {
         let config = SweepConfig {
             tailend: TailEndSweepParams {
-                max_spread_bps: Some(ParamRange::Values(vec![
-                    dec!(100),
-                    dec!(200),
-                    dec!(300),
-                ])),
+                max_spread_bps: Some(ParamRange::Values(vec![dec!(100), dec!(200), dec!(300)])),
                 ..Default::default()
             },
             ..Default::default()
@@ -373,9 +405,7 @@ mod tests {
         let config = SweepConfig {
             tailend: TailEndSweepParams {
                 max_spread_bps: Some(ParamRange::Values(vec![dec!(100), dec!(200)])),
-                min_sustained_secs: Some(crate::sweep::config::IntParamRange::Values(vec![
-                    3, 5,
-                ])),
+                min_sustained_secs: Some(crate::sweep::config::IntParamRange::Values(vec![3, 5])),
                 ..Default::default()
             },
             ..Default::default()
@@ -408,7 +438,10 @@ mod tests {
             "120".to_string(),
             ParamRange::Values(vec![dec!(0.88), dec!(0.90)]),
         );
-        dt.insert("60".to_string(), ParamRange::Values(vec![dec!(0.91), dec!(0.93)]));
+        dt.insert(
+            "60".to_string(),
+            ParamRange::Values(vec![dec!(0.91), dec!(0.93)]),
+        );
 
         let config = SweepConfig {
             tailend: TailEndSweepParams {
@@ -432,9 +465,18 @@ mod tests {
         let combo = ParameterCombination {
             index: 0,
             params: vec![
-                ("tailend.max_spread_bps".to_string(), ParamValue::Decimal(dec!(150))),
-                ("sizing.kelly_multiplier".to_string(), ParamValue::Decimal(dec!(0.30))),
-                ("stop_loss.reversal_pct".to_string(), ParamValue::Decimal(dec!(0.007))),
+                (
+                    "tailend.max_spread_bps".to_string(),
+                    ParamValue::Decimal(dec!(150)),
+                ),
+                (
+                    "sizing.kelly_multiplier".to_string(),
+                    ParamValue::Decimal(dec!(0.30)),
+                ),
+                (
+                    "stop_loss.reversal_pct".to_string(),
+                    ParamValue::Decimal(dec!(0.007)),
+                ),
             ],
         };
 
@@ -451,9 +493,18 @@ mod tests {
         let combo = ParameterCombination {
             index: 0,
             params: vec![
-                ("tailend.dynamic_thresholds.120".to_string(), ParamValue::Decimal(dec!(0.88))),
-                ("tailend.dynamic_thresholds.60".to_string(), ParamValue::Decimal(dec!(0.93))),
-                ("tailend.dynamic_thresholds.30".to_string(), ParamValue::Decimal(dec!(0.97))),
+                (
+                    "tailend.dynamic_thresholds.120".to_string(),
+                    ParamValue::Decimal(dec!(0.88)),
+                ),
+                (
+                    "tailend.dynamic_thresholds.60".to_string(),
+                    ParamValue::Decimal(dec!(0.93)),
+                ),
+                (
+                    "tailend.dynamic_thresholds.30".to_string(),
+                    ParamValue::Decimal(dec!(0.97)),
+                ),
             ],
         };
 

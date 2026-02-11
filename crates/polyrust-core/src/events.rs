@@ -120,4 +120,7 @@ pub enum SystemEvent {
         positions_open: usize,
         uptime_seconds: u64,
     },
+    /// Periodic snapshot of open order IDs from the execution backend.
+    /// Strategies compare this against their tracked orders to detect fills.
+    OpenOrderSnapshot(Vec<String>),
 }

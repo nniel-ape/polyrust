@@ -79,12 +79,7 @@ impl SweepReport {
         // Shorten param names for display: "tailend.max_spread_bps" -> "max_spread_bps"
         let short_names: Vec<String> = param_names
             .iter()
-            .map(|n| {
-                n.rsplit('.')
-                    .next()
-                    .unwrap_or(n)
-                    .to_string()
-            })
+            .map(|n| n.rsplit('.').next().unwrap_or(n).to_string())
             .collect();
 
         // Calculate column widths
@@ -110,10 +105,7 @@ impl SweepReport {
             "=== Sweep Results (top {} of {}, sorted by {}) ===",
             results.len(),
             self.total_combinations,
-            results
-                .first()
-                .map(|_| "metric")
-                .unwrap_or("none")
+            results.first().map(|_| "metric").unwrap_or("none")
         );
         println!(
             "Total wall time: {:.1}s ({:.2}s/run avg)",
@@ -176,8 +168,9 @@ impl SweepReport {
 
     /// Export results to CSV file.
     pub fn export_csv(&self, path: &str) -> BacktestResult<()> {
-        let mut file = std::fs::File::create(path)
-            .map_err(|e| crate::error::BacktestError::Engine(format!("Failed to create CSV: {}", e)))?;
+        let mut file = std::fs::File::create(path).map_err(|e| {
+            crate::error::BacktestError::Engine(format!("Failed to create CSV: {}", e))
+        })?;
 
         if self.results.is_empty() {
             return Ok(());
@@ -218,9 +211,7 @@ impl SweepReport {
             }
             row.extend([
                 result.total_pnl.to_string(),
-                result
-                    .sharpe_ratio
-                    .map_or(String::new(), |s| s.to_string()),
+                result.sharpe_ratio.map_or(String::new(), |s| s.to_string()),
                 result.win_rate.to_string(),
                 result.max_drawdown.to_string(),
                 result.total_trades.to_string(),
@@ -228,11 +219,16 @@ impl SweepReport {
                 result.end_balance.to_string(),
                 format!("{:.2}", result.duration_secs),
             ]);
-            writeln!(file, "{}", row.join(","))
-                .map_err(|e| crate::error::BacktestError::Engine(format!("CSV write error: {}", e)))?;
+            writeln!(file, "{}", row.join(",")).map_err(|e| {
+                crate::error::BacktestError::Engine(format!("CSV write error: {}", e))
+            })?;
         }
 
-        tracing::info!(path, rows = self.results.len(), "Exported sweep results to CSV");
+        tracing::info!(
+            path,
+            rows = self.results.len(),
+            "Exported sweep results to CSV"
+        );
         Ok(())
     }
 
@@ -244,12 +240,17 @@ impl SweepReport {
             "results": self.results,
         });
 
-        let file = std::fs::File::create(path)
-            .map_err(|e| crate::error::BacktestError::Engine(format!("Failed to create JSON: {}", e)))?;
+        let file = std::fs::File::create(path).map_err(|e| {
+            crate::error::BacktestError::Engine(format!("Failed to create JSON: {}", e))
+        })?;
         serde_json::to_writer_pretty(file, &json)
             .map_err(|e| crate::error::BacktestError::Engine(format!("JSON write error: {}", e)))?;
 
-        tracing::info!(path, rows = self.results.len(), "Exported sweep results to JSON");
+        tracing::info!(
+            path,
+            rows = self.results.len(),
+            "Exported sweep results to JSON"
+        );
         Ok(())
     }
 
@@ -262,11 +263,8 @@ impl SweepReport {
         }
 
         // Collect all unique param names (BTreeSet for stable ordering)
-        let param_names: BTreeSet<&String> = self
-            .results
-            .iter()
-            .flat_map(|r| r.params.keys())
-            .collect();
+        let param_names: BTreeSet<&String> =
+            self.results.iter().flat_map(|r| r.params.keys()).collect();
 
         let parameters = param_names
             .into_iter()
@@ -285,13 +283,15 @@ impl SweepReport {
                     .map(|(value, runs)| {
                         let count = runs.len();
                         let count_dec = Decimal::from(count);
-                        let mean_pnl = runs.iter().map(|r| r.total_pnl).sum::<Decimal>() / count_dec;
-                        let mean_sharpe = mean_optional(&runs.iter().map(|r| r.sharpe_ratio).collect::<Vec<_>>());
+                        let mean_pnl =
+                            runs.iter().map(|r| r.total_pnl).sum::<Decimal>() / count_dec;
+                        let mean_sharpe =
+                            mean_optional(&runs.iter().map(|r| r.sharpe_ratio).collect::<Vec<_>>());
                         let mean_win_rate =
                             runs.iter().map(|r| r.win_rate).sum::<Decimal>() / count_dec;
-                        let mean_trades = Decimal::from(
-                            runs.iter().map(|r| r.closing_trades).sum::<usize>(),
-                        ) / count_dec;
+                        let mean_trades =
+                            Decimal::from(runs.iter().map(|r| r.closing_trades).sum::<usize>())
+                                / count_dec;
                         let mean_max_drawdown =
                             runs.iter().map(|r| r.max_drawdown).sum::<Decimal>() / count_dec;
 
@@ -425,8 +425,9 @@ impl SensitivityAnalysis {
 
     /// Export sensitivity data to a flat CSV.
     pub fn export_csv(&self, path: &str) -> BacktestResult<()> {
-        let mut file = std::fs::File::create(path)
-            .map_err(|e| crate::error::BacktestError::Engine(format!("Failed to create CSV: {}", e)))?;
+        let mut file = std::fs::File::create(path).map_err(|e| {
+            crate::error::BacktestError::Engine(format!("Failed to create CSV: {}", e))
+        })?;
 
         writeln!(
             file,
@@ -460,8 +461,9 @@ impl SensitivityAnalysis {
 
     /// Export sensitivity data to JSON.
     pub fn export_json(&self, path: &str) -> BacktestResult<()> {
-        let file = std::fs::File::create(path)
-            .map_err(|e| crate::error::BacktestError::Engine(format!("Failed to create JSON: {}", e)))?;
+        let file = std::fs::File::create(path).map_err(|e| {
+            crate::error::BacktestError::Engine(format!("Failed to create JSON: {}", e))
+        })?;
         serde_json::to_writer_pretty(file, self)
             .map_err(|e| crate::error::BacktestError::Engine(format!("JSON write error: {}", e)))?;
 

@@ -70,7 +70,10 @@ impl ClaimMonitor {
 
     /// Start the claim monitor background task
     pub async fn run(self: Arc<Self>) -> Result<()> {
-        info!("ClaimMonitor started (poll interval: {}s)", self.config.poll_interval_secs);
+        info!(
+            "ClaimMonitor started (poll interval: {}s)",
+            self.config.poll_interval_secs
+        );
 
         // Subscribe to market events (both MarketDiscovered and MarketExpired)
         let mut discovery_events = self.event_bus.subscribe_topics(&["market_data"]);
@@ -104,7 +107,11 @@ impl ClaimMonitor {
         tokio::spawn(async move {
             while let Some(event) = fill_events.recv().await {
                 if let Event::OrderUpdate(OrderEvent::Filled { market_id, .. }) = event {
-                    let is_new = self_fills.traded_markets.write().await.insert(market_id.clone());
+                    let is_new = self_fills
+                        .traded_markets
+                        .write()
+                        .await
+                        .insert(market_id.clone());
                     if is_new {
                         info!(market_id = %market_id, "Recorded fill for claim tracking");
                     }
@@ -133,8 +140,7 @@ impl ClaimMonitor {
                     ..
                 }) = event
                     && signal_type == "matched-fill"
-                    && let Some(market_id) =
-                        payload.get("market_id").and_then(|v| v.as_str())
+                    && let Some(market_id) = payload.get("market_id").and_then(|v| v.as_str())
                 {
                     let is_new = self_signals
                         .traded_markets
@@ -298,8 +304,7 @@ impl ClaimMonitor {
                         *self.gas_paused_until.write().await = Some(pause_until);
                         warn!(
                             pause_secs = pause_secs,
-                            "Insufficient MATIC — pausing redemptions for {}s",
-                            pause_secs
+                            "Insufficient MATIC — pausing redemptions for {}s", pause_secs
                         );
                         // Remove any claims scheduled for removal so far, then bail
                         for mid in &to_remove {
@@ -418,8 +423,7 @@ impl ClaimMonitor {
                     *self.gas_paused_until.write().await = Some(pause_until);
                     warn!(
                         pause_secs = pause_secs,
-                        "Insufficient MATIC — pausing redemptions for {}s",
-                        pause_secs
+                        "Insufficient MATIC — pausing redemptions for {}s", pause_secs
                     );
                 } else {
                     error!("Batch redemption error: {}", e);

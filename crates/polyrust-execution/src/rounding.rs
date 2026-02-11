@@ -40,10 +40,10 @@ impl TickRoundingConfig {
 /// Matches Python's ROUNDING_CONFIG from py-clob-client
 pub fn rounding_config_for_tick(tick_size: Decimal) -> TickRoundingConfig {
     // Define tick sizes as Decimal for comparison
-    let tick_0_1 = Decimal::new(1, 1);      // 0.1
-    let _tick_0_01 = Decimal::new(1, 2);     // 0.01
-    let tick_0_001 = Decimal::new(1, 3);    // 0.001
-    let tick_0_0001 = Decimal::new(1, 4);   // 0.0001
+    let tick_0_1 = Decimal::new(1, 1); // 0.1
+    let _tick_0_01 = Decimal::new(1, 2); // 0.01
+    let tick_0_001 = Decimal::new(1, 3); // 0.001
+    let tick_0_0001 = Decimal::new(1, 4); // 0.0001
 
     if tick_size == tick_0_1 {
         TickRoundingConfig {
@@ -149,12 +149,8 @@ pub fn calculate_order_amounts(
     // Convert to token decimals (USDC has 6 decimals)
     // Multiply by 10^6 to get raw integer amounts
     let usdc_multiplier = Decimal::new(1_000_000, 0); // 10^6
-    let maker_raw = (raw_maker * usdc_multiplier)
-        .to_u128()
-        .unwrap_or(0);
-    let taker_raw = (raw_taker * usdc_multiplier)
-        .to_u128()
-        .unwrap_or(0);
+    let maker_raw = (raw_maker * usdc_multiplier).to_u128().unwrap_or(0);
+    let taker_raw = (raw_taker * usdc_multiplier).to_u128().unwrap_or(0);
 
     (maker_raw.to_string(), taker_raw.to_string())
 }
@@ -371,13 +367,22 @@ mod tests {
         assert_eq!(round_price_with_tick(dec!(0.455), dec!(0.01)), dec!(0.45));
 
         // 0.001 tick size
-        assert_eq!(round_price_with_tick(dec!(0.9456), dec!(0.001)), dec!(0.945));
+        assert_eq!(
+            round_price_with_tick(dec!(0.9456), dec!(0.001)),
+            dec!(0.945)
+        );
     }
 
     #[test]
     fn test_calculate_order_amounts_buy() {
         // BUY order: maker gives USDC, taker gives tokens
-        let (maker, taker) = calculate_order_amounts(dec!(0.65), dec!(100), OrderSide::Buy, OrderType::Gtc, dec!(0.01));
+        let (maker, taker) = calculate_order_amounts(
+            dec!(0.65),
+            dec!(100),
+            OrderSide::Buy,
+            OrderType::Gtc,
+            dec!(0.01),
+        );
 
         // price = 0.65, size = 100
         // maker_amount = 0.65 * 100 = 65 USDC = 65,000,000 raw
@@ -389,7 +394,13 @@ mod tests {
     #[test]
     fn test_calculate_order_amounts_sell() {
         // SELL order: maker gives tokens, taker gives USDC
-        let (maker, taker) = calculate_order_amounts(dec!(0.65), dec!(100), OrderSide::Sell, OrderType::Gtc, dec!(0.01));
+        let (maker, taker) = calculate_order_amounts(
+            dec!(0.65),
+            dec!(100),
+            OrderSide::Sell,
+            OrderType::Gtc,
+            dec!(0.01),
+        );
 
         // maker_amount = 100 shares = 100,000,000 raw
         // taker_amount = 0.65 * 100 = 65 USDC = 65,000,000 raw
@@ -877,7 +888,13 @@ mod tests {
     /// Round price/size with tick 0.0001 — 4 price decimals.
     #[test]
     fn test_round_price_with_tick_0001() {
-        assert_eq!(round_price_with_tick(dec!(0.99876), dec!(0.0001)), dec!(0.9987));
-        assert_eq!(round_size_with_tick(dec!(10.999), dec!(0.0001)), dec!(10.99));
+        assert_eq!(
+            round_price_with_tick(dec!(0.99876), dec!(0.0001)),
+            dec!(0.9987)
+        );
+        assert_eq!(
+            round_size_with_tick(dec!(10.999), dec!(0.0001)),
+            dec!(10.99)
+        );
     }
 }

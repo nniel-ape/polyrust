@@ -7,7 +7,9 @@ use polyrust_backtest::{BacktestConfig, BacktestEngine, DataFetcher, HistoricalD
 use polyrust_core::prelude::*;
 use polyrust_dashboard::Dashboard;
 use polyrust_execution::{FillMode, LiveBackend, PaperBackend};
-use polyrust_market::{BinanceFeed, ClobFeed, DiscoveryConfig, DiscoveryFeed, MarketDataFeed, PriceFeed};
+use polyrust_market::{
+    BinanceFeed, ClobFeed, DiscoveryConfig, DiscoveryFeed, MarketDataFeed, PriceFeed,
+};
 use polyrust_store::Store;
 use polyrust_strategies::{
     ArbitrageConfig, CryptoArbBase, CryptoArbDashboard, ReferenceQualityLevel, TailEndDashboard,
@@ -181,7 +183,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Start auto-claim monitor if enabled
     if config.auto_claim.enabled {
-        info!("Auto-claim enabled (poll interval: {}s)", config.auto_claim.poll_interval_secs);
+        info!(
+            "Auto-claim enabled (poll interval: {}s)",
+            config.auto_claim.poll_interval_secs
+        );
         let claim_monitor = Arc::new(ClaimMonitor::new(
             config.auto_claim.clone(),
             engine.event_bus().clone(),
@@ -433,7 +438,10 @@ async fn fetch_markets_with_progress(
     pb.finish_with_message(format!("{completed} ok, {skipped} skipped"));
 
     if skipped > 0 {
-        warn!(skipped, completed, "Some markets failed to fetch and were skipped");
+        warn!(
+            skipped,
+            completed, "Some markets failed to fetch and were skipped"
+        );
     }
 
     (successful_ids, skipped)
@@ -507,7 +515,8 @@ async fn run_backtest() -> anyhow::Result<()> {
 
         info!(
             total_markets = market_ids.len(),
-            "Offline mode: using {} cached markets", market_ids.len()
+            "Offline mode: using {} cached markets",
+            market_ids.len()
         );
     } else {
         if !market_ids.is_empty() {
@@ -533,7 +542,8 @@ async fn run_backtest() -> anyhow::Result<()> {
                 info!(
                     coin,
                     market_count = markets.len(),
-                    "Discovered {} markets for coin", markets.len()
+                    "Discovered {} markets for coin",
+                    markets.len()
                 );
 
                 // Add market IDs to our list
@@ -553,7 +563,8 @@ async fn run_backtest() -> anyhow::Result<()> {
 
             info!(
                 total_markets = market_ids.len(),
-                "Discovered {} total markets", market_ids.len()
+                "Discovered {} total markets",
+                market_ids.len()
             );
         }
 
@@ -583,7 +594,9 @@ async fn run_backtest() -> anyhow::Result<()> {
         info!("Fetching historical Binance klines for configured coins");
         let crypto_fetcher = DataFetcher::new(
             Arc::clone(&data_store),
-            DataFetchConfig { fidelity_secs: backtest_config.data_fidelity_secs },
+            DataFetchConfig {
+                fidelity_secs: backtest_config.data_fidelity_secs,
+            },
         )?;
         crypto_fetcher
             .fetch_crypto_prices(
@@ -633,9 +646,14 @@ async fn run_backtest() -> anyhow::Result<()> {
 
     // Generate report from stored results
     use polyrust_backtest::BacktestReport;
-    let report =
-        BacktestReport::from_engine_results(results_store, trades, initial_balance, start_time, end_time)
-            .await?;
+    let report = BacktestReport::from_engine_results(
+        results_store,
+        trades,
+        initial_balance,
+        start_time,
+        end_time,
+    )
+    .await?;
 
     // Print report summary
     println!("\n{}", report.summary());
@@ -702,14 +720,16 @@ async fn run_backtest_sweep() -> anyhow::Result<()> {
 
         info!(
             total_markets = market_ids.len(),
-            "Offline mode: using {} cached markets", market_ids.len()
+            "Offline mode: using {} cached markets",
+            market_ids.len()
         );
     } else {
         // Online mode: discover and fetch markets
         let fetch_config = DataFetchConfig {
             fidelity_secs: backtest_config.data_fidelity_secs,
         };
-        let data_fetcher = polyrust_backtest::DataFetcher::new(Arc::clone(&data_store), fetch_config)?;
+        let data_fetcher =
+            polyrust_backtest::DataFetcher::new(Arc::clone(&data_store), fetch_config)?;
 
         if market_ids.is_empty() {
             info!("No market_ids configured - discovering markets for configured coins");
@@ -772,7 +792,10 @@ async fn run_backtest_sweep() -> anyhow::Result<()> {
     arb_config.tailend.min_reference_quality = ReferenceQualityLevel::Current;
 
     // Run sweep
-    let rank_by = sweep_config.rank_by.clone().unwrap_or_else(|| "sharpe".to_string());
+    let rank_by = sweep_config
+        .rank_by
+        .clone()
+        .unwrap_or_else(|| "sharpe".to_string());
     let top_n = sweep_config.top_n.unwrap_or(20);
     let csv_path = sweep_config.csv_export.clone();
     let json_path = sweep_config.json_export.clone();

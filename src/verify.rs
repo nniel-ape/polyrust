@@ -3,6 +3,7 @@
 //! Lightweight smoke tests for external service connectivity.
 //! Each check runs with a timeout and reports PASS/FAIL/SKIP.
 
+use std::str::FromStr;
 use std::time::Duration;
 
 use tracing::info;
@@ -30,12 +31,15 @@ pub async fn run_verify() -> anyhow::Result<()> {
     info!("Running API connectivity checks...");
     println!("\n=== Polyrust API Connectivity Verification ===\n");
 
-    let mut results = Vec::new();
+    // Run all independent checks concurrently
+    let (gamma, chainlink, clob_auth, approvals) = tokio::join!(
+        check_gamma_api(),
+        check_chainlink(),
+        check_clob_auth(),
+        check_approvals(),
+    );
 
-    // Run independent checks concurrently
-    let (gamma, chainlink) = tokio::join!(check_gamma_api(), check_chainlink());
-    results.push(gamma);
-    results.push(chainlink);
+    let results = [gamma, chainlink, clob_auth, approvals];
 
     // Print results
     println!();
@@ -60,6 +64,24 @@ pub async fn run_verify() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Load private key from POLY_PRIVATE_KEY env var.
+fn load_private_key() -> Option<String> {
+    std::env::var("POLY_PRIVATE_KEY").ok().filter(|s| !s.is_empty())
+}
+
+/// Load RPC URLs from POLY_RPC_URLS env var.
+fn load_rpc_urls() -> Vec<String> {
+    std::env::var("POLY_RPC_URLS")
+        .ok()
+        .map(|urls| {
+            urls.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Check Gamma API: fetch a known market slug.
 async fn check_gamma_api() -> CheckResult {
     use polymarket_client_sdk::gamma;
@@ -74,9 +96,7 @@ async fn check_gamma_api() -> CheckResult {
     .await;
 
     match result {
-        Ok(Ok(_market)) => {
-            CheckResult::Pass("Gamma API — market lookup succeeded".to_string())
-        }
+        Ok(Ok(_market)) => CheckResult::Pass("Gamma API — market lookup succeeded".to_string()),
         Ok(Err(e)) => {
             let msg = e.to_string();
             // A 404 still proves connectivity (slug may not exist)
@@ -94,21 +114,10 @@ async fn check_gamma_api() -> CheckResult {
 
 /// Check Chainlink Oracle (requires POLY_RPC_URLS).
 async fn check_chainlink() -> CheckResult {
-    let rpc_urls = match std::env::var("POLY_RPC_URLS") {
-        Ok(urls) => urls
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>(),
-        Err(_) => {
-            return CheckResult::Skip(
-                "Chainlink Oracle — POLY_RPC_URLS not set".to_string(),
-            );
-        }
-    };
+    let rpc_urls = load_rpc_urls();
 
     if rpc_urls.is_empty() {
-        return CheckResult::Skip("Chainlink Oracle — POLY_RPC_URLS empty".to_string());
+        return CheckResult::Skip("Chainlink Oracle — POLY_RPC_URLS not set".to_string());
     }
 
     let result = tokio::time::timeout(Duration::from_secs(15), async {
@@ -121,12 +130,125 @@ async fn check_chainlink() -> CheckResult {
 
     match result {
         Ok(Ok(price)) => {
-            CheckResult::Pass(format!(
-                "Chainlink Oracle — BTC price: ${}",
-                price.price
-            ))
+            CheckResult::Pass(format!("Chainlink Oracle — BTC price: ${}", price.price))
         }
         Ok(Err(e)) => CheckResult::Fail(format!("Chainlink Oracle — {e}")),
         Err(_) => CheckResult::Fail("Chainlink Oracle — timeout (15s)".to_string()),
+    }
+}
+
+/// Check CLOB API authentication (requires POLY_PRIVATE_KEY).
+///
+/// Mirrors the auth flow in `LiveBackend::new()`: parses the private key,
+/// creates a CLOB client, optionally sets the Safe funder, and authenticates.
+async fn check_clob_auth() -> CheckResult {
+    use polymarket_client_sdk::POLYGON;
+    use polymarket_client_sdk::auth::{LocalSigner, Signer as _};
+    use polymarket_client_sdk::clob::types::SignatureType;
+    use polymarket_client_sdk::clob::{Client, Config as SdkConfig};
+    use polymarket_client_sdk::types::Address as SdkAddress;
+
+    let private_key = match load_private_key() {
+        Some(pk) => pk,
+        None => return CheckResult::Skip("CLOB Auth — POLY_PRIVATE_KEY not set".to_string()),
+    };
+
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
+        let signer = LocalSigner::from_str(&private_key)
+            .map_err(|e| format!("Invalid private key: {e}"))?
+            .with_chain_id(Some(POLYGON));
+
+        let sdk_config = SdkConfig::builder().use_server_time(true).build();
+        let client = Client::new("https://clob.polymarket.com", sdk_config)
+            .map_err(|e| format!("Failed to create SDK client: {e}"))?;
+
+        let mut auth_builder = client.authentication_builder(&signer);
+
+        if let Ok(safe_addr) = std::env::var("POLY_SAFE_ADDRESS")
+            && !safe_addr.is_empty()
+        {
+            let funder = SdkAddress::from_str(&safe_addr)
+                .map_err(|e| format!("Invalid safe address: {e}"))?;
+            auth_builder = auth_builder
+                .funder(funder)
+                .signature_type(SignatureType::GnosisSafe);
+        }
+
+        let authenticated = auth_builder
+            .authenticate()
+            .await
+            .map_err(|e| format!("Authentication failed: {e}"))?;
+
+        Ok::<_, String>(authenticated.address().to_string())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(address)) => CheckResult::Pass(format!("CLOB Auth — authenticated as {address}")),
+        Ok(Err(e)) => CheckResult::Fail(format!("CLOB Auth — {e}")),
+        Err(_) => CheckResult::Fail("CLOB Auth — timeout (15s)".to_string()),
+    }
+}
+
+/// Check on-chain token approvals (requires POLY_PRIVATE_KEY + POLY_RPC_URLS).
+///
+/// Determines the owner address (Safe if set, else EOA from private key) and
+/// calls `check_approvals_readonly()` to verify all 7 required approvals.
+async fn check_approvals() -> CheckResult {
+    use alloy::primitives::Address;
+    use alloy::signers::local::PrivateKeySigner;
+
+    let private_key = match load_private_key() {
+        Some(pk) => pk,
+        None => return CheckResult::Skip("Approvals — POLY_PRIVATE_KEY not set".to_string()),
+    };
+
+    let rpc_urls = load_rpc_urls();
+    if rpc_urls.is_empty() {
+        return CheckResult::Skip("Approvals — POLY_RPC_URLS not set".to_string());
+    }
+
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
+        // Determine owner: Safe address if set, else EOA from private key
+        let owner: Address =
+            if let Ok(safe_addr) = std::env::var("POLY_SAFE_ADDRESS")
+                && !safe_addr.is_empty()
+            {
+                safe_addr
+                    .parse()
+                    .map_err(|e| format!("Invalid POLY_SAFE_ADDRESS: {e}"))?
+            } else {
+                let signer: PrivateKeySigner = private_key
+                    .parse()
+                    .map_err(|e| format!("Invalid private key: {e}"))?;
+                signer.address()
+            };
+
+        let statuses = polyrust_execution::check_approvals_readonly(&rpc_urls[0], owner)
+            .await
+            .map_err(|e| format!("{e}"))?;
+
+        let missing: Vec<&str> = statuses
+            .iter()
+            .filter(|s| !s.approved)
+            .map(|s| s.name)
+            .collect();
+
+        if missing.is_empty() {
+            Ok(format!("all 7 approvals set for {owner}"))
+        } else {
+            Err(format!(
+                "missing {} approval(s) for {owner}: {}",
+                missing.len(),
+                missing.join(", ")
+            ))
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(msg)) => CheckResult::Pass(format!("Approvals — {msg}")),
+        Ok(Err(e)) => CheckResult::Fail(format!("Approvals — {e}")),
+        Err(_) => CheckResult::Fail("Approvals — timeout (15s)".to_string()),
     }
 }

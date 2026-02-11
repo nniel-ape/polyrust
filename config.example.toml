@@ -4,7 +4,8 @@
 # Override any value with POLY_* environment variables:
 #   POLY_PRIVATE_KEY, POLY_SAFE_ADDRESS,
 #   POLY_BUILDER_API_KEY, POLY_BUILDER_API_SECRET, POLY_BUILDER_API_PASSPHRASE,
-#   POLY_DASHBOARD_PORT, POLY_DB_PATH, POLY_PAPER_TRADING, POLY_RPC_URLS
+#   POLY_DASHBOARD_PORT, POLY_DB_PATH, POLY_PAPER_TRADING, POLY_RPC_URLS,
+#   POLY_USE_RELAYER, POLY_RELAYER_URL
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENGINE
@@ -13,6 +14,7 @@
 [engine]
 event_bus_capacity = 4096        # Tokio broadcast channel capacity
 health_check_interval_secs = 30  # Health check frequency
+reconcile_interval_secs = 15     # Order reconciliation interval (0 = disabled)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # POLYMARKET CREDENTIALS
@@ -29,6 +31,12 @@ health_check_interval_secs = 30  # Health check frequency
 # Polygon RPC endpoints for on-chain Chainlink oracle queries (tried in order).
 # Override via POLY_RPC_URLS environment variable (comma-separated).
 rpc_urls = ["https://polygon-rpc.com"]
+
+# Gasless relayer — routes Safe transactions through Polymarket's gas-sponsored
+# relayer. Falls back to direct RPC (pays gas in POL) on relayer failure.
+# Requires builder credentials above. Override via POLY_USE_RELAYER, POLY_RELAYER_URL.
+use_relayer = true                                        # Enable gasless relayer (default: true when builder creds present)
+# relayer_url = "https://relayer-v2.polymarket.com"       # Custom relayer endpoint (default)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DASHBOARD
@@ -94,6 +102,7 @@ batch_min_count = 3           # Flush early when this many claims are ready (bef
 # enabled = true                 # Enable TailEnd mode
 # time_threshold_secs = 120      # Max time remaining to enter (default 120s)
 # ask_threshold = 0.90           # Minimum ask price to enter (default 0.90)
+# min_sustained_ticks = 2        # Minimum price ticks confirming direction (default 2)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TwoSided Mode

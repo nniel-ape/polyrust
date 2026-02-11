@@ -326,7 +326,10 @@ impl BacktestEngine {
     /// Used by sweep runner to share a single event load across many runs.
     /// The engine must have been initialized with the correct config
     /// (including market_ids for market_tokens/token_to_market mappings).
-    pub async fn run_with_events(&mut self, events: &[HistoricalEvent]) -> Result<Vec<BacktestTrade>> {
+    pub async fn run_with_events(
+        &mut self,
+        events: &[HistoricalEvent],
+    ) -> Result<Vec<BacktestTrade>> {
         // Call strategy.on_start if run() didn't already
         // (For sweep mode, run_with_events is called directly)
 
@@ -389,7 +392,10 @@ impl BacktestEngine {
             }
 
             // Count market discoveries
-            if matches!(&historical_event.event, Event::MarketData(MarketDataEvent::MarketDiscovered(_))) {
+            if matches!(
+                &historical_event.event,
+                Event::MarketData(MarketDataEvent::MarketDiscovered(_))
+            ) {
                 self.markets_discovered += 1;
             }
 
@@ -758,7 +764,9 @@ impl BacktestEngine {
                     events.push(HistoricalEvent {
                         timestamp: m.end_date,
                         token_id: m.token_a.clone(),
-                        event: Event::MarketData(MarketDataEvent::MarketExpired(m.market_id.clone())),
+                        event: Event::MarketData(MarketDataEvent::MarketExpired(
+                            m.market_id.clone(),
+                        )),
                     });
                 }
             }
@@ -768,11 +776,7 @@ impl BacktestEngine {
                 // Load price history
                 let prices = self
                     .data_store
-                    .get_historical_prices(
-                        &token_id,
-                        self.config.start_date,
-                        self.config.end_date,
-                    )
+                    .get_historical_prices(&token_id, self.config.start_date, self.config.end_date)
                     .await
                     .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
 
@@ -797,11 +801,7 @@ impl BacktestEngine {
                 // Load trade history for this token
                 let trades = self
                     .data_store
-                    .get_historical_trades(
-                        &token_id,
-                        self.config.start_date,
-                        self.config.end_date,
-                    )
+                    .get_historical_trades(&token_id, self.config.start_date, self.config.end_date)
                     .await
                     .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
 
@@ -915,7 +915,9 @@ impl BacktestEngine {
                         .iter()
                         .filter_map(|e| {
                             if let Event::MarketData(MarketDataEvent::Trade {
-                                token_id, price, ..
+                                token_id,
+                                price,
+                                ..
                             }) = &e.event
                             {
                                 if up_tokens.contains(token_id) {
@@ -956,10 +958,8 @@ impl BacktestEngine {
 
         // Synthesize PriceChange events from trades at configured fidelity
         {
-            let synthetic = synthesize_price_events_from_trades(
-                &events,
-                self.config.data_fidelity_secs,
-            );
+            let synthetic =
+                synthesize_price_events_from_trades(&events, self.config.data_fidelity_secs);
             info!(
                 synthetic_prices = synthetic.len(),
                 fidelity_secs = self.config.data_fidelity_secs,
@@ -986,7 +986,6 @@ impl BacktestEngine {
 
         Ok(events)
     }
-
 
     /// Execute a single action from the strategy.
     ///
@@ -1021,8 +1020,7 @@ impl BacktestEngine {
             Action::CancelOrder(order_id) => {
                 // Feed OrderEvent::Cancelled back to the strategy so it can
                 // clean up open_limit_orders and unblock has_market_exposure.
-                let cancelled_event =
-                    Event::OrderUpdate(OrderEvent::Cancelled(order_id.clone()));
+                let cancelled_event = Event::OrderUpdate(OrderEvent::Cancelled(order_id.clone()));
                 let actions = self.strategy.on_event(&cancelled_event, &self.ctx).await?;
                 for action in actions {
                     // Use Box::pin to avoid infinite future size from recursion
@@ -1042,10 +1040,7 @@ impl BacktestEngine {
     ///
     /// Returns the primary trade plus any secondary trades triggered by the strategy
     /// reacting to the fill events (e.g. stop-loss exits).
-    async fn execute_and_notify(
-        &mut self,
-        order: OrderRequest,
-    ) -> Result<Vec<BacktestTrade>> {
+    async fn execute_and_notify(&mut self, order: OrderRequest) -> Result<Vec<BacktestTrade>> {
         let mut trades = Vec::new();
         if let Some(trade) = self.execute_order(order).await? {
             let order_id = Uuid::new_v4().to_string();
@@ -1139,8 +1134,11 @@ impl BacktestEngine {
                 let cost = current_price * order.size;
                 let fee = match order.order_type {
                     OrderType::Fok => {
-                        Decimal::TWO * current_price * (Decimal::ONE - current_price)
-                            * self.config.fees.taker_fee_rate * order.size
+                        Decimal::TWO
+                            * current_price
+                            * (Decimal::ONE - current_price)
+                            * self.config.fees.taker_fee_rate
+                            * order.size
                     }
                     _ => Decimal::ZERO, // GTC/GTD = maker = 0% fee
                 };
@@ -1163,7 +1161,9 @@ impl BacktestEngine {
                 // Include fees in the effective entry price for accurate P&L calculation
                 let fee_per_share = match order.order_type {
                     OrderType::Fok => {
-                        Decimal::TWO * current_price * (Decimal::ONE - current_price)
+                        Decimal::TWO
+                            * current_price
+                            * (Decimal::ONE - current_price)
                             * self.config.fees.taker_fee_rate
                     }
                     _ => Decimal::ZERO,
@@ -1283,8 +1283,11 @@ impl BacktestEngine {
                 let revenue = current_price * order.size;
                 let fee = match order.order_type {
                     OrderType::Fok => {
-                        Decimal::TWO * current_price * (Decimal::ONE - current_price)
-                            * self.config.fees.taker_fee_rate * order.size
+                        Decimal::TWO
+                            * current_price
+                            * (Decimal::ONE - current_price)
+                            * self.config.fees.taker_fee_rate
+                            * order.size
                     }
                     _ => Decimal::ZERO, // GTC/GTD = maker = 0% fee
                 };
@@ -1311,7 +1314,9 @@ impl BacktestEngine {
                 let position_to_update = positions
                     .open_positions
                     .iter()
-                    .find(|(_, p)| p.token_id == order.token_id && p.strategy_name == self.strategy.name())
+                    .find(|(_, p)| {
+                        p.token_id == order.token_id && p.strategy_name == self.strategy.name()
+                    })
                     .map(|(id, _)| *id);
 
                 if let Some(pos_id) = position_to_update {
@@ -1476,7 +1481,9 @@ mod tests {
             sweep: None,
         };
 
-        let strategy = Box::new(TestStrategy { price_event_count: 0 });
+        let strategy = Box::new(TestStrategy {
+            price_event_count: 0,
+        });
 
         let mut engine = BacktestEngine::new(config, strategy, data_store, store.clone()).await;
 
@@ -1557,7 +1564,9 @@ mod tests {
             sweep: None,
         };
 
-        let strategy = Box::new(TestStrategy { price_event_count: 0 });
+        let strategy = Box::new(TestStrategy {
+            price_event_count: 0,
+        });
         let mut engine = BacktestEngine::new(config, strategy, data_store, store).await;
 
         let trades = engine.run().await.unwrap();
@@ -1604,7 +1613,9 @@ mod tests {
             sweep: None,
         };
 
-        let strategy = Box::new(TestStrategy { price_event_count: 0 });
+        let strategy = Box::new(TestStrategy {
+            price_event_count: 0,
+        });
         let mut engine = BacktestEngine::new(config, strategy, data_store, store).await;
 
         let trades = engine.run().await.unwrap();
@@ -1643,7 +1654,11 @@ mod tests {
 
         // Buckets (5s): [1000-1005), [1005-1010), [1010-1015), [1015-1020), [1020-1025), [1025-1030)
         // Trade at t=1000 -> bucket 1000, t=1003 -> bucket 1000, t=1006 -> bucket 1005, ...
-        assert_eq!(result.len(), 6, "Expected 6 buckets for 10 trades over 30s at 5s fidelity");
+        assert_eq!(
+            result.len(),
+            6,
+            "Expected 6 buckets for 10 trades over 30s at 5s fidelity"
+        );
 
         // All should be PriceChange events
         for event in &result {

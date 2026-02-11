@@ -416,8 +416,7 @@ impl ExecutionBackend for ConfigurableBackend {
 
 #[tokio::test]
 async fn engine_place_order_publishes_placed_event() {
-    let backend: Arc<dyn ExecutionBackend> =
-        Arc::new(ConfigurableBackend::accepting(dec!(1000)));
+    let backend: Arc<dyn ExecutionBackend> = Arc::new(ConfigurableBackend::accepting(dec!(1000)));
     let event_bus = EventBus::default();
     let context = StrategyContext::new();
     let mut subscriber = event_bus.subscribe();
@@ -431,9 +430,16 @@ async fn engine_place_order_publishes_placed_event() {
         false,
     ));
 
-    execute_action(&action, &backend, &event_bus, &context, "test-strategy", None)
-        .await
-        .unwrap();
+    execute_action(
+        &action,
+        &backend,
+        &event_bus,
+        &context,
+        "test-strategy",
+        None,
+    )
+    .await
+    .unwrap();
 
     // Should receive Placed event
     let event = tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.recv())
@@ -457,8 +463,7 @@ async fn engine_place_order_publishes_placed_event() {
 
 #[tokio::test]
 async fn engine_order_rejection_publishes_rejected_event() {
-    let backend: Arc<dyn ExecutionBackend> =
-        Arc::new(ConfigurableBackend::rejecting(dec!(1000)));
+    let backend: Arc<dyn ExecutionBackend> = Arc::new(ConfigurableBackend::rejecting(dec!(1000)));
     let event_bus = EventBus::default();
     let context = StrategyContext::new();
     let mut subscriber = event_bus.subscribe();
@@ -472,9 +477,16 @@ async fn engine_order_rejection_publishes_rejected_event() {
         false,
     ));
 
-    execute_action(&action, &backend, &event_bus, &context, "test-strategy", None)
-        .await
-        .unwrap();
+    execute_action(
+        &action,
+        &backend,
+        &event_bus,
+        &context,
+        "test-strategy",
+        None,
+    )
+    .await
+    .unwrap();
 
     let event = tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.recv())
         .await
@@ -494,17 +506,23 @@ async fn engine_order_rejection_publishes_rejected_event() {
 
 #[tokio::test]
 async fn engine_cancel_order_publishes_cancelled_event() {
-    let backend: Arc<dyn ExecutionBackend> =
-        Arc::new(ConfigurableBackend::accepting(dec!(1000)));
+    let backend: Arc<dyn ExecutionBackend> = Arc::new(ConfigurableBackend::accepting(dec!(1000)));
     let event_bus = EventBus::default();
     let context = StrategyContext::new();
     let mut subscriber = event_bus.subscribe();
 
     let action = Action::CancelOrder("order-456".to_string());
 
-    execute_action(&action, &backend, &event_bus, &context, "test-strategy", None)
-        .await
-        .unwrap();
+    execute_action(
+        &action,
+        &backend,
+        &event_bus,
+        &context,
+        "test-strategy",
+        None,
+    )
+    .await
+    .unwrap();
 
     let event = tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.recv())
         .await
@@ -521,8 +539,7 @@ async fn engine_cancel_order_publishes_cancelled_event() {
 
 #[tokio::test]
 async fn engine_batch_order_publishes_per_leg() {
-    let backend: Arc<dyn ExecutionBackend> =
-        Arc::new(ConfigurableBackend::accepting(dec!(1000)));
+    let backend: Arc<dyn ExecutionBackend> = Arc::new(ConfigurableBackend::accepting(dec!(1000)));
     let event_bus = EventBus::default();
     let context = StrategyContext::new();
     let mut subscriber = event_bus.subscribe();
@@ -546,9 +563,16 @@ async fn engine_batch_order_publishes_per_leg() {
         ),
     ]);
 
-    execute_action(&action, &backend, &event_bus, &context, "test-strategy", None)
-        .await
-        .unwrap();
+    execute_action(
+        &action,
+        &backend,
+        &event_bus,
+        &context,
+        "test-strategy",
+        None,
+    )
+    .await
+    .unwrap();
 
     // Should receive 2 Placed events (one per leg)
     let event1 = tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.recv())
@@ -563,7 +587,10 @@ async fn engine_batch_order_publishes_per_leg() {
     // Events might also include Filled events since status is "Filled",
     // but we verify at least the first 2 are Placed events
     match (&event1, &event2) {
-        (Event::OrderUpdate(OrderEvent::Placed(r1)), Event::OrderUpdate(OrderEvent::Placed(r2))) => {
+        (
+            Event::OrderUpdate(OrderEvent::Placed(r1)),
+            Event::OrderUpdate(OrderEvent::Placed(r2)),
+        ) => {
             assert!(r1.success);
             assert!(r2.success);
             // Both should have same token_ids from the batch (order may vary due to sequential processing)
@@ -571,6 +598,9 @@ async fn engine_batch_order_publishes_per_leg() {
             assert!(tokens.contains(&"token_a".to_string()));
             assert!(tokens.contains(&"token_b".to_string()));
         }
-        _ => panic!("Expected two Placed events, got {:?} and {:?}", event1, event2),
+        _ => panic!(
+            "Expected two Placed events, got {:?} and {:?}",
+            event1, event2
+        ),
     }
 }

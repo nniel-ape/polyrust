@@ -143,7 +143,8 @@ pub fn parse_slug_timestamp(slug: &str) -> Option<DateTime<Utc>> {
 }
 
 /// Default minimum order size in shares (5.0 shares).
-const DEFAULT_MIN_ORDER_SIZE: rust_decimal::Decimal = rust_decimal::Decimal::from_parts(50, 0, 0, false, 1); // 5.0
+const DEFAULT_MIN_ORDER_SIZE: rust_decimal::Decimal =
+    rust_decimal::Decimal::from_parts(50, 0, 0, false, 1); // 5.0
 
 /// Convert a Gamma API market to our domain MarketInfo.
 /// Returns None if required fields are missing.
@@ -168,7 +169,9 @@ fn convert_market(market: &gamma::types::response::Market) -> Option<MarketInfo>
     let min_order_size = market.order_min_size.unwrap_or(DEFAULT_MIN_ORDER_SIZE);
 
     // Extract tick size from API, default to 0.01
-    let tick_size = market.order_price_min_tick_size.unwrap_or_else(|| Decimal::new(1, 2));
+    let tick_size = market
+        .order_price_min_tick_size
+        .unwrap_or_else(|| Decimal::new(1, 2));
 
     // Extract fee rate from API (maker_base_fee is in basis points), default to 0
     let fee_rate_bps = market.maker_base_fee.map(|f| f as u32).unwrap_or(0);
@@ -216,9 +219,9 @@ impl MarketDataFeed for DiscoveryFeed {
                         consecutive_failures += 1;
                         if consecutive_failures > 3 {
                             let backoff = std::cmp::min(
-                                config
-                                    .poll_interval_secs
-                                    .saturating_mul(2u64.saturating_pow(consecutive_failures.saturating_sub(3))),
+                                config.poll_interval_secs.saturating_mul(
+                                    2u64.saturating_pow(consecutive_failures.saturating_sub(3)),
+                                ),
                                 300,
                             );
                             warn!(
@@ -234,8 +237,7 @@ impl MarketDataFeed for DiscoveryFeed {
                     }
                 }
 
-                tokio::time::sleep(std::time::Duration::from_secs(config.poll_interval_secs))
-                    .await;
+                tokio::time::sleep(std::time::Duration::from_secs(config.poll_interval_secs)).await;
             }
         });
 
@@ -353,7 +355,11 @@ mod tests {
     fn test_current_window_timestamp_aligned() {
         let ts = current_window_timestamp();
         // Must be divisible by 900 (15 minutes)
-        assert_eq!(ts % WINDOW_SECS, 0, "timestamp {ts} not aligned to 15-min window");
+        assert_eq!(
+            ts % WINDOW_SECS,
+            0,
+            "timestamp {ts} not aligned to 15-min window"
+        );
     }
 
     #[test]
@@ -409,7 +415,11 @@ mod tests {
 
         let market = Market::builder()
             .id("test-id".to_string())
-            .condition_id("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".parse().unwrap())
+            .condition_id(
+                "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                    .parse()
+                    .unwrap(),
+            )
             .question("Will BTC go up?".to_string())
             .slug("btc-updown-15m-1706000000".to_string())
             .end_date(Utc.with_ymd_and_hms(2024, 1, 23, 15, 0, 0).unwrap())
@@ -436,7 +446,11 @@ mod tests {
 
         let market = Market::builder()
             .id("test-id".to_string())
-            .condition_id("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".parse().unwrap())
+            .condition_id(
+                "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                    .parse()
+                    .unwrap(),
+            )
             .question("Will BTC go up?".to_string())
             .slug("btc-updown-15m-1706000000".to_string())
             .end_date(Utc.with_ymd_and_hms(2024, 1, 23, 15, 0, 0).unwrap())
@@ -460,7 +474,11 @@ mod tests {
 
         let market = Market::builder()
             .id("test-id".to_string())
-            .condition_id("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".parse().unwrap())
+            .condition_id(
+                "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                    .parse()
+                    .unwrap(),
+            )
             .question("Will BTC go up?".to_string())
             .slug("btc-updown-15m-1706000000".to_string())
             .end_date(Utc.with_ymd_and_hms(2024, 1, 23, 15, 0, 0).unwrap())

@@ -18,7 +18,7 @@ use rust_decimal::Decimal;
 use polyrust_core::prelude::*;
 
 use crate::crypto_arb::base::{
-    escape_html, fmt_market_price, fmt_usd, net_profit_margin, taker_fee, CryptoArbBase,
+    CryptoArbBase, escape_html, fmt_market_price, fmt_usd, net_profit_margin, taker_fee,
 };
 use crate::crypto_arb::types::{ArbitrageMode, ReferenceQuality};
 
@@ -145,8 +145,7 @@ async fn render_positions_for_mode(base: &CryptoArbBase, html: &mut String, mode
             let current = cached_asks.get(&pos.token_id).copied();
             let (current_str, pnl_str, pnl_class) = match current {
                 Some(cp) => {
-                    let pnl =
-                        (cp - pos.entry_price) * pos.size - (pos.estimated_fee * pos.size);
+                    let pnl = (cp - pos.entry_price) * pos.size - (pos.estimated_fee * pos.size);
                     let cls = if pnl >= Decimal::ZERO {
                         "pnl-positive"
                     } else {
@@ -533,7 +532,11 @@ impl TailEndDashboard {
         } else {
             r#"<span class="text-gray-500">Disabled</span>"#
         };
-        let _ = write!(html, r#"<p class="text-sm text-gray-400">Status: {}</p>"#, status);
+        let _ = write!(
+            html,
+            r#"<p class="text-sm text-gray-400">Status: {}</p>"#,
+            status
+        );
         html.push_str("</div>");
 
         // Config summary
@@ -683,9 +686,8 @@ impl TailEndDashboard {
                                 _ => &mwr.market.token_ids.outcome_b,
                             };
                             let ask = cached_asks.get(token_id).copied();
-                            let ask_display = ask
-                                .map(fmt_market_price)
-                                .unwrap_or_else(|| "-".to_string());
+                            let ask_display =
+                                ask.map(fmt_market_price).unwrap_or_else(|| "-".to_string());
 
                             match ask {
                                 Some(market_price) => {
@@ -787,7 +789,11 @@ impl TwoSidedDashboard {
         } else {
             r#"<span class="text-gray-500">Disabled</span>"#
         };
-        let _ = write!(html, r#"<p class="text-sm text-gray-400">Status: {}</p>"#, status);
+        let _ = write!(
+            html,
+            r#"<p class="text-sm text-gray-400">Status: {}</p>"#,
+            status
+        );
         html.push_str("</div>");
 
         // Config summary

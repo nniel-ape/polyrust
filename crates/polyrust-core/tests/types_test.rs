@@ -214,7 +214,7 @@ fn market_info_seconds_remaining() {
         accepting_orders: true,
         neg_risk: false,
         min_order_size: Decimal::new(50, 1), // 5.0 shares default
-        tick_size: Decimal::new(1, 2), // 0.01 default
+        tick_size: Decimal::new(1, 2),       // 0.01 default
         fee_rate_bps: 0,
     };
     let remaining = market.seconds_remaining();
@@ -238,7 +238,7 @@ fn market_info_has_ended() {
         accepting_orders: false,
         neg_risk: false,
         min_order_size: Decimal::new(50, 1), // 5.0 shares default
-        tick_size: Decimal::new(1, 2), // 0.01 default
+        tick_size: Decimal::new(1, 2),       // 0.01 default
         fee_rate_bps: 0,
     };
     assert!(market.has_ended());

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use libsql::{params, Builder, Connection, Database};
+use libsql::{Builder, Connection, Database, params};
 use rust_decimal::Decimal;
 use tokio::sync::Mutex;
 use tracing::info;
@@ -52,14 +52,14 @@ pub struct DataFetchLog {
 /// Historical crypto price from Binance klines (OHLCV).
 #[derive(Debug, Clone)]
 pub struct HistoricalCryptoPrice {
-    pub symbol: String,          // "BTC", "ETH"
+    pub symbol: String, // "BTC", "ETH"
     pub timestamp: DateTime<Utc>,
     pub open: Decimal,
     pub high: Decimal,
     pub low: Decimal,
     pub close: Decimal,
     pub volume: Decimal,
-    pub source: String,          // "binance-spot", "binance-futures"
+    pub source: String, // "binance-spot", "binance-futures"
 }
 
 /// Persistent historical data cache using libsql/Turso.
@@ -85,7 +85,11 @@ impl HistoricalDataStore {
             .connect()
             .map_err(|e| BacktestError::Database(e.to_string()))?;
 
-        let store = Self { _db: db, conn, write_lock: Mutex::new(()) };
+        let store = Self {
+            _db: db,
+            conn,
+            write_lock: Mutex::new(()),
+        };
         store.run_migrations().await?;
         info!(path, "HistoricalDataStore initialized");
         Ok(store)
@@ -108,7 +112,7 @@ impl HistoricalDataStore {
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
              PRAGMA cache_size=-64000;
-             PRAGMA temp_store=MEMORY;"
+             PRAGMA temp_store=MEMORY;",
         )
         .await
         .map_err(|e| BacktestError::Database(e.to_string()))?;
@@ -184,7 +188,10 @@ impl HistoricalDataStore {
 
     /// Insert multiple historical prices (batch operation).
     /// Uses `execute_batch` to send all INSERTs in one call per chunk.
-    pub async fn insert_historical_prices(&self, prices: Vec<HistoricalPrice>) -> BacktestResult<()> {
+    pub async fn insert_historical_prices(
+        &self,
+        prices: Vec<HistoricalPrice>,
+    ) -> BacktestResult<()> {
         if prices.is_empty() {
             return Ok(());
         }
@@ -213,7 +220,10 @@ impl HistoricalDataStore {
 
     /// Insert multiple historical trades (batch operation).
     /// Uses `execute_batch` to send all INSERTs in one call per chunk.
-    pub async fn insert_historical_trades(&self, trades: Vec<HistoricalTrade>) -> BacktestResult<()> {
+    pub async fn insert_historical_trades(
+        &self,
+        trades: Vec<HistoricalTrade>,
+    ) -> BacktestResult<()> {
         if trades.is_empty() {
             return Ok(());
         }
@@ -290,7 +300,10 @@ impl HistoricalDataStore {
     // Query methods
 
     /// Get a historical market by market_id.
-    pub async fn get_historical_market(&self, market_id: &str) -> BacktestResult<Option<HistoricalMarket>> {
+    pub async fn get_historical_market(
+        &self,
+        market_id: &str,
+    ) -> BacktestResult<Option<HistoricalMarket>> {
         let conn = self.conn();
         let mut rows = conn
             .query(
@@ -300,23 +313,43 @@ impl HistoricalDataStore {
             .await
             .map_err(|e| BacktestError::Database(e.to_string()))?;
 
-        if let Some(row) = rows.next().await.map_err(|e| BacktestError::Database(e.to_string()))? {
-            let start_str: String = row.get(3).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let end_str: String = row.get(4).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let neg_risk_int: i64 = row.get(7).map_err(|e| BacktestError::Database(e.to_string()))?;
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| BacktestError::Database(e.to_string()))?
+        {
+            let start_str: String = row
+                .get(3)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let end_str: String = row
+                .get(4)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let neg_risk_int: i64 = row
+                .get(7)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
 
             Ok(Some(HistoricalMarket {
-                market_id: row.get(0).map_err(|e| BacktestError::Database(e.to_string()))?,
-                slug: row.get(1).map_err(|e| BacktestError::Database(e.to_string()))?,
-                question: row.get(2).map_err(|e| BacktestError::Database(e.to_string()))?,
+                market_id: row
+                    .get(0)
+                    .map_err(|e| BacktestError::Database(e.to_string()))?,
+                slug: row
+                    .get(1)
+                    .map_err(|e| BacktestError::Database(e.to_string()))?,
+                question: row
+                    .get(2)
+                    .map_err(|e| BacktestError::Database(e.to_string()))?,
                 start_date: DateTime::parse_from_rfc3339(&start_str)
                     .map_err(|e| BacktestError::Database(format!("Invalid start_date: {}", e)))?
                     .with_timezone(&Utc),
                 end_date: DateTime::parse_from_rfc3339(&end_str)
                     .map_err(|e| BacktestError::Database(format!("Invalid end_date: {}", e)))?
                     .with_timezone(&Utc),
-                token_a: row.get(5).map_err(|e| BacktestError::Database(e.to_string()))?,
-                token_b: row.get(6).map_err(|e| BacktestError::Database(e.to_string()))?,
+                token_a: row
+                    .get(5)
+                    .map_err(|e| BacktestError::Database(e.to_string()))?,
+                token_b: row
+                    .get(6)
+                    .map_err(|e| BacktestError::Database(e.to_string()))?,
                 neg_risk: neg_risk_int != 0,
             }))
         } else {
@@ -340,23 +373,43 @@ impl HistoricalDataStore {
             .map_err(|e| BacktestError::Database(e.to_string()))?;
 
         let mut markets = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| BacktestError::Database(e.to_string()))? {
-            let start_str: String = row.get(3).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let end_str: String = row.get(4).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let neg_risk_int: i64 = row.get(7).map_err(|e| BacktestError::Database(e.to_string()))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| BacktestError::Database(e.to_string()))?
+        {
+            let start_str: String = row
+                .get(3)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let end_str: String = row
+                .get(4)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let neg_risk_int: i64 = row
+                .get(7)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
 
             markets.push(HistoricalMarket {
-                market_id: row.get(0).map_err(|e| BacktestError::Database(e.to_string()))?,
-                slug: row.get(1).map_err(|e| BacktestError::Database(e.to_string()))?,
-                question: row.get(2).map_err(|e| BacktestError::Database(e.to_string()))?,
+                market_id: row
+                    .get(0)
+                    .map_err(|e| BacktestError::Database(e.to_string()))?,
+                slug: row
+                    .get(1)
+                    .map_err(|e| BacktestError::Database(e.to_string()))?,
+                question: row
+                    .get(2)
+                    .map_err(|e| BacktestError::Database(e.to_string()))?,
                 start_date: DateTime::parse_from_rfc3339(&start_str)
                     .map_err(|e| BacktestError::Database(format!("Invalid start_date: {}", e)))?
                     .with_timezone(&Utc),
                 end_date: DateTime::parse_from_rfc3339(&end_str)
                     .map_err(|e| BacktestError::Database(format!("Invalid end_date: {}", e)))?
                     .with_timezone(&Utc),
-                token_a: row.get(5).map_err(|e| BacktestError::Database(e.to_string()))?,
-                token_b: row.get(6).map_err(|e| BacktestError::Database(e.to_string()))?,
+                token_a: row
+                    .get(5)
+                    .map_err(|e| BacktestError::Database(e.to_string()))?,
+                token_b: row
+                    .get(6)
+                    .map_err(|e| BacktestError::Database(e.to_string()))?,
                 neg_risk: neg_risk_int != 0,
             });
         }
@@ -381,13 +434,26 @@ impl HistoricalDataStore {
             .map_err(|e| BacktestError::Database(e.to_string()))?;
 
         let mut prices = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| BacktestError::Database(e.to_string()))? {
-            let token_id: String = row.get(0).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let timestamp: i64 = row.get(1).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let price_str: String = row.get(2).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let source: String = row.get(3).map_err(|e| BacktestError::Database(e.to_string()))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| BacktestError::Database(e.to_string()))?
+        {
+            let token_id: String = row
+                .get(0)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let timestamp: i64 = row
+                .get(1)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let price_str: String = row
+                .get(2)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let source: String = row
+                .get(3)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
 
-            let price = price_str.parse::<Decimal>()
+            let price = price_str
+                .parse::<Decimal>()
                 .map_err(|e| BacktestError::Database(format!("Failed to parse price: {}", e)))?;
 
             prices.push(HistoricalPrice {
@@ -419,18 +485,38 @@ impl HistoricalDataStore {
             .map_err(|e| BacktestError::Database(e.to_string()))?;
 
         let mut trades = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| BacktestError::Database(e.to_string()))? {
-            let id: String = row.get(0).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let token_id: String = row.get(1).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let timestamp: i64 = row.get(2).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let price_str: String = row.get(3).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let size_str: String = row.get(4).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let side: String = row.get(5).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let source: String = row.get(6).map_err(|e| BacktestError::Database(e.to_string()))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| BacktestError::Database(e.to_string()))?
+        {
+            let id: String = row
+                .get(0)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let token_id: String = row
+                .get(1)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let timestamp: i64 = row
+                .get(2)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let price_str: String = row
+                .get(3)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let size_str: String = row
+                .get(4)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let side: String = row
+                .get(5)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let source: String = row
+                .get(6)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
 
-            let price = price_str.parse::<Decimal>()
+            let price = price_str
+                .parse::<Decimal>()
                 .map_err(|e| BacktestError::Database(format!("Failed to parse price: {}", e)))?;
-            let size = size_str.parse::<Decimal>()
+            let size = size_str
+                .parse::<Decimal>()
                 .map_err(|e| BacktestError::Database(format!("Failed to parse size: {}", e)))?;
 
             trades.push(HistoricalTrade {
@@ -449,7 +535,11 @@ impl HistoricalDataStore {
     }
 
     /// Get fetch log entries for a specific source and token.
-    pub async fn get_fetch_log(&self, source: &str, token_id: &str) -> BacktestResult<Vec<DataFetchLog>> {
+    pub async fn get_fetch_log(
+        &self,
+        source: &str,
+        token_id: &str,
+    ) -> BacktestResult<Vec<DataFetchLog>> {
         let conn = self.conn();
         let mut rows = conn
             .query(
@@ -460,14 +550,32 @@ impl HistoricalDataStore {
             .map_err(|e| BacktestError::Database(e.to_string()))?;
 
         let mut logs = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| BacktestError::Database(e.to_string()))? {
-            let id: i64 = row.get(0).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let source: String = row.get(1).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let token_id: String = row.get(2).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let start_ts: i64 = row.get(3).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let end_ts: i64 = row.get(4).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let fetched_at_str: String = row.get(5).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let row_count: i64 = row.get(6).map_err(|e| BacktestError::Database(e.to_string()))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| BacktestError::Database(e.to_string()))?
+        {
+            let id: i64 = row
+                .get(0)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let source: String = row
+                .get(1)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let token_id: String = row
+                .get(2)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let start_ts: i64 = row
+                .get(3)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let end_ts: i64 = row
+                .get(4)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let fetched_at_str: String = row
+                .get(5)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let row_count: i64 = row
+                .get(6)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
 
             let fetched_at = DateTime::parse_from_rfc3339(&fetched_at_str)
                 .map_err(|e| BacktestError::Database(format!("Failed to parse fetched_at: {}", e)))?
@@ -492,7 +600,10 @@ impl HistoricalDataStore {
     // Historical crypto price methods (Binance klines)
 
     /// Insert multiple historical crypto prices (batch operation).
-    pub async fn insert_crypto_prices(&self, prices: Vec<HistoricalCryptoPrice>) -> BacktestResult<()> {
+    pub async fn insert_crypto_prices(
+        &self,
+        prices: Vec<HistoricalCryptoPrice>,
+    ) -> BacktestResult<()> {
         if prices.is_empty() {
             return Ok(());
         }
@@ -536,15 +647,35 @@ impl HistoricalDataStore {
             .map_err(|e| BacktestError::Database(e.to_string()))?;
 
         let mut prices = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| BacktestError::Database(e.to_string()))? {
-            let symbol: String = row.get(0).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let timestamp: i64 = row.get(1).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let open_str: String = row.get(2).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let high_str: String = row.get(3).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let low_str: String = row.get(4).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let close_str: String = row.get(5).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let volume_str: String = row.get(6).map_err(|e| BacktestError::Database(e.to_string()))?;
-            let source: String = row.get(7).map_err(|e| BacktestError::Database(e.to_string()))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| BacktestError::Database(e.to_string()))?
+        {
+            let symbol: String = row
+                .get(0)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let timestamp: i64 = row
+                .get(1)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let open_str: String = row
+                .get(2)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let high_str: String = row
+                .get(3)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let low_str: String = row
+                .get(4)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let close_str: String = row
+                .get(5)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let volume_str: String = row
+                .get(6)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
+            let source: String = row
+                .get(7)
+                .map_err(|e| BacktestError::Database(e.to_string()))?;
 
             let parse = |s: &str, field: &str| -> BacktestResult<Decimal> {
                 s.parse::<Decimal>()
@@ -599,10 +730,17 @@ mod tests {
             },
         ];
 
-        store.insert_historical_prices(prices.clone()).await.unwrap();
+        store
+            .insert_historical_prices(prices.clone())
+            .await
+            .unwrap();
 
         let retrieved = store
-            .get_historical_prices("token1", now - chrono::Duration::minutes(1), now + chrono::Duration::minutes(2))
+            .get_historical_prices(
+                "token1",
+                now - chrono::Duration::minutes(1),
+                now + chrono::Duration::minutes(2),
+            )
             .await
             .unwrap();
 
@@ -637,10 +775,17 @@ mod tests {
             },
         ];
 
-        store.insert_historical_trades(trades.clone()).await.unwrap();
+        store
+            .insert_historical_trades(trades.clone())
+            .await
+            .unwrap();
 
         let retrieved = store
-            .get_historical_trades("token1", now - chrono::Duration::minutes(1), now + chrono::Duration::minutes(2))
+            .get_historical_trades(
+                "token1",
+                now - chrono::Duration::minutes(1),
+                now + chrono::Duration::minutes(2),
+            )
             .await
             .unwrap();
 
@@ -742,7 +887,11 @@ mod tests {
         store.insert_historical_prices(vec![price2]).await.unwrap();
 
         let retrieved = store
-            .get_historical_prices("token1", now - chrono::Duration::seconds(1), now + chrono::Duration::seconds(1))
+            .get_historical_prices(
+                "token1",
+                now - chrono::Duration::seconds(1),
+                now + chrono::Duration::seconds(1),
+            )
             .await
             .unwrap();
 

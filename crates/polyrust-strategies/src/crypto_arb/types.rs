@@ -5,8 +5,8 @@ use std::collections::VecDeque;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
-use polyrust_core::prelude::*;
 use crate::crypto_arb::config::ReferenceQualityLevel;
+use polyrust_core::prelude::*;
 
 /// How accurately the reference price matches the market's actual start-of-window price.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +74,9 @@ pub struct MarketWithReference {
     pub discovery_time: DateTime<Utc>,
     /// Coin symbol (e.g. "BTC")
     pub coin: String,
+    /// Window start timestamp (unix seconds) used for reference lookup.
+    /// Needed to correlate with boundary snapshots for retroactive quality upgrades.
+    pub window_ts: i64,
 }
 
 impl MarketWithReference {

@@ -159,12 +159,10 @@ impl BacktestConfig {
 
         // Validate date range
         if self.start_date >= self.end_date {
-            return Err(polyrust_core::error::PolyError::Config(
-                format!(
-                    "Invalid backtest date range: start_date ({}) must be before end_date ({})",
-                    self.start_date, self.end_date
-                )
-            ));
+            return Err(polyrust_core::error::PolyError::Config(format!(
+                "Invalid backtest date range: start_date ({}) must be before end_date ({})",
+                self.start_date, self.end_date
+            )));
         }
 
         Ok(self)
