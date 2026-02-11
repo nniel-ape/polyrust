@@ -204,9 +204,11 @@ pub struct CryptoArbBase {
     /// Used by render_view() to display UP/DOWN market prices.
     pub cached_asks: RwLock<HashMap<TokenId, Decimal>>,
     /// Throttle for dashboard-update signal emission (~5 seconds).
-    pub last_dashboard_emit: RwLock<Option<DateTime<Utc>>>,
+    /// Uses real wall-clock time (not simulated) to rate-limit output.
+    pub last_dashboard_emit: RwLock<Option<tokio::time::Instant>>,
     /// Throttle for periodic pipeline status summary (~60 seconds).
-    pub last_status_log: RwLock<Option<DateTime<Utc>>>,
+    /// Uses real wall-clock time (not simulated) to rate-limit output.
+    pub last_status_log: RwLock<Option<tokio::time::Instant>>,
     /// FOK rejection cooldowns per market — prevents retry storms.
     /// Uses `DateTime<Utc>` so backtests with simulated time work correctly.
     pub fok_cooldowns: RwLock<HashMap<MarketId, DateTime<Utc>>>,
@@ -1375,10 +1377,10 @@ impl CryptoArbBase {
     /// the TOCTOU race where multiple strategy tasks could pass the check
     /// concurrently.
     pub async fn try_claim_dashboard_emit(&self) -> bool {
-        let now = self.event_time().await;
+        let now = tokio::time::Instant::now();
         let mut last = self.last_dashboard_emit.write().await;
         let should_emit = match *last {
-            Some(t) => (now - t).num_seconds() >= 5,
+            Some(t) => now.duration_since(t) >= std::time::Duration::from_secs(5),
             None => true,
         };
         if should_emit {
@@ -1400,11 +1402,11 @@ impl CryptoArbBase {
         // Atomically check-and-set the throttle timestamp in a single write
         // lock to avoid the TOCTOU race where multiple strategy tasks pass
         // the check concurrently.
-        let now = self.event_time().await;
+        let now = tokio::time::Instant::now();
         {
             let mut last = self.last_status_log.write().await;
             if let Some(t) = *last
-                && (now - t).num_seconds() < 60
+                && now.duration_since(t) < std::time::Duration::from_secs(60)
             {
                 return;
             }
