@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use polyrust_core::actions::Action;
-use polyrust_core::context::{BalanceState, StrategyContext};
+use polyrust_core::context::{BalanceState, SourcedPrice, StrategyContext};
 use polyrust_core::error::Result;
 use polyrust_core::events::{Event, MarketDataEvent, OrderEvent};
 use polyrust_core::strategy::Strategy;
@@ -400,15 +400,22 @@ impl BacktestEngine {
                         },
                     );
                 }
-                Event::MarketData(MarketDataEvent::ExternalPrice { symbol, price, .. }) => {
+                Event::MarketData(MarketDataEvent::ExternalPrice { symbol, price, source, timestamp }) => {
                     // Store in external_prices keyed by coin symbol (used by strategy discovery)
                     self.token_prices.insert(symbol.clone(), *price);
-                    self.ctx
-                        .market_data
-                        .write()
-                        .await
-                        .external_prices
-                        .insert(symbol.clone(), *price);
+                    let mut md = self.ctx.market_data.write().await;
+                    md.external_prices.insert(symbol.clone(), *price);
+                    md.sourced_prices
+                        .entry(symbol.clone())
+                        .or_default()
+                        .insert(
+                            source.clone(),
+                            SourcedPrice {
+                                price: *price,
+                                source: source.clone(),
+                                timestamp: *timestamp,
+                            },
+                        );
                 }
                 _ => {}
             }
