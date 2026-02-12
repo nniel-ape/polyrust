@@ -251,140 +251,194 @@ impl ClaimMonitor {
             }
         }
 
-        let mut pending = self.pending.write().await;
+        // ── Phase 1: Snapshot under short read lock ──
+        let (to_check, empty_token_ids) = {
+            let pending = self.pending.read().await;
 
-        if !pending.is_empty() {
-            info!(pending_count = pending.len(), "Checking pending claims");
-        }
-
-        let mut to_remove = Vec::new();
-
-        // ── Phase 1: Check resolution status for unresolved claims ──
-        for (market_id, claim) in pending.iter_mut() {
-            // Skip already-resolved claims (waiting in accumulation window)
-            if claim.resolved_at.is_some() {
-                continue;
+            if !pending.is_empty() {
+                info!(pending_count = pending.len(), "Checking pending claims");
             }
 
-            // Skip if not yet time to check
-            if claim.next_check > now {
-                continue;
-            }
+            let mut to_check: Vec<(MarketId, String)> = Vec::new();
+            let mut empty_token_ids: Vec<MarketId> = Vec::new();
 
-            // Guard: refuse to proceed with empty token_ids
-            if claim.token_ids.is_empty() {
-                error!(
-                    market_id = %market_id,
-                    attempts = claim.attempts,
-                    "Cannot redeem: token_ids is empty (MarketDiscovered event was likely dropped)"
-                );
-                if self.handle_retry(claim) {
-                    to_remove.push(market_id.clone());
+            for (market_id, claim) in pending.iter() {
+                if claim.resolved_at.is_some() {
+                    continue;
                 }
-                continue;
+                if claim.next_check > now {
+                    continue;
+                }
+                if claim.token_ids.is_empty() {
+                    empty_token_ids.push(market_id.clone());
+                    continue;
+                }
+                to_check.push((market_id.clone(), claim.condition_id.clone()));
             }
 
+            (to_check, empty_token_ids)
+        }; // read lock dropped
+
+        // ── Phase 2: RPC resolution checks with no lock held ──
+        let mut newly_resolved: Vec<MarketId> = Vec::new();
+        let mut recheck: Vec<MarketId> = Vec::new();
+        let mut rpc_errors: Vec<MarketId> = Vec::new();
+        let mut gas_error = false;
+
+        for (market_id, condition_id) in &to_check {
             debug!("Checking resolution status for market {}", market_id);
 
-            match self.execution.is_market_resolved(&claim.condition_id).await {
+            match self.execution.is_market_resolved(condition_id).await {
                 Ok(true) => {
                     info!(market_id = %market_id, "Market resolved, queuing for batch redemption");
-                    claim.resolved_at = Some(now);
+                    newly_resolved.push(market_id.clone());
                 }
                 Ok(false) => {
                     debug!("Market {} not yet resolved, will recheck", market_id);
-                    claim.next_check =
-                        now + Duration::seconds(self.config.poll_interval_secs as i64);
+                    recheck.push(market_id.clone());
                 }
                 Err(e) => {
                     let err_str = e.to_string();
                     if err_str.contains("insufficient funds for gas") {
-                        let pause_secs = self.config.gas_pause_duration_secs;
-                        let pause_until = now + Duration::seconds(pause_secs as i64);
-                        *self.gas_paused_until.write().await = Some(pause_until);
-                        warn!(
-                            pause_secs = pause_secs,
-                            "Insufficient MATIC — pausing redemptions for {}s", pause_secs
-                        );
-                        // Remove any claims scheduled for removal so far, then bail
-                        for mid in &to_remove {
-                            pending.remove(mid);
-                        }
-                        return Ok(());
+                        gas_error = true;
+                        break;
                     }
                     error!("Error checking resolution for market {}: {}", market_id, e);
-                    if self.handle_retry(claim) {
-                        to_remove.push(market_id.clone());
-                    }
+                    rpc_errors.push(market_id.clone());
                 }
             }
         }
 
-        // Remove failed claims from phase 1
-        for mid in &to_remove {
-            pending.remove(mid);
-        }
-        to_remove.clear();
-
-        // ── Phase 2: Check flush triggers ──
-        // Only consider claims that have had enough time since resolution for
-        // the settlement transaction to finalize on-chain.
-        let settlement_delay = Duration::seconds(self.config.settlement_delay_secs as i64);
-        let resolved_claims: Vec<MarketId> = pending
-            .iter()
-            .filter(|(_, c)| c.resolved_at.is_some_and(|t| now - t >= settlement_delay))
-            .map(|(mid, _)| mid.clone())
-            .collect();
-
-        let resolved_count = resolved_claims.len();
-        if resolved_count == 0 {
-            return Ok(());
-        }
-
-        let oldest_resolved_at = pending
-            .values()
-            .filter_map(|c| c.resolved_at)
-            .min()
-            .unwrap(); // safe: resolved_count > 0
-
-        let window_elapsed = self.config.batch_window_secs == 0
-            || (now - oldest_resolved_at).num_seconds() >= self.config.batch_window_secs as i64;
-        let count_reached = resolved_count >= self.config.batch_min_count;
-
-        if !window_elapsed && !count_reached {
-            let remaining =
-                self.config.batch_window_secs as i64 - (now - oldest_resolved_at).num_seconds();
-            info!(
-                resolved_count,
-                remaining_secs = remaining,
-                batch_min_count = self.config.batch_min_count,
-                "Accumulating batch ({} claims, {}s until window)",
-                resolved_count,
-                remaining
+        // Handle gas error outside any pending lock
+        if gas_error {
+            let pause_secs = self.config.gas_pause_duration_secs;
+            let pause_until = now + Duration::seconds(pause_secs as i64);
+            *self.gas_paused_until.write().await = Some(pause_until);
+            warn!(
+                pause_secs = pause_secs,
+                "Insufficient MATIC — pausing redemptions for {}s", pause_secs
             );
             return Ok(());
         }
 
-        // ── Phase 3: Flush batch ──
-        info!(
-            resolved_count,
-            trigger = if count_reached { "count" } else { "window" },
-            "Flushing batch redemption"
-        );
+        // ── Phase 3: Apply resolution results under short write lock ──
+        {
+            let mut pending = self.pending.write().await;
 
-        let requests: Vec<RedeemRequest> = resolved_claims
-            .iter()
-            .filter_map(|mid| {
-                pending.get(mid).map(|claim| RedeemRequest {
-                    market_id: claim.market_id.clone(),
-                    condition_id: claim.condition_id.clone(),
-                    token_ids: claim.token_ids.clone(),
-                    neg_risk: claim.neg_risk,
+            for id in &newly_resolved {
+                if let Some(claim) = pending.get_mut(id) {
+                    claim.resolved_at = Some(now);
+                }
+            }
+
+            for id in &recheck {
+                if let Some(claim) = pending.get_mut(id) {
+                    claim.next_check =
+                        now + Duration::seconds(self.config.poll_interval_secs as i64);
+                }
+            }
+
+            let mut to_remove = Vec::new();
+
+            for id in &empty_token_ids {
+                if let Some(claim) = pending.get_mut(id) {
+                    error!(
+                        market_id = %id,
+                        attempts = claim.attempts,
+                        "Cannot redeem: token_ids is empty (MarketDiscovered event was likely dropped)"
+                    );
+                    if self.handle_retry(claim) {
+                        to_remove.push(id.clone());
+                    }
+                }
+            }
+
+            for id in &rpc_errors {
+                if let Some(claim) = pending.get_mut(id)
+                    && self.handle_retry(claim)
+                {
+                    to_remove.push(id.clone());
+                }
+            }
+
+            for id in &to_remove {
+                pending.remove(id);
+            }
+        } // write lock dropped
+
+        // ── Phase 4: Check flush triggers and collect requests under short read lock ──
+        let settlement_delay = Duration::seconds(self.config.settlement_delay_secs as i64);
+        let flush_data = {
+            let pending = self.pending.read().await;
+
+            let resolved_claims: Vec<MarketId> = pending
+                .iter()
+                .filter(|(_, c)| c.resolved_at.is_some_and(|t| now - t >= settlement_delay))
+                .map(|(mid, _)| mid.clone())
+                .collect();
+
+            let resolved_count = resolved_claims.len();
+            if resolved_count == 0 {
+                return Ok(());
+            }
+
+            let oldest_resolved_at = pending
+                .values()
+                .filter_map(|c| c.resolved_at)
+                .min()
+                .unwrap(); // safe: resolved_count > 0
+
+            let window_elapsed = self.config.batch_window_secs == 0
+                || (now - oldest_resolved_at).num_seconds()
+                    >= self.config.batch_window_secs as i64;
+            let count_reached = resolved_count >= self.config.batch_min_count;
+
+            if !window_elapsed && !count_reached {
+                let remaining = self.config.batch_window_secs as i64
+                    - (now - oldest_resolved_at).num_seconds();
+                info!(
+                    resolved_count,
+                    remaining_secs = remaining,
+                    batch_min_count = self.config.batch_min_count,
+                    "Accumulating batch ({} claims, {}s until window)",
+                    resolved_count,
+                    remaining
+                );
+                return Ok(());
+            }
+
+            info!(
+                resolved_count,
+                trigger = if count_reached { "count" } else { "window" },
+                "Flushing batch redemption"
+            );
+
+            let requests: Vec<RedeemRequest> = resolved_claims
+                .iter()
+                .filter_map(|mid| {
+                    pending.get(mid).map(|claim| RedeemRequest {
+                        market_id: claim.market_id.clone(),
+                        condition_id: claim.condition_id.clone(),
+                        token_ids: claim.token_ids.clone(),
+                        neg_risk: claim.neg_risk,
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        match self.execution.redeem_positions_batch(&requests).await {
+            (resolved_claims, requests)
+        }; // read lock dropped
+
+        let (resolved_claims, requests) = flush_data;
+
+        // ── Phase 5: Batch redemption RPC with no lock held ──
+        let redemption_result = self.execution.redeem_positions_batch(&requests).await;
+
+        // Process results and publish events (no lock needed for event publishing)
+        let mut to_remove = Vec::new();
+        let mut failed_ids: Vec<MarketId> = Vec::new();
+        let mut batch_error = false;
+
+        match redemption_result {
             Ok(results) => {
                 for result in &results {
                     if result.success && result.tx_hash.is_empty() {
@@ -410,11 +464,7 @@ impl ClaimMonitor {
                             "Redemption failed for market {}: {}",
                             result.market_id, result.message
                         );
-                        if let Some(claim) = pending.get_mut(&result.market_id)
-                            && self.handle_retry(claim)
-                        {
-                            to_remove.push(result.market_id.clone());
-                        }
+                        failed_ids.push(result.market_id.clone());
                     }
                 }
             }
@@ -428,24 +478,37 @@ impl ClaimMonitor {
                         pause_secs = pause_secs,
                         "Insufficient MATIC — pausing redemptions for {}s", pause_secs
                     );
-                } else {
-                    error!("Batch redemption error: {}", e);
-                    // Retry each resolved claim individually
-                    for mid in &resolved_claims {
-                        if let Some(claim) = pending.get_mut(mid)
-                            && self.handle_retry(claim)
-                        {
-                            to_remove.push(mid.clone());
-                        }
-                    }
+                    return Ok(());
                 }
+                error!("Batch redemption error: {}", e);
+                batch_error = true;
             }
         }
 
-        // Remove completed/expired claims
-        for market_id in &to_remove {
-            pending.remove(market_id);
-        }
+        // ── Phase 6: Apply redemption results under short write lock ──
+        {
+            let mut pending = self.pending.write().await;
+
+            // Handle individual redemption failures
+            for id in &failed_ids {
+                if let Some(claim) = pending.get_mut(id) && self.handle_retry(claim) {
+                    to_remove.push(id.clone());
+                }
+            }
+
+            // Batch-level error (non-gas): retry each resolved claim
+            if batch_error {
+                for mid in &resolved_claims {
+                    if let Some(claim) = pending.get_mut(mid) && self.handle_retry(claim) {
+                        to_remove.push(mid.clone());
+                    }
+                }
+            }
+
+            for market_id in &to_remove {
+                pending.remove(market_id);
+            }
+        } // write lock dropped
 
         Ok(())
     }
