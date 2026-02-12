@@ -53,6 +53,8 @@ impl Default for DiscoveryConfig {
 pub struct DiscoveryFeed {
     config: DiscoveryConfig,
     event_bus: Option<EventBus>,
+    /// Shutdown signal: sending `true` tells the polling loop to exit.
+    shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl DiscoveryFeed {
@@ -60,6 +62,7 @@ impl DiscoveryFeed {
         Self {
             config,
             event_bus: None,
+            shutdown_tx: None,
         }
     }
 }
@@ -203,11 +206,14 @@ impl MarketDataFeed for DiscoveryFeed {
         let bus = event_bus.clone();
         self.event_bus = Some(event_bus);
 
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        self.shutdown_tx = Some(shutdown_tx);
+
         tokio::spawn(async move {
             let client = gamma::Client::default();
             let slug_map = build_slug_map(&config.coins);
             // Track the last known slug per coin for expiry detection.
-            let mut last_slugs: HashMap<String, (String, MarketId)> = HashMap::new();
+            let mut last_slugs: HashMap<String, (String, MarketId, DateTime<Utc>)> = HashMap::new();
             let mut consecutive_failures: u32 = 0;
 
             loop {
@@ -230,14 +236,27 @@ impl MarketDataFeed for DiscoveryFeed {
                                 backoff_secs = backoff,
                                 "discovery poll failure, backing off"
                             );
-                            tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                            tokio::select! {
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => {}
+                                _ = shutdown_rx.changed() => {
+                                    info!("discovery feed shutdown during backoff");
+                                    return;
+                                }
+                            }
                             continue;
                         }
                         warn!(error = %e, failures = consecutive_failures, "discovery poll failed");
                     }
                 }
 
-                tokio::time::sleep(std::time::Duration::from_secs(config.poll_interval_secs)).await;
+                // Sleep with shutdown check
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(config.poll_interval_secs)) => {}
+                    _ = shutdown_rx.changed() => {
+                        info!("discovery feed received shutdown signal");
+                        return;
+                    }
+                }
             }
         });
 
@@ -256,6 +275,10 @@ impl MarketDataFeed for DiscoveryFeed {
 
     async fn stop(&mut self) -> Result<()> {
         info!("stopping market discovery feed");
+        // Signal the polling loop to exit
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(true);
+        }
         self.event_bus = None;
         Ok(())
     }
@@ -266,14 +289,31 @@ impl MarketDataFeed for DiscoveryFeed {
 async fn poll_by_slugs(
     client: &gamma::Client,
     slug_map: &[(String, String)],
-    last_slugs: &mut HashMap<String, (String, MarketId)>,
+    last_slugs: &mut HashMap<String, (String, MarketId, DateTime<Utc>)>,
     bus: &EventBus,
 ) -> Result<()> {
     for (coin, prefix) in slug_map {
         let market = match find_market_for_coin(client, prefix).await {
             Some(m) => m,
             None => {
-                debug!(coin = %coin, "no active market found");
+                if let Some((old_slug, old_market_id, end_date)) = last_slugs.get(coin) {
+                    if Utc::now() >= *end_date {
+                        info!(
+                            coin = %coin,
+                            old_slug = %old_slug,
+                            market_id = %old_market_id,
+                            "tracked market expired (no replacement found)"
+                        );
+                        bus.publish(Event::MarketData(MarketDataEvent::MarketExpired(
+                            old_market_id.clone(),
+                        )));
+                        last_slugs.remove(coin);
+                    } else {
+                        debug!(coin = %coin, "no active market found (tracked market not yet expired)");
+                    }
+                } else {
+                    debug!(coin = %coin, "no active market found");
+                }
                 continue;
             }
         };
@@ -287,7 +327,7 @@ async fn poll_by_slugs(
         };
 
         // Check if this is a new slug (market rotation)
-        if let Some((old_slug, old_market_id)) = last_slugs.get(coin) {
+        if let Some((old_slug, old_market_id, _)) = last_slugs.get(coin) {
             if *old_slug == info.slug {
                 // Same market, no change
                 continue;
@@ -315,8 +355,9 @@ async fn poll_by_slugs(
 
         let slug = info.slug.clone();
         let market_id = info.id.clone();
+        let end_date = info.end_date;
         bus.publish(Event::MarketData(MarketDataEvent::MarketDiscovered(info)));
-        last_slugs.insert(coin.clone(), (slug, market_id));
+        last_slugs.insert(coin.clone(), (slug, market_id, end_date));
     }
 
     Ok(())

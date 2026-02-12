@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use alloy_primitives::U256;
@@ -15,6 +15,14 @@ use tracing::{debug, info, warn};
 
 use crate::feed::MarketDataFeed;
 
+/// Shared state for tracking subscriptions, accessible from the command listener task.
+struct SubscriptionState {
+    /// Token IDs currently subscribed to (checked by WS tasks to skip unsubscribed tokens).
+    subscribed_assets: HashSet<String>,
+    /// market_id → (token_ids, task handles) for proper unsubscribe cleanup.
+    market_handles: HashMap<String, (Vec<String>, Vec<JoinHandle<()>>)>,
+}
+
 /// CLOB orderbook feed using the Polymarket WebSocket API.
 ///
 /// Connects to the Polymarket CLOB WebSocket and subscribes to orderbook updates
@@ -23,8 +31,7 @@ use crate::feed::MarketDataFeed;
 pub struct ClobFeed {
     event_bus: Option<EventBus>,
     ws_client: Option<Arc<ws::Client>>,
-    subscribed_assets: Arc<RwLock<HashSet<String>>>,
-    task_handles: Vec<JoinHandle<()>>,
+    state: Arc<RwLock<SubscriptionState>>,
     command_rx: Option<FeedCommandReceiver>,
 }
 
@@ -33,8 +40,10 @@ impl ClobFeed {
         Self {
             event_bus: None,
             ws_client: None,
-            subscribed_assets: Arc::new(RwLock::new(HashSet::new())),
-            task_handles: Vec::new(),
+            state: Arc::new(RwLock::new(SubscriptionState {
+                subscribed_assets: HashSet::new(),
+                market_handles: HashMap::new(),
+            })),
             command_rx: None,
         }
     }
@@ -81,11 +90,13 @@ fn book_update_to_snapshot(update: &BookUpdate) -> OrderbookSnapshot {
 }
 
 /// Subscribe to orderbook updates for a market, spawning a WebSocket stream task.
-/// Returns the JoinHandle for the spawned task.
+///
+/// Registers the handle and token IDs in the shared `SubscriptionState` so that
+/// `unsubscribe_market` can abort the task and clean up properly.
 async fn subscribe_market_impl(
     client: &Arc<ws::Client>,
     event_bus: &EventBus,
-    subscribed_assets: &Arc<RwLock<HashSet<String>>>,
+    state: &Arc<RwLock<SubscriptionState>>,
     market: &MarketInfo,
 ) -> Result<JoinHandle<()>> {
     let token_a = &market.token_ids.outcome_a;
@@ -99,14 +110,14 @@ async fn subscribe_market_impl(
         .map_err(|e| PolyError::MarketData(format!("invalid token_id {token_b}: {e}")))?;
 
     {
-        let mut assets = subscribed_assets.write().await;
-        assets.insert(token_a.clone());
-        assets.insert(token_b.clone());
+        let mut s = state.write().await;
+        s.subscribed_assets.insert(token_a.clone());
+        s.subscribed_assets.insert(token_b.clone());
     }
 
     let client = Arc::clone(client);
     let bus = event_bus.clone();
-    let subscribed = subscribed_assets.clone();
+    let state_ref = state.clone();
     let market_id = market.id.clone();
 
     let handle = tokio::spawn(async move {
@@ -124,8 +135,8 @@ async fn subscribe_market_impl(
                 Ok(book_update) => {
                     let asset_str = book_update.asset_id.to_string();
                     let is_subscribed = {
-                        let assets = subscribed.read().await;
-                        assets.contains(&asset_str)
+                        let s = state_ref.read().await;
+                        s.subscribed_assets.contains(&asset_str)
                     };
                     if !is_subscribed {
                         continue;
@@ -174,26 +185,48 @@ impl MarketDataFeed for ClobFeed {
         if let Some(mut rx) = self.command_rx.take() {
             let ws_client = self.ws_client.as_ref().unwrap().clone();
             let bus = self.event_bus.as_ref().unwrap().clone();
-            let subscribed = self.subscribed_assets.clone();
+            let state = self.state.clone();
 
             tokio::spawn(async move {
                 while let Some(cmd) = rx.recv().await {
                     match cmd {
                         FeedCommand::Subscribe(info) => {
                             info!(market_id = %info.id, question = %info.question, "received subscribe command");
-                            match subscribe_market_impl(&ws_client, &bus, &subscribed, &info).await
-                            {
-                                Ok(_handle) => {
-                                    // Handle is managed by the spawned task itself
+                            let market_id = info.id.clone();
+                            let token_ids = vec![
+                                info.token_ids.outcome_a.clone(),
+                                info.token_ids.outcome_b.clone(),
+                            ];
+                            match subscribe_market_impl(&ws_client, &bus, &state, &info).await {
+                                Ok(handle) => {
+                                    let mut s = state.write().await;
+                                    let entry = s.market_handles.entry(market_id).or_insert_with(|| (token_ids, Vec::new()));
+                                    entry.1.push(handle);
                                 }
                                 Err(e) => {
                                     warn!(market_id = %info.id, error = %e, "failed to subscribe via command");
                                 }
                             }
                         }
-                        FeedCommand::Unsubscribe(id) => {
-                            info!(market_id = %id, "received unsubscribe command (best-effort)");
-                            // Best-effort: the spawned WS tasks check subscribed_assets
+                        FeedCommand::Unsubscribe(market_id) => {
+                            let mut s = state.write().await;
+                            if let Some((token_ids, handles)) = s.market_handles.remove(&market_id) {
+                                for tid in &token_ids {
+                                    s.subscribed_assets.remove(tid);
+                                }
+                                let handle_count = handles.len();
+                                for handle in handles {
+                                    handle.abort();
+                                }
+                                info!(
+                                    market_id = %market_id,
+                                    tokens_removed = token_ids.len(),
+                                    tasks_aborted = handle_count,
+                                    "unsubscribed market and aborted WebSocket tasks"
+                                );
+                            } else {
+                                info!(market_id = %market_id, "unsubscribe: no tracked handles for market");
+                            }
                         }
                     }
                 }
@@ -212,38 +245,56 @@ impl MarketDataFeed for ClobFeed {
             PolyError::MarketData("CLOB feed not started, call start() first".into())
         })?;
 
+        let token_ids = vec![
+            market.token_ids.outcome_a.clone(),
+            market.token_ids.outcome_b.clone(),
+        ];
         let handle =
-            subscribe_market_impl(client, event_bus, &self.subscribed_assets, market).await?;
-        self.task_handles.push(handle);
+            subscribe_market_impl(client, event_bus, &self.state, market).await?;
+
+        let mut s = self.state.write().await;
+        let entry = s.market_handles.entry(market.id.clone()).or_insert_with(|| (token_ids, Vec::new()));
+        entry.1.push(handle);
 
         Ok(())
     }
 
     async fn unsubscribe_market(&mut self, market_id: &str) -> Result<()> {
-        // Remove all token IDs for this market from the subscribed set.
-        // The spawned WebSocket tasks check `subscribed_assets` on each update,
-        // so removed tokens will be silently skipped (best-effort unsubscribe).
-        // Full task teardown would require tracking handles per market.
-        info!(
-            market_id = %market_id,
-            "unsubscribe_market: removing tokens from subscribed set (best-effort)"
-        );
-        // Note: we don't have a reverse mapping from market_id to token_ids here.
-        // The caller (engine) should provide token IDs, but the trait only passes market_id.
-        // For now, log the limitation. The WebSocket tasks will be aborted on feed stop().
+        let mut s = self.state.write().await;
+        if let Some((token_ids, handles)) = s.market_handles.remove(market_id) {
+            for tid in &token_ids {
+                s.subscribed_assets.remove(tid);
+            }
+            let handle_count = handles.len();
+            for handle in handles {
+                handle.abort();
+            }
+            info!(
+                market_id = %market_id,
+                tokens_removed = token_ids.len(),
+                tasks_aborted = handle_count,
+                "unsubscribed market and aborted WebSocket tasks"
+            );
+        } else {
+            info!(market_id = %market_id, "unsubscribe: no tracked handles for market");
+        }
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<()> {
         info!("stopping CLOB orderbook feed");
 
-        for handle in self.task_handles.drain(..) {
-            handle.abort();
+        let mut s = self.state.write().await;
+        for (_market_id, (_token_ids, handles)) in s.market_handles.drain() {
+            for handle in handles {
+                handle.abort();
+            }
         }
+        s.subscribed_assets.clear();
+        drop(s);
 
         self.ws_client = None;
         self.event_bus = None;
-        self.subscribed_assets.write().await.clear();
 
         Ok(())
     }
