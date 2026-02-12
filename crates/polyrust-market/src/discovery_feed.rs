@@ -125,6 +125,7 @@ async fn find_market_for_coin(
         let slug = format!("{prefix}-{ts}");
         if let Some(market) = fetch_market_by_slug(client, &slug).await
             && market.accepting_orders.unwrap_or(false)
+            && market.end_date.is_some_and(|ed| Utc::now() < ed)
         {
             return Some(market);
         }

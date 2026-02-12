@@ -280,11 +280,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }));
 
-    bg_handles.push(tokio::spawn(async move {
-        if let Err(e) = discovery_feed.start(discovery_bus).await {
-            error!("discovery feed failed to start: {e}");
-        }
-    }));
+    // Start discovery feed in main scope (NOT spawned) so its shutdown_tx
+    // stays alive. Moving it into tokio::spawn would drop the sender on return,
+    // causing the internal polling loop to exit immediately.
+    if let Err(e) = discovery_feed.start(discovery_bus).await {
+        error!("discovery feed failed to start: {e}");
+    }
 
     // Start direct Binance feed (spot + futures) alongside RTDS
     let mut binance_feed = BinanceFeed::new(arb_config.coins.clone());
@@ -381,6 +382,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Run engine (blocks until Ctrl+C)
     engine.run().await?;
+
+    // Stop discovery feed gracefully (sends shutdown signal to polling loop)
+    let _ = discovery_feed.stop().await;
 
     // Abort all background tasks for clean shutdown
     info!(
