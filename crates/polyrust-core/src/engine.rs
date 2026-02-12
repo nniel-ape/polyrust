@@ -522,6 +522,28 @@ pub async fn execute_action(
                             if let Some(market_id) =
                                 find_market_id_for_token(context, &result.token_id).await
                             {
+                                // FOK orders are always taker; GTC/GTD may be maker (unknown at publish time)
+                                let fee = if req.order_type == crate::types::OrderType::Fok {
+                                    Some(crate::fees::taker_fee(
+                                        result.price,
+                                        result.size,
+                                        crate::fees::default_taker_fee_rate(),
+                                    ))
+                                } else {
+                                    None
+                                };
+
+                                // Capture orderbook snapshot for BUY fills
+                                let orderbook_snapshot =
+                                    if result.side == crate::types::OrderSide::Buy {
+                                        let md = context.market_data.read().await;
+                                        md.orderbooks
+                                            .get(&result.token_id)
+                                            .map(snapshot_to_json)
+                                    } else {
+                                        None
+                                    };
+
                                 event_bus.publish(Event::OrderUpdate(OrderEvent::Filled {
                                     order_id: order_id.clone(),
                                     market_id,
@@ -531,6 +553,9 @@ pub async fn execute_action(
                                     size: result.size,
                                     strategy_name: strategy_name.to_string(),
                                     realized_pnl: None,
+                                    fee,
+                                    order_type: Some(format!("{:?}", req.order_type)),
+                                    orderbook_snapshot,
                                 }));
                             } else {
                                 error!(
@@ -597,6 +622,18 @@ pub async fn execute_action(
                                 if let Some(market_id) =
                                     find_market_id_for_token(context, &result.token_id).await
                                 {
+                                    // Batch orders: compute fee for FOK, capture orderbook for buys
+                                    let fee = None; // Batch orders are typically GTC
+                                    let orderbook_snapshot =
+                                        if result.side == crate::types::OrderSide::Buy {
+                                            let md = context.market_data.read().await;
+                                            md.orderbooks
+                                                .get(&result.token_id)
+                                                .map(snapshot_to_json)
+                                        } else {
+                                            None
+                                        };
+
                                     event_bus.publish(Event::OrderUpdate(OrderEvent::Filled {
                                         order_id: order_id.clone(),
                                         market_id,
@@ -606,6 +643,9 @@ pub async fn execute_action(
                                         size: result.size,
                                         strategy_name: strategy_name.to_string(),
                                         realized_pnl: None,
+                                        fee,
+                                        order_type: None, // Batch doesn't track per-order type
+                                        orderbook_snapshot,
                                     }));
                                 } else {
                                     error!(
@@ -716,6 +756,9 @@ pub async fn execute_action(
             price,
             size,
             realized_pnl,
+            fee,
+            order_type,
+            orderbook_snapshot,
         } => {
             event_bus.publish(Event::OrderUpdate(OrderEvent::Filled {
                 order_id: order_id.clone(),
@@ -726,6 +769,9 @@ pub async fn execute_action(
                 size: *size,
                 strategy_name: strategy_name.to_string(),
                 realized_pnl: *realized_pnl,
+                fee: *fee,
+                order_type: order_type.clone(),
+                orderbook_snapshot: orderbook_snapshot.clone(),
             }));
         }
         Action::SubscribeMarket(info) => {
@@ -790,4 +836,31 @@ pub async fn execute_action(
         }
     }
     Ok(())
+}
+
+/// Serialize top 5 levels of an orderbook snapshot to compact JSON.
+pub fn snapshot_to_json(ob: &crate::types::OrderbookSnapshot) -> String {
+    let bids: Vec<_> = ob
+        .bids
+        .iter()
+        .take(5)
+        .map(|l| (l.price.to_string(), l.size.to_string()))
+        .collect();
+    let asks: Vec<_> = ob
+        .asks
+        .iter()
+        .take(5)
+        .map(|l| (l.price.to_string(), l.size.to_string()))
+        .collect();
+    serde_json::json!({
+        "best_bid": ob.best_bid(),
+        "best_ask": ob.best_ask(),
+        "spread": ob.spread(),
+        "bid_depth": ob.bids.first().map(|l| &l.size),
+        "ask_depth": ob.asks.first().map(|l| &l.size),
+        "bids": bids,
+        "asks": asks,
+        "ts": ob.timestamp.to_rfc3339(),
+    })
+    .to_string()
 }

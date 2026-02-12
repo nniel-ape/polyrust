@@ -52,7 +52,12 @@ impl Store {
                 realized_pnl TEXT,
                 strategy_name TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                fee TEXT,
+                order_type TEXT,
+                entry_price TEXT,
+                close_reason TEXT,
+                orderbook_snapshot TEXT
             )",
             "CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy_name)",
             "CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)",
@@ -94,6 +99,22 @@ impl Store {
             conn.execute(stmt, ())
                 .await
                 .map_err(|e| StoreError::Migration(e.to_string()))?;
+        }
+
+        // Add new columns to existing databases (idempotent — ignores "duplicate column" errors)
+        let alter_stmts = [
+            "ALTER TABLE trades ADD COLUMN fee TEXT",
+            "ALTER TABLE trades ADD COLUMN order_type TEXT",
+            "ALTER TABLE trades ADD COLUMN entry_price TEXT",
+            "ALTER TABLE trades ADD COLUMN close_reason TEXT",
+            "ALTER TABLE trades ADD COLUMN orderbook_snapshot TEXT",
+        ];
+        for stmt in alter_stmts {
+            if let Err(e) = conn.execute(stmt, ()).await
+                && !e.to_string().contains("duplicate column name")
+            {
+                return Err(StoreError::Migration(e.to_string()));
+            }
         }
 
         Ok(())

@@ -1,6 +1,7 @@
 mod verify;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use polyrust_backtest::{BacktestConfig, BacktestEngine, DataFetcher, HistoricalDataStore};
@@ -321,32 +322,61 @@ async fn main() -> anyhow::Result<()> {
                     size,
                     strategy_name,
                     realized_pnl: event_pnl,
+                    fee: event_fee,
+                    order_type,
+                    orderbook_snapshot,
                 })) => {
                     // Use strategy-provided P&L if available, else compute from position state
-                    let realized_pnl = event_pnl.or_else(|| {
-                        // Not async — use try_read to avoid blocking. Fall back to None
-                        // if the lock is held (position lookup is best-effort).
-                        if side == OrderSide::Sell {
-                            // try_read: non-blocking attempt — returns None on contention
-                            // rather than blocking the persistence task
-                            if let Ok(positions) = persistence_context.positions.try_read() {
-                                positions
-                                    .open_positions
-                                    .values()
-                                    .find(|p| p.token_id == token_id)
-                                    .map(|pos| (price - pos.entry_price) * size)
-                            } else {
+                    // with fee deduction and timeout-based locking
+                    let realized_pnl = if event_pnl.is_some() {
+                        event_pnl
+                    } else if side == OrderSide::Sell {
+                        match tokio::time::timeout(
+                            Duration::from_millis(200),
+                            persistence_context.positions.read(),
+                        )
+                        .await
+                        {
+                            Ok(positions) => positions
+                                .open_positions
+                                .values()
+                                .find(|p| p.token_id == token_id)
+                                .map(|pos| {
+                                    let gross = (price - pos.entry_price) * size;
+                                    // Deduct sell-side fee if known
+                                    gross - event_fee.unwrap_or(Decimal::ZERO)
+                                }),
+                            Err(_) => {
                                 warn!(
                                     order_id = %order_id,
                                     token_id = %token_id,
-                                    "Sell trade P&L: position lock contended, P&L will be None"
+                                    "Sell trade P&L: position lock timeout, P&L will be None"
                                 );
                                 None
                             }
-                        } else {
-                            None
                         }
-                    });
+                    } else {
+                        None
+                    };
+
+                    // Capture entry_price for closing (sell) trades
+                    let entry_price = if side == OrderSide::Sell {
+                        match tokio::time::timeout(
+                            Duration::from_millis(50),
+                            persistence_context.positions.read(),
+                        )
+                        .await
+                        {
+                            Ok(positions) => positions
+                                .open_positions
+                                .values()
+                                .find(|p| p.token_id == token_id)
+                                .map(|p| p.entry_price),
+                            Err(_) => None,
+                        }
+                    } else {
+                        None
+                    };
 
                     let trade = Trade {
                         id: Uuid::new_v4(),
@@ -359,6 +389,11 @@ async fn main() -> anyhow::Result<()> {
                         realized_pnl,
                         strategy_name: strategy_name.clone(),
                         timestamp: Utc::now(),
+                        fee: event_fee,
+                        order_type,
+                        entry_price,
+                        close_reason: None,
+                        orderbook_snapshot,
                     };
 
                     if let Err(e) = persistence_store.insert_trade(&trade).await {

@@ -13,8 +13,8 @@ impl Store {
     pub async fn insert_trade(&self, trade: &Trade) -> StoreResult<()> {
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO trades (id, order_id, market_id, token_id, side, price, size, realized_pnl, strategy_name, timestamp)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO trades (id, order_id, market_id, token_id, side, price, size, realized_pnl, strategy_name, timestamp, fee, order_type, entry_price, close_reason, orderbook_snapshot)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 trade.id.to_string(),
                 trade.order_id.clone(),
@@ -26,6 +26,11 @@ impl Store {
                 trade.realized_pnl.map(|d| d.to_string()),
                 trade.strategy_name.clone(),
                 trade.timestamp.to_rfc3339(),
+                trade.fee.map(|d| d.to_string()),
+                trade.order_type.clone(),
+                trade.entry_price.map(|d| d.to_string()),
+                trade.close_reason.clone(),
+                trade.orderbook_snapshot.clone(),
             ],
         )
         .await
@@ -38,7 +43,7 @@ impl Store {
         let conn = self.conn();
         let mut rows = conn
             .query(
-                "SELECT id, order_id, market_id, token_id, side, price, size, realized_pnl, strategy_name, timestamp
+                "SELECT id, order_id, market_id, token_id, side, price, size, realized_pnl, strategy_name, timestamp, fee, order_type, entry_price, close_reason, orderbook_snapshot
                  FROM trades WHERE id = ?1",
                 params![id],
             )
@@ -68,7 +73,7 @@ impl Store {
         let mut rows = match strategy {
             Some(s) => {
                 conn.query(
-                    "SELECT id, order_id, market_id, token_id, side, price, size, realized_pnl, strategy_name, timestamp
+                    "SELECT id, order_id, market_id, token_id, side, price, size, realized_pnl, strategy_name, timestamp, fee, order_type, entry_price, close_reason, orderbook_snapshot
                      FROM trades WHERE strategy_name = ?1 ORDER BY timestamp DESC LIMIT ?2",
                     params![s, limit as i64],
                 )
@@ -76,7 +81,7 @@ impl Store {
             }
             None => {
                 conn.query(
-                    "SELECT id, order_id, market_id, token_id, side, price, size, realized_pnl, strategy_name, timestamp
+                    "SELECT id, order_id, market_id, token_id, side, price, size, realized_pnl, strategy_name, timestamp, fee, order_type, entry_price, close_reason, orderbook_snapshot
                      FROM trades ORDER BY timestamp DESC LIMIT ?1",
                     params![limit as i64],
                 )
@@ -108,6 +113,13 @@ fn parse_trade_row(row: &libsql::Row) -> StoreResult<Trade> {
     let strategy_name: String = row.get(8).map_err(|e| StoreError::Query(e.to_string()))?;
     let ts_str: String = row.get(9).map_err(|e| StoreError::Query(e.to_string()))?;
 
+    // New optional columns (indices 10-14) — use .ok().flatten() for backward compat
+    let fee_str: Option<String> = row.get(10).ok().flatten();
+    let order_type: Option<String> = row.get(11).ok().flatten();
+    let entry_price_str: Option<String> = row.get(12).ok().flatten();
+    let close_reason: Option<String> = row.get(13).ok().flatten();
+    let orderbook_snapshot: Option<String> = row.get(14).ok().flatten();
+
     Ok(Trade {
         id: Uuid::parse_str(&id_str).map_err(|e| StoreError::Query(e.to_string()))?,
         order_id,
@@ -124,6 +136,17 @@ fn parse_trade_row(row: &libsql::Row) -> StoreResult<Trade> {
         timestamp: DateTime::parse_from_rfc3339(&ts_str)
             .map_err(|e| StoreError::Query(e.to_string()))?
             .to_utc(),
+        fee: fee_str
+            .map(|s| Decimal::from_str(&s))
+            .transpose()
+            .map_err(|e| StoreError::Query(e.to_string()))?,
+        order_type,
+        entry_price: entry_price_str
+            .map(|s| Decimal::from_str(&s))
+            .transpose()
+            .map_err(|e| StoreError::Query(e.to_string()))?,
+        close_reason,
+        orderbook_snapshot,
     })
 }
 

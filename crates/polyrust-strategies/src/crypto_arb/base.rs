@@ -525,6 +525,53 @@ impl CryptoArbBase {
         history.get(coin).and_then(|h| h.back().map(|(_, p, _)| *p))
     }
 
+    /// Get the settlement price for a coin at market end time.
+    ///
+    /// Uses the same oracle Polymarket resolves against, so the bot's win/loss
+    /// determination matches on-chain redemption results.
+    ///
+    /// Priority: 1) Chainlink on-chain at end_ts, 2) price_history closest to end_ts, 3) latest
+    pub async fn get_settlement_price(
+        &self,
+        coin: &str,
+        end_date: DateTime<Utc>,
+    ) -> Option<Decimal> {
+        let end_ts = end_date.timestamp() as u64;
+
+        // 1. Chainlink on-chain — same oracle Polymarket uses for resolution
+        if let Some(client) = &self.chainlink_client {
+            match client.get_price_at_timestamp(coin, end_ts, 100).await {
+                Ok(cp) => {
+                    let staleness = cp.timestamp.abs_diff(end_ts);
+                    if staleness <= 30 {
+                        info!(
+                            coin,
+                            price = %cp.price,
+                            staleness_s = staleness,
+                            "Settlement price from Chainlink on-chain"
+                        );
+                        return Some(cp.price);
+                    }
+                    warn!(coin, staleness_s = staleness, "Chainlink settlement too stale");
+                }
+                Err(e) => warn!(coin, error = %e, "Chainlink settlement lookup failed"),
+            }
+        }
+
+        // 2. price_history: closest entry at or before end_date
+        let history = self.price_history.read().await;
+        let entries = history.get(coin)?;
+        let mut best = None;
+        for (ts, price, _) in entries.iter() {
+            if *ts <= end_date {
+                best = Some(*price);
+            } else {
+                break;
+            }
+        }
+        best.or_else(|| entries.back().map(|(_, p, _)| *p))
+    }
+
     /// Check if price has favored the given direction for at least `min_sustained_secs`.
     ///
     /// Returns true if for the last `min_sustained_secs`, all prices consistently
@@ -1184,9 +1231,11 @@ impl CryptoArbBase {
         };
 
         if let Some(positions) = removed {
-            let current_crypto = self.get_latest_price(&market.coin).await;
+            let settlement_price = self
+                .get_settlement_price(&market.coin, market.market.end_date)
+                .await;
             for pos in &positions {
-                let won = match (&pos.side, current_crypto) {
+                let won = match (&pos.side, settlement_price) {
                     (OutcomeSide::Up | OutcomeSide::Yes, Some(cp)) => cp > pos.reference_price,
                     (OutcomeSide::Down | OutcomeSide::No, Some(cp)) => cp <= pos.reference_price,
                     _ => false,
@@ -1200,8 +1249,11 @@ impl CryptoArbBase {
                 info!(
                     market = %market_id,
                     mode = %pos.mode,
-                    won = won,
+                    won,
                     pnl = %pnl,
+                    settlement_price = ?settlement_price,
+                    reference_price = %pos.reference_price,
+                    side = ?pos.side,
                     "Position resolved at market expiry"
                 );
             }
@@ -1887,7 +1939,7 @@ impl CryptoArbBase {
                     );
                     self.record_position(position).await;
                     // Emit RecordFill so the persistence handler records this trade.
-                    // Matched fills are always entry buys.
+                    // Matched fills are always entry buys (GTC maker = 0 fee).
                     actions.push(Action::RecordFill {
                         order_id: order_id.to_string(),
                         market_id: lo.market_id.clone(),
@@ -1896,6 +1948,9 @@ impl CryptoArbBase {
                         price: lo.price,
                         size: lo.size,
                         realized_pnl: None,
+                        fee: Some(Decimal::ZERO),
+                        order_type: Some("Gtc".to_string()),
+                        orderbook_snapshot: None,
                     });
                     // Also emit signal for dashboard/logging consumers
                     actions.push(Action::EmitSignal {
@@ -1979,7 +2034,7 @@ impl CryptoArbBase {
         for (position, order_id, lo) in actions {
             self.record_position(position).await;
             // Emit RecordFill so the persistence handler records this trade.
-            // Reconciled fills are always entry buys (GTC buy orders).
+            // Reconciled fills are always entry buys (GTC maker = 0 fee).
             result_actions.push(Action::RecordFill {
                 order_id: order_id.clone(),
                 market_id: lo.market_id.clone(),
@@ -1988,6 +2043,9 @@ impl CryptoArbBase {
                 price: lo.price,
                 size: lo.size,
                 realized_pnl: None,
+                fee: Some(Decimal::ZERO),
+                order_type: Some("Gtc".to_string()),
+                orderbook_snapshot: None,
             });
             // Also emit signal for dashboard/logging consumers
             result_actions.push(Action::EmitSignal {

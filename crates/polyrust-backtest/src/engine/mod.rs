@@ -1154,6 +1154,9 @@ impl BacktestEngine {
                 size: trade.size,
                 strategy_name: self.strategy.name().to_string(),
                 realized_pnl: None,
+                fee: None,
+                order_type: None,
+                orderbook_snapshot: None,
             });
             let filled_actions = self.strategy.on_event(&filled_event, &self.ctx).await?;
             for action in filled_actions {
@@ -1195,19 +1198,12 @@ impl BacktestEngine {
 
     /// Compute the dynamic taker fee for a fill: 2 * p * (1-p) * rate * size.
     fn taker_fee(&self, fill_price: Decimal, size: Decimal) -> Decimal {
-        Decimal::TWO
-            * fill_price
-            * (Decimal::ONE - fill_price)
-            * self.config.fees.taker_fee_rate
-            * size
+        polyrust_core::fees::taker_fee(fill_price, size, self.config.fees.taker_fee_rate)
     }
 
     /// Compute the per-share taker fee component (for effective entry price).
     fn taker_fee_per_share(&self, fill_price: Decimal) -> Decimal {
-        Decimal::TWO
-            * fill_price
-            * (Decimal::ONE - fill_price)
-            * self.config.fees.taker_fee_rate
+        polyrust_core::fees::taker_fee_per_share(fill_price, self.config.fees.taker_fee_rate)
     }
 
     /// Execute an order immediately at the current market price.
@@ -1342,7 +1338,16 @@ impl BacktestEngine {
                 }
 
                 // Record trade in Store (if available)
+                let fee_amount = if is_taker { Some(fee) } else { None };
                 if let Some(ref store) = self.store {
+                    // Capture orderbook snapshot for BUY fills
+                    let orderbook_snapshot = {
+                        let md = self.ctx.market_data.read().await;
+                        md.orderbooks
+                            .get(&order.token_id)
+                            .map(polyrust_core::engine::snapshot_to_json)
+                    };
+
                     let trade = Trade {
                         id: Uuid::new_v4(),
                         order_id: Uuid::new_v4().to_string(),
@@ -1354,6 +1359,11 @@ impl BacktestEngine {
                         realized_pnl: None,
                         strategy_name: self.strategy.name().to_string(),
                         timestamp: self.current_time,
+                        fee: fee_amount,
+                        order_type: Some("Fok".to_string()),
+                        entry_price: None,
+                        close_reason: None,
+                        orderbook_snapshot,
                     };
                     store.insert_trade(&trade).await.map_err(|e| {
                         polyrust_core::error::PolyError::Execution(format!(
@@ -1447,6 +1457,7 @@ impl BacktestEngine {
                 }
 
                 // Record trade in Store (if available)
+                let sell_fee = if is_taker { Some(fee) } else { None };
                 if let Some(ref store) = self.store {
                     let trade = Trade {
                         id: Uuid::new_v4(),
@@ -1459,6 +1470,11 @@ impl BacktestEngine {
                         realized_pnl: Some(realized_pnl),
                         strategy_name: self.strategy.name().to_string(),
                         timestamp: self.current_time,
+                        fee: sell_fee,
+                        order_type: Some("Fok".to_string()),
+                        entry_price: Some(entry_price),
+                        close_reason: Some("Strategy".to_string()),
+                        orderbook_snapshot: None,
                     };
                     store.insert_trade(&trade).await.map_err(|e| {
                         polyrust_core::error::PolyError::Execution(format!(

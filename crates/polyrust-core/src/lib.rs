@@ -8,6 +8,7 @@ pub mod error;
 pub mod event_bus;
 pub mod events;
 pub mod execution;
+pub mod fees;
 pub mod strategy;
 pub mod types;
 
@@ -25,6 +26,7 @@ pub mod prelude {
     pub use crate::event_bus::EventBus;
     pub use crate::events::*;
     pub use crate::execution::ExecutionBackend;
+    pub use crate::fees::{taker_fee, taker_fee_per_share};
     pub use crate::strategy::Strategy;
     pub use crate::types::*;
     pub use async_trait::async_trait;

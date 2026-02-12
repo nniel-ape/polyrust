@@ -26,6 +26,12 @@ pub enum Action {
         price: Decimal,
         size: Decimal,
         realized_pnl: Option<Decimal>,
+        /// Taker fee paid (None = unknown/maker)
+        fee: Option<Decimal>,
+        /// Order type: "Gtc", "Gtd", "Fok"
+        order_type: Option<String>,
+        /// JSON blob of orderbook state at fill time
+        orderbook_snapshot: Option<String>,
     },
     SubscribeMarket(MarketInfo),
     UnsubscribeMarket(MarketId),

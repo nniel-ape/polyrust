@@ -174,6 +174,16 @@ pub struct Trade {
     pub realized_pnl: Option<Decimal>,
     pub strategy_name: String,
     pub timestamp: DateTime<Utc>,
+    /// Taker fee paid (None = unknown/maker)
+    pub fee: Option<Decimal>,
+    /// Order type: "Gtc", "Gtd", "Fok"
+    pub order_type: Option<String>,
+    /// Average entry price on closing (sell) trades
+    pub entry_price: Option<Decimal>,
+    /// How the trade was closed: "Strategy", "Settlement", "ForceClose"
+    pub close_reason: Option<String>,
+    /// JSON blob of orderbook state at fill time (buys only)
+    pub orderbook_snapshot: Option<String>,
 }
 
 /// Request to redeem winning positions after market resolution

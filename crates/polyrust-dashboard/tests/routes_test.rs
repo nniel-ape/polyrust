@@ -215,6 +215,11 @@ async fn trades_handler_queries_store() {
         realized_pnl: Some(Decimal::new(125, 2)),
         strategy_name: "arb-strategy".into(),
         timestamp: chrono::Utc::now(),
+        fee: None,
+        order_type: None,
+        entry_price: None,
+        close_reason: None,
+        orderbook_snapshot: None,
     };
     state.store.insert_trade(&trade).await.unwrap();
 

@@ -712,6 +712,11 @@ mod tests {
             realized_pnl: Some(dec!(5.5)),
             strategy_name: "test-strategy".to_string(),
             timestamp: start_time,
+            fee: None,
+            order_type: None,
+            entry_price: None,
+            close_reason: None,
+            orderbook_snapshot: None,
         };
         store.insert_trade(&trade).await.unwrap();
 

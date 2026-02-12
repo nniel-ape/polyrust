@@ -91,6 +91,7 @@ struct TradesTemplate {
     strategy_names: Vec<String>,
 }
 
+#[allow(dead_code)]
 struct TradeRow {
     id_short: String,
     market_id_short: String,
@@ -100,6 +101,10 @@ struct TradeRow {
     realized_pnl: String,
     strategy_name: String,
     timestamp: String,
+    fee: String,
+    order_type: String,
+    entry_price: String,
+    close_reason: String,
 }
 
 #[derive(Template)]
@@ -227,9 +232,22 @@ pub async fn trades(State(state): State<AppState>) -> std::result::Result<Html<S
             realized_pnl: t
                 .realized_pnl
                 .map(|d| d.to_string())
-                .unwrap_or_else(|| "—".into()),
+                .unwrap_or_else(|| "\u{2014}".into()),
             strategy_name: t.strategy_name.clone(),
             timestamp: t.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
+            fee: t
+                .fee
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "\u{2014}".into()),
+            order_type: t.order_type.clone().unwrap_or_else(|| "\u{2014}".into()),
+            entry_price: t
+                .entry_price
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "\u{2014}".into()),
+            close_reason: t
+                .close_reason
+                .clone()
+                .unwrap_or_else(|| "\u{2014}".into()),
         })
         .collect();
 

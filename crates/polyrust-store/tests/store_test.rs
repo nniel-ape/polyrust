@@ -20,6 +20,11 @@ fn sample_trade() -> Trade {
         realized_pnl: Some(dec!(0.50)),
         strategy_name: "crypto-arb".into(),
         timestamp: Utc::now(),
+        fee: Some(dec!(0.05)),
+        order_type: Some("Fok".into()),
+        entry_price: None,
+        close_reason: None,
+        orderbook_snapshot: Some(r#"{"best_bid":"0.54","best_ask":"0.55"}"#.into()),
     }
 }
 
