@@ -64,6 +64,9 @@ struct BucketAgg {
 /// at the bucket's end (bucket_start + fidelity_secs).
 ///
 /// Produces realistic bid/ask spread from actual buy/sell trade prices within each bucket.
+/// Uses the explicit `side` field from Trade events when available (populated from the
+/// subgraph's historical data). Falls back to price-movement heuristic only when `side`
+/// is `None` (e.g., live feed trades).
 ///
 /// Accepts the full event list and filters for Trade events internally
 /// (avoids cloning all trades into a separate Vec).
@@ -78,22 +81,22 @@ fn synthesize_price_events_from_trades(
     let fidelity = fidelity_secs as i64;
     let default_spread = Decimal::new(1, 2); // 0.01 (1 tick)
 
-    // Group trades by token_id, then bucket by time window
-    // BTreeMap ensures deterministic ordering of buckets
+    // Single pass: group trades by token_id into time buckets, populating
+    // last_price and last_buy/last_sell using explicit side from the Trade
+    // event. Falls back to price-movement heuristic only when side is None.
     let mut token_buckets: HashMap<String, BTreeMap<i64, BucketAgg>> = HashMap::new();
+    let mut prev_prices: HashMap<String, Decimal> = HashMap::new();
 
     for event in events {
         if let Event::MarketData(MarketDataEvent::Trade {
-            token_id, price, ..
+            token_id,
+            price,
+            side,
+            ..
         }) = &event.event
         {
             let ts = event.timestamp.timestamp();
             let bucket_start = (ts / fidelity) * fidelity;
-
-            // Determine trade side from the HistoricalEvent's associated trade data.
-            // We need to find the corresponding HistoricalTrade side info.
-            // Since trades come from the subgraph with side encoded, we look at
-            // the surrounding context. For synthesized events, default to mid-price.
 
             let bucket = token_buckets
                 .entry(token_id.clone())
@@ -107,36 +110,22 @@ fn synthesize_price_events_from_trades(
                 });
 
             bucket.last_price = *price;
-        }
-    }
 
-    // Second pass: capture buy/sell sides from the raw historical trade data
-    // The Trade events don't carry side info in the Event enum, but the
-    // HistoricalTrade records in the DB do. We approximate by tracking the
-    // last price change direction: price increase → buy, decrease → sell.
-    let mut prev_prices: HashMap<String, Decimal> = HashMap::new();
-    for event in events {
-        if let Event::MarketData(MarketDataEvent::Trade {
-            token_id, price, ..
-        }) = &event.event
-        {
-            let ts = event.timestamp.timestamp();
-            let bucket_start = (ts / fidelity) * fidelity;
-
-            // Infer side from price movement
-            let prev = prev_prices.get(token_id).copied();
-            let is_buy = prev.is_none_or(|p| *price >= p);
+            // Use explicit side when available; fall back to price-movement heuristic
+            let is_buy = match side {
+                Some(OrderSide::Buy) => true,
+                Some(OrderSide::Sell) => false,
+                _ => {
+                    let prev = prev_prices.get(token_id).copied();
+                    prev.is_none_or(|p| *price >= p)
+                }
+            };
             prev_prices.insert(token_id.clone(), *price);
 
-            if let Some(bucket) = token_buckets
-                .get_mut(token_id)
-                .and_then(|b| b.get_mut(&bucket_start))
-            {
-                if is_buy {
-                    bucket.last_buy = Some(*price);
-                } else {
-                    bucket.last_sell = Some(*price);
-                }
+            if is_buy {
+                bucket.last_buy = Some(*price);
+            } else {
+                bucket.last_sell = Some(*price);
             }
         }
     }
@@ -178,6 +167,14 @@ fn synthesize_price_events_from_trades(
     synthetic_events
 }
 
+/// Pre-built maps from load_events() for sharing across sweep engines.
+pub struct TokenMaps {
+    pub market_tokens: HashMap<String, (String, String)>,
+    pub token_to_market: HashMap<String, String>,
+    pub market_end_dates: HashMap<String, DateTime<Utc>>,
+    pub market_durations: HashMap<String, i64>,
+}
+
 /// Backtesting engine that replays historical events through a strategy.
 ///
 /// This engine:
@@ -204,6 +201,12 @@ pub struct BacktestEngine {
     market_tokens: HashMap<String, (String, String)>,
     /// Reverse mapping: token_id -> market_id (for fill events)
     token_to_market: HashMap<String, String>,
+    /// Market end dates for depth decay calculation: market_id -> end_date
+    market_end_dates: HashMap<String, DateTime<Utc>>,
+    /// Market durations for depth decay: market_id -> duration_secs
+    market_durations: HashMap<String, i64>,
+    /// Best ask/bid cache for GTC taker fee heuristic: token_id -> (best_bid, best_ask)
+    token_best_prices: HashMap<String, (Decimal, Decimal)>,
     /// Optional progress bar for event replay (None in sweep mode).
     progress_bar: Option<ProgressBar>,
     // --- Funnel instrumentation counters ---
@@ -272,6 +275,9 @@ impl BacktestEngine {
             position_entries: HashMap::new(),
             market_tokens: HashMap::new(),
             token_to_market: HashMap::new(),
+            market_end_dates: HashMap::new(),
+            market_durations: HashMap::new(),
+            token_best_prices: HashMap::new(),
             progress_bar: None,
             markets_discovered: 0,
             orders_submitted: 0,
@@ -369,6 +375,13 @@ impl BacktestEngine {
                     ..
                 }) => {
                     self.token_prices.insert(token_id.clone(), *price);
+                    // Cache best bid/ask for GTC taker fee heuristic
+                    self.token_best_prices
+                        .insert(token_id.clone(), (*best_bid, *best_ask));
+
+                    // Compute effective depth with optional expiry decay
+                    let depth = self.effective_depth(token_id);
+
                     // Populate orderbook so strategies can read best ask/bid
                     let mut md = self.ctx.market_data.write().await;
                     md.orderbooks.insert(
@@ -377,11 +390,11 @@ impl BacktestEngine {
                             token_id: token_id.clone(),
                             bids: vec![OrderbookLevel {
                                 price: *best_bid,
-                                size: Decimal::new(1000, 0),
+                                size: depth,
                             }],
                             asks: vec![OrderbookLevel {
                                 price: *best_ask,
-                                size: Decimal::new(1000, 0),
+                                size: depth,
                             }],
                             timestamp: self.current_time,
                         },
@@ -608,19 +621,54 @@ impl BacktestEngine {
         self.strategy.on_start(&self.ctx).await
     }
 
-    /// Get token maps built during load_events() (for sharing with sweep engines).
-    pub fn token_maps(&self) -> (HashMap<String, (String, String)>, HashMap<String, String>) {
-        (self.market_tokens.clone(), self.token_to_market.clone())
+    /// Maps built during load_events() for sharing with sweep engines.
+    pub fn token_maps(&self) -> TokenMaps {
+        TokenMaps {
+            market_tokens: self.market_tokens.clone(),
+            token_to_market: self.token_to_market.clone(),
+            market_end_dates: self.market_end_dates.clone(),
+            market_durations: self.market_durations.clone(),
+        }
     }
 
     /// Inject pre-built token maps (used by sweep runner to avoid re-loading).
-    pub fn set_token_maps(
-        &mut self,
-        market_tokens: HashMap<String, (String, String)>,
-        token_to_market: HashMap<String, String>,
-    ) {
-        self.market_tokens = market_tokens;
-        self.token_to_market = token_to_market;
+    pub fn set_token_maps(&mut self, maps: TokenMaps) {
+        self.market_tokens = maps.market_tokens;
+        self.token_to_market = maps.token_to_market;
+        self.market_end_dates = maps.market_end_dates;
+        self.market_durations = maps.market_durations;
+    }
+
+    /// Compute effective orderbook depth for a token, applying expiry decay if configured.
+    fn effective_depth(&self, token_id: &str) -> Decimal {
+        let base = self.config.realism.typical_depth;
+        if !self.config.realism.depth_decay_near_expiry {
+            return base;
+        }
+
+        // Look up market end_date for this token
+        let market_id = match self.token_to_market.get(token_id) {
+            Some(mid) => mid,
+            None => return base,
+        };
+        let (end_date, duration) = match (
+            self.market_end_dates.get(market_id),
+            self.market_durations.get(market_id),
+        ) {
+            (Some(ed), Some(dur)) => (*ed, *dur),
+            _ => return base,
+        };
+
+        if duration <= 0 {
+            return base;
+        }
+
+        let remaining = (end_date - self.current_time).num_seconds().max(0);
+        // Linear decay: depth * max(0.2, remaining / duration)
+        let ratio = Decimal::new(remaining, 0) / Decimal::new(duration, 0);
+        let floor = Decimal::new(2, 1); // 0.2
+        let factor = ratio.max(floor).min(Decimal::ONE);
+        base * factor
     }
 
     /// Load historical events from the data store.
@@ -692,6 +740,12 @@ impl BacktestEngine {
                     .insert(m.token_a.clone(), m.market_id.clone());
                 self.token_to_market
                     .insert(m.token_b.clone(), m.market_id.clone());
+                // Store end_date and duration for depth decay
+                self.market_end_dates
+                    .insert(m.market_id.clone(), m.end_date);
+                let duration = (m.end_date - m.start_date).num_seconds();
+                self.market_durations
+                    .insert(m.market_id.clone(), duration);
                 vec![m.token_a.clone(), m.token_b.clone()]
             } else {
                 // Market not found in cache - assume market_id IS a token_id for backwards compatibility
@@ -815,6 +869,11 @@ impl BacktestEngine {
                     .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
 
                 for trade in trades {
+                    let side = match trade.side.as_str() {
+                        "buy" => Some(OrderSide::Buy),
+                        "sell" => Some(OrderSide::Sell),
+                        _ => None,
+                    };
                     events.push(HistoricalEvent {
                         timestamp: trade.timestamp,
                         token_id: trade.token_id.clone(),
@@ -823,6 +882,7 @@ impl BacktestEngine {
                             price: trade.price,
                             size: trade.size,
                             timestamp: trade.timestamp,
+                            side,
                         }),
                     });
                 }
@@ -1099,10 +1159,54 @@ impl BacktestEngine {
         Ok(trades)
     }
 
+    /// Determine whether an order should be charged taker fee.
+    ///
+    /// FOK orders are always taker. GTC/GTD orders are taker when
+    /// `gtc_taker_fee_heuristic` is enabled and the order would match immediately
+    /// (BUY price >= best_ask, SELL price <= best_bid).
+    fn is_taker_fill(&self, order: &OrderRequest) -> bool {
+        match order.order_type {
+            OrderType::Fok => true,
+            _ => {
+                if !self.config.realism.gtc_taker_fee_heuristic {
+                    return false;
+                }
+                if let Some(&(best_bid, best_ask)) =
+                    self.token_best_prices.get(&order.token_id)
+                {
+                    match order.side {
+                        OrderSide::Buy => order.price >= best_ask,
+                        OrderSide::Sell => order.price <= best_bid,
+                    }
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Compute the dynamic taker fee for a fill: 2 * p * (1-p) * rate * size.
+    fn taker_fee(&self, fill_price: Decimal, size: Decimal) -> Decimal {
+        Decimal::TWO
+            * fill_price
+            * (Decimal::ONE - fill_price)
+            * self.config.fees.taker_fee_rate
+            * size
+    }
+
+    /// Compute the per-share taker fee component (for effective entry price).
+    fn taker_fee_per_share(&self, fill_price: Decimal) -> Decimal {
+        Decimal::TWO
+            * fill_price
+            * (Decimal::ONE - fill_price)
+            * self.config.fees.taker_fee_rate
+    }
+
     /// Execute an order immediately at the current market price.
     ///
-    /// This is a simplified "Immediate fill mode" implementation.
-    /// Historical orderbook depth is not available from Polymarket APIs.
+    /// Applies configurable realism adjustments:
+    /// - **Slippage**: fill price shifted by `slippage_ticks * 0.01` against the trader
+    /// - **GTC taker fee**: charged when order would match immediately (price crosses spread)
     async fn execute_order(&mut self, order: OrderRequest) -> Result<Option<BacktestTrade>> {
         let current_price = self
             .token_prices
@@ -1133,23 +1237,27 @@ impl BacktestEngine {
             return Ok(None);
         }
 
+        // Apply slippage: BUY fills worse (higher), SELL fills worse (lower)
+        let tick = Decimal::new(1, 2); // 0.01
+        let slippage = tick * Decimal::from(self.config.realism.slippage_ticks);
+        let fill_price = match order.side {
+            OrderSide::Buy => (current_price + slippage).min(Decimal::ONE),
+            OrderSide::Sell => (current_price - slippage).max(Decimal::ZERO),
+        };
+
+        // Determine if this fill incurs taker fee
+        let is_taker = self.is_taker_fill(&order);
+
         let mut balance = self.ctx.balance.write().await;
         let mut positions = self.ctx.positions.write().await;
 
         match order.side {
             OrderSide::Buy => {
-                // Calculate cost (price * size) + dynamic fee
-                // Fee depends on order type: FOK = taker fee, GTC/GTD = maker (0%)
-                let cost = current_price * order.size;
-                let fee = match order.order_type {
-                    OrderType::Fok => {
-                        Decimal::TWO
-                            * current_price
-                            * (Decimal::ONE - current_price)
-                            * self.config.fees.taker_fee_rate
-                            * order.size
-                    }
-                    _ => Decimal::ZERO, // GTC/GTD = maker = 0% fee
+                let cost = fill_price * order.size;
+                let fee = if is_taker {
+                    self.taker_fee(fill_price, order.size)
+                } else {
+                    Decimal::ZERO
                 };
                 let total_cost = cost + fee;
 
@@ -1168,16 +1276,12 @@ impl BacktestEngine {
 
                 // Update position entry tracking
                 // Include fees in the effective entry price for accurate P&L calculation
-                let fee_per_share = match order.order_type {
-                    OrderType::Fok => {
-                        Decimal::TWO
-                            * current_price
-                            * (Decimal::ONE - current_price)
-                            * self.config.fees.taker_fee_rate
-                    }
-                    _ => Decimal::ZERO,
+                let fee_per_share = if is_taker {
+                    self.taker_fee_per_share(fill_price)
+                } else {
+                    Decimal::ZERO
                 };
-                let effective_buy_price = current_price + fee_per_share;
+                let effective_buy_price = fill_price + fee_per_share;
 
                 let (cur_size, cur_entry) = self
                     .position_entries
@@ -1208,7 +1312,7 @@ impl BacktestEngine {
                     if let Some(pos) = positions.open_positions.get_mut(&pos_id) {
                         pos.size = new_size;
                         pos.entry_price = new_entry;
-                        pos.current_price = current_price;
+                        pos.current_price = fill_price;
                     }
                 } else {
                     // Create new position
@@ -1222,7 +1326,7 @@ impl BacktestEngine {
                             side: OutcomeSide::Yes, // Simplified
                             entry_price: new_entry,
                             size: new_size,
-                            current_price,
+                            current_price: fill_price,
                             entry_time: self.current_time,
                             strategy_name: self.strategy.name().to_string(),
                         },
@@ -1237,7 +1341,7 @@ impl BacktestEngine {
                         market_id: String::new(),
                         token_id: order.token_id.clone(),
                         side: OrderSide::Buy,
-                        price: current_price,
+                        price: fill_price,
                         size: order.size,
                         realized_pnl: None,
                         strategy_name: self.strategy.name().to_string(),
@@ -1253,9 +1357,11 @@ impl BacktestEngine {
 
                 debug!(
                     token_id = %order.token_id,
-                    price = %current_price,
+                    price = %fill_price,
                     size = %order.size,
                     cost = %total_cost,
+                    slippage = %slippage,
+                    is_taker,
                     "BUY order filled"
                 );
 
@@ -1263,7 +1369,7 @@ impl BacktestEngine {
                     timestamp: self.current_time,
                     token_id: order.token_id,
                     side: OrderSide::Buy,
-                    price: current_price,
+                    price: fill_price,
                     size: order.size,
                     realized_pnl: None,
                     close_reason: None,
@@ -1287,18 +1393,11 @@ impl BacktestEngine {
                     return Ok(None);
                 }
 
-                // Calculate revenue (price * size) - dynamic fee
-                // Fee depends on order type: FOK = taker fee, GTC/GTD = maker (0%)
-                let revenue = current_price * order.size;
-                let fee = match order.order_type {
-                    OrderType::Fok => {
-                        Decimal::TWO
-                            * current_price
-                            * (Decimal::ONE - current_price)
-                            * self.config.fees.taker_fee_rate
-                            * order.size
-                    }
-                    _ => Decimal::ZERO, // GTC/GTD = maker = 0% fee
+                let revenue = fill_price * order.size;
+                let fee = if is_taker {
+                    self.taker_fee(fill_price, order.size)
+                } else {
+                    Decimal::ZERO
                 };
                 let net_revenue = revenue - fee;
 
@@ -1332,7 +1431,7 @@ impl BacktestEngine {
                     if new_size > Decimal::ZERO {
                         if let Some(pos) = positions.open_positions.get_mut(&pos_id) {
                             pos.size = new_size;
-                            pos.current_price = current_price;
+                            pos.current_price = fill_price;
                         }
                     } else {
                         positions.open_positions.remove(&pos_id);
@@ -1347,7 +1446,7 @@ impl BacktestEngine {
                         market_id: String::new(),
                         token_id: order.token_id.clone(),
                         side: OrderSide::Sell,
-                        price: current_price,
+                        price: fill_price,
                         size: order.size,
                         realized_pnl: Some(realized_pnl),
                         strategy_name: self.strategy.name().to_string(),
@@ -1363,10 +1462,12 @@ impl BacktestEngine {
 
                 debug!(
                     token_id = %order.token_id,
-                    price = %current_price,
+                    price = %fill_price,
                     size = %order.size,
                     revenue = %net_revenue,
                     realized_pnl = %realized_pnl,
+                    slippage = %slippage,
+                    is_taker,
                     "SELL order filled"
                 );
 
@@ -1374,7 +1475,7 @@ impl BacktestEngine {
                     timestamp: self.current_time,
                     token_id: order.token_id,
                     side: OrderSide::Sell,
-                    price: current_price,
+                    price: fill_price,
                     size: order.size,
                     realized_pnl: Some(realized_pnl),
                     close_reason: Some(CloseReason::Strategy),
@@ -1387,7 +1488,7 @@ impl BacktestEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::FeeConfig;
+    use crate::config::{FeeConfig, RealismConfig};
     use async_trait::async_trait;
     use polyrust_core::actions::Action;
     use polyrust_core::context::StrategyContext;
@@ -1487,6 +1588,7 @@ mod tests {
 
             fetch_concurrency: 10,
             offline: false,
+            realism: RealismConfig::default(),
             sweep: None,
         };
 
@@ -1570,6 +1672,7 @@ mod tests {
 
             fetch_concurrency: 10,
             offline: false,
+            realism: RealismConfig::default(),
             sweep: None,
         };
 
@@ -1619,6 +1722,7 @@ mod tests {
 
             fetch_concurrency: 10,
             offline: false,
+            realism: RealismConfig::default(),
             sweep: None,
         };
 
@@ -1654,6 +1758,7 @@ mod tests {
                         price: dec!(0.50) + Decimal::new(i, 2), // 0.50, 0.51, ..., 0.59
                         size: dec!(10),
                         timestamp: DateTime::from_timestamp(ts, 0).unwrap(),
+                        side: None,
                     }),
                 }
             })
@@ -1707,6 +1812,7 @@ mod tests {
                     price: dec!(0.50),
                     size: dec!(10),
                     timestamp: DateTime::from_timestamp(1000, 0).unwrap(),
+                    side: None,
                 }),
             },
             HistoricalEvent {
@@ -1717,6 +1823,7 @@ mod tests {
                     price: dec!(0.30),
                     size: dec!(5),
                     timestamp: DateTime::from_timestamp(1000, 0).unwrap(),
+                    side: None,
                 }),
             },
             HistoricalEvent {
@@ -1727,6 +1834,7 @@ mod tests {
                     price: dec!(0.55),
                     size: dec!(10),
                     timestamp: DateTime::from_timestamp(1007, 0).unwrap(),
+                    side: None,
                 }),
             },
         ];
@@ -1817,6 +1925,7 @@ mod tests {
 
             fetch_concurrency: 10,
             offline: false,
+            realism: RealismConfig::default(),
             sweep: None,
         };
 
@@ -1840,5 +1949,345 @@ mod tests {
         // Verify the final price is from the last trade
         let final_price = engine.token_prices.get("token1").unwrap();
         assert_eq!(*final_price, dec!(0.55)); // Last trade: 0.50 + 0.05
+    }
+
+    #[tokio::test]
+    async fn slippage_penalizes_fills() {
+        let store = Arc::new(Store::new(":memory:").await.unwrap());
+        let data_store = Arc::new(HistoricalDataStore::new(":memory:").await.unwrap());
+
+        data_store
+            .insert_historical_prices(vec![
+                crate::data::store::HistoricalPrice {
+                    token_id: "token1".to_string(),
+                    timestamp: DateTime::from_timestamp(1000, 0).unwrap(),
+                    price: dec!(0.50),
+                    source: "test".to_string(),
+                },
+                crate::data::store::HistoricalPrice {
+                    token_id: "token1".to_string(),
+                    timestamp: DateTime::from_timestamp(2000, 0).unwrap(),
+                    price: dec!(0.60),
+                    source: "test".to_string(),
+                },
+            ])
+            .await
+            .unwrap();
+
+        let config = BacktestConfig {
+            strategy_name: "test-strategy".to_string(),
+            market_ids: vec!["token1".to_string()],
+            start_date: DateTime::from_timestamp(500, 0).unwrap(),
+            end_date: DateTime::from_timestamp(3000, 0).unwrap(),
+            initial_balance: dec!(1000),
+            data_fidelity_secs: 60,
+            data_db_path: ":memory:".to_string(),
+            fees: FeeConfig {
+                taker_fee_rate: dec!(0.01),
+            },
+            market_duration_secs: None,
+            fetch_concurrency: 10,
+            offline: false,
+            realism: RealismConfig {
+                slippage_ticks: 2, // 2 ticks = 0.02 slippage
+                ..Default::default()
+            },
+            sweep: None,
+        };
+
+        let strategy = Box::new(TestStrategy {
+            price_event_count: 0,
+        });
+        let mut engine = BacktestEngine::new(config, strategy, data_store, store).await;
+
+        let trades = engine.run().await.unwrap();
+        assert_eq!(trades.len(), 2);
+
+        // BUY: fill_price = 0.50 + 0.02 slippage = 0.52
+        assert_eq!(trades[0].side, OrderSide::Buy);
+        assert_eq!(trades[0].price, dec!(0.52));
+
+        // SELL: fill_price = 0.60 - 0.02 slippage = 0.58
+        assert_eq!(trades[1].side, OrderSide::Sell);
+        assert_eq!(trades[1].price, dec!(0.58));
+
+        // P&L: revenue (0.58 * 10 = 5.80) - cost_basis (0.52 * 10 = 5.20) = 0.60
+        // (Compared to 1.00 without slippage)
+        let pnl = trades[1].realized_pnl.unwrap();
+        assert_eq!(pnl, dec!(0.60));
+    }
+
+    /// Strategy that places GTC orders at aggressive prices that cross the spread.
+    /// BUY at best_ask + 1 tick (guaranteed to cross), SELL at best_bid - 1 tick.
+    struct CrossingSpreadStrategy {
+        price_event_count: usize,
+    }
+
+    #[async_trait]
+    impl Strategy for CrossingSpreadStrategy {
+        fn name(&self) -> &str {
+            "crossing-spread"
+        }
+
+        fn description(&self) -> &str {
+            "Places GTC orders that cross the spread"
+        }
+
+        async fn on_event(&mut self, event: &Event, ctx: &StrategyContext) -> Result<Vec<Action>> {
+            match event {
+                Event::MarketData(MarketDataEvent::PriceChange { token_id, .. }) => {
+                    self.price_event_count += 1;
+                    let md = ctx.market_data.read().await;
+                    let ob = md.orderbooks.get(token_id);
+                    if self.price_event_count == 1 {
+                        // BUY at best_ask + 1 tick — this definitely crosses the spread
+                        let ask = ob.and_then(|o| o.best_ask()).unwrap_or(dec!(0.51));
+                        let aggressive_price = ask + dec!(0.01);
+                        Ok(vec![Action::PlaceOrder(OrderRequest::new(
+                            token_id.clone(),
+                            aggressive_price,
+                            dec!(10),
+                            OrderSide::Buy,
+                            OrderType::Gtc,
+                            false,
+                        ))])
+                    } else if self.price_event_count == 2 {
+                        // SELL at best_bid - 1 tick — this crosses the spread
+                        let bid = ob.and_then(|o| o.best_bid()).unwrap_or(dec!(0.59));
+                        let aggressive_price = bid - dec!(0.01);
+                        Ok(vec![Action::PlaceOrder(OrderRequest::new(
+                            token_id.clone(),
+                            aggressive_price,
+                            dec!(10),
+                            OrderSide::Sell,
+                            OrderType::Gtc,
+                            false,
+                        ))])
+                    } else {
+                        Ok(vec![])
+                    }
+                }
+                _ => Ok(vec![]),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gtc_taker_fee_heuristic_charges_crossing_orders() {
+        let data_store = Arc::new(HistoricalDataStore::new(":memory:").await.unwrap());
+
+        data_store
+            .insert_historical_prices(vec![
+                crate::data::store::HistoricalPrice {
+                    token_id: "token1".to_string(),
+                    timestamp: DateTime::from_timestamp(1000, 0).unwrap(),
+                    price: dec!(0.50),
+                    source: "test".to_string(),
+                },
+                crate::data::store::HistoricalPrice {
+                    token_id: "token1".to_string(),
+                    timestamp: DateTime::from_timestamp(2000, 0).unwrap(),
+                    price: dec!(0.60),
+                    source: "test".to_string(),
+                },
+            ])
+            .await
+            .unwrap();
+
+        // Without heuristic: GTC = 0% fee even when crossing spread
+        let store1 = Arc::new(Store::new(":memory:").await.unwrap());
+        let config_no_heuristic = BacktestConfig {
+            strategy_name: "crossing-spread".to_string(),
+            market_ids: vec!["token1".to_string()],
+            start_date: DateTime::from_timestamp(500, 0).unwrap(),
+            end_date: DateTime::from_timestamp(3000, 0).unwrap(),
+            initial_balance: dec!(1000),
+            data_fidelity_secs: 60,
+            data_db_path: ":memory:".to_string(),
+            fees: FeeConfig {
+                taker_fee_rate: dec!(0.0315),
+            },
+            market_duration_secs: None,
+            fetch_concurrency: 10,
+            offline: false,
+            realism: RealismConfig {
+                gtc_taker_fee_heuristic: false,
+                ..Default::default()
+            },
+            sweep: None,
+        };
+
+        let strategy1 = Box::new(CrossingSpreadStrategy {
+            price_event_count: 0,
+        });
+        let mut engine1 =
+            BacktestEngine::new(config_no_heuristic, strategy1, data_store.clone(), store1).await;
+        let trades_no_heuristic = engine1.run().await.unwrap();
+        assert_eq!(trades_no_heuristic.len(), 2, "Expected BUY + SELL trades");
+        let pnl_no_heuristic = trades_no_heuristic[1].realized_pnl.unwrap();
+
+        // With heuristic: GTC orders crossing spread get taker fee
+        let store2 = Arc::new(Store::new(":memory:").await.unwrap());
+        let config_with_heuristic = BacktestConfig {
+            strategy_name: "crossing-spread".to_string(),
+            market_ids: vec!["token1".to_string()],
+            start_date: DateTime::from_timestamp(500, 0).unwrap(),
+            end_date: DateTime::from_timestamp(3000, 0).unwrap(),
+            initial_balance: dec!(1000),
+            data_fidelity_secs: 60,
+            data_db_path: ":memory:".to_string(),
+            fees: FeeConfig {
+                taker_fee_rate: dec!(0.0315),
+            },
+            market_duration_secs: None,
+            fetch_concurrency: 10,
+            offline: false,
+            realism: RealismConfig {
+                gtc_taker_fee_heuristic: true,
+                ..Default::default()
+            },
+            sweep: None,
+        };
+
+        let strategy2 = Box::new(CrossingSpreadStrategy {
+            price_event_count: 0,
+        });
+        let mut engine2 =
+            BacktestEngine::new(config_with_heuristic, strategy2, data_store, store2).await;
+        let trades_with_heuristic = engine2.run().await.unwrap();
+        assert_eq!(trades_with_heuristic.len(), 2, "Expected BUY + SELL trades");
+        let pnl_with_heuristic = trades_with_heuristic[1].realized_pnl.unwrap();
+
+        // With heuristic enabled, P&L should be lower due to taker fees on crossing GTC orders
+        assert!(
+            pnl_with_heuristic < pnl_no_heuristic,
+            "P&L with heuristic ({}) should be less than without ({})",
+            pnl_with_heuristic,
+            pnl_no_heuristic
+        );
+    }
+
+    #[tokio::test]
+    async fn configurable_depth_affects_orderbook() {
+        let store = Arc::new(Store::new(":memory:").await.unwrap());
+        let data_store = Arc::new(HistoricalDataStore::new(":memory:").await.unwrap());
+
+        data_store
+            .insert_historical_prices(vec![crate::data::store::HistoricalPrice {
+                token_id: "token1".to_string(),
+                timestamp: DateTime::from_timestamp(1000, 0).unwrap(),
+                price: dec!(0.50),
+                source: "test".to_string(),
+            }])
+            .await
+            .unwrap();
+
+        let config = BacktestConfig {
+            strategy_name: "test-strategy".to_string(),
+            market_ids: vec!["token1".to_string()],
+            start_date: DateTime::from_timestamp(500, 0).unwrap(),
+            end_date: DateTime::from_timestamp(2000, 0).unwrap(),
+            initial_balance: dec!(1000),
+            data_fidelity_secs: 60,
+            data_db_path: ":memory:".to_string(),
+            fees: FeeConfig {
+                taker_fee_rate: dec!(0.01),
+            },
+            market_duration_secs: None,
+            fetch_concurrency: 10,
+            offline: false,
+            realism: RealismConfig {
+                typical_depth: dec!(150),
+                ..Default::default()
+            },
+            sweep: None,
+        };
+
+        let strategy = Box::new(TestStrategy {
+            price_event_count: 0,
+        });
+        let mut engine = BacktestEngine::new(config, strategy, data_store, store).await;
+        let _trades = engine.run().await.unwrap();
+
+        // After running, the orderbook should have depth = 150 (not default 1000)
+        let md = engine.ctx.market_data.read().await;
+        if let Some(ob) = md.orderbooks.get("token1") {
+            assert_eq!(ob.asks[0].size, dec!(150));
+            assert_eq!(ob.bids[0].size, dec!(150));
+        }
+    }
+
+    #[tokio::test]
+    async fn effective_depth_decays_near_expiry() {
+        let config = BacktestConfig {
+            strategy_name: "test".to_string(),
+            market_ids: vec![],
+            start_date: DateTime::from_timestamp(0, 0).unwrap(),
+            end_date: DateTime::from_timestamp(900, 0).unwrap(),
+            initial_balance: dec!(1000),
+            data_fidelity_secs: 60,
+            data_db_path: ":memory:".to_string(),
+            fees: FeeConfig::default(),
+            market_duration_secs: None,
+            fetch_concurrency: 10,
+            offline: false,
+            realism: RealismConfig {
+                typical_depth: dec!(200),
+                depth_decay_near_expiry: true,
+                ..Default::default()
+            },
+            sweep: None,
+        };
+
+        let data_store = Arc::new(HistoricalDataStore::new(":memory:").await.unwrap());
+        let mut engine = BacktestEngine::new_without_store(
+            config,
+            Box::new(TestStrategy { price_event_count: 0 }),
+            data_store,
+        )
+        .await;
+
+        // Inject market maps for depth decay
+        engine.set_token_maps(TokenMaps {
+            market_tokens: HashMap::new(),
+            token_to_market: [("token1".to_string(), "market1".to_string())]
+                .into_iter()
+                .collect(),
+            market_end_dates: [(
+                "market1".to_string(),
+                DateTime::from_timestamp(900, 0).unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+            market_durations: [("market1".to_string(), 900i64)].into_iter().collect(),
+        });
+
+        // At start (900s remaining): full depth
+        engine.current_time = DateTime::from_timestamp(0, 0).unwrap();
+        assert_eq!(engine.effective_depth("token1"), dec!(200));
+
+        // At halfway (450s remaining): 50% depth
+        engine.current_time = DateTime::from_timestamp(450, 0).unwrap();
+        assert_eq!(engine.effective_depth("token1"), dec!(100));
+
+        // At 90% through (90s remaining): 10% → floor at 20%
+        engine.current_time = DateTime::from_timestamp(810, 0).unwrap();
+        assert_eq!(engine.effective_depth("token1"), dec!(40));
+
+        // Past expiry (0s remaining): floor at 20%
+        engine.current_time = DateTime::from_timestamp(1000, 0).unwrap();
+        assert_eq!(engine.effective_depth("token1"), dec!(40));
+
+        // Unknown token: returns base depth regardless
+        assert_eq!(engine.effective_depth("unknown"), dec!(200));
+    }
+
+    #[test]
+    fn realism_defaults_are_zero_friction() {
+        let r = RealismConfig::default();
+        assert_eq!(r.slippage_ticks, 0);
+        assert_eq!(r.typical_depth, dec!(1000));
+        assert!(!r.depth_decay_near_expiry);
+        assert!(!r.gtc_taker_fee_heuristic);
     }
 }

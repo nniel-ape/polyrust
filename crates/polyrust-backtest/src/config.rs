@@ -36,6 +36,9 @@ pub struct BacktestConfig {
     /// Offline mode: skip all network fetches, use only cached data from backtest_data.db.
     #[serde(default)]
     pub offline: bool,
+    /// Realism settings for more accurate simulation (slippage, depth, fees).
+    #[serde(default)]
+    pub realism: RealismConfig,
     /// Optional parameter sweep configuration for grid search.
     #[serde(default)]
     pub sweep: Option<SweepConfig>,
@@ -53,6 +56,44 @@ impl Default for FeeConfig {
     fn default() -> Self {
         Self {
             taker_fee_rate: Decimal::new(315, 4), // 0.0315 = 3.15%
+        }
+    }
+}
+
+/// Realism configuration for more accurate backtest simulation.
+///
+/// These settings model real-world frictions that the default "immediate fill"
+/// engine ignores: slippage, finite orderbook depth, and GTC-as-taker fees.
+/// All defaults are conservative (zero friction) so existing backtests are unaffected.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RealismConfig {
+    /// Fixed slippage penalty in ticks (0.01 each) added to BUY fills and subtracted
+    /// from SELL fills. Simulates the cost of walking the orderbook.
+    /// Example: 1 = 1 tick = 0.01 price penalty per fill.
+    pub slippage_ticks: u32,
+
+    /// Typical orderbook depth (shares) at best bid/ask. Replaces the hardcoded 1000.
+    /// Real Polymarket 15-min markets have ~50-200 shares near expiration.
+    pub typical_depth: Decimal,
+
+    /// Whether depth should decay linearly as market approaches expiration.
+    /// When true: effective_depth = typical_depth * max(0.2, time_remaining / market_duration).
+    /// When false: depth is always `typical_depth`.
+    pub depth_decay_near_expiry: bool,
+
+    /// Charge taker fee on GTC orders that would match immediately in live
+    /// (i.e., GTC BUY at price >= best_ask, GTC SELL at price <= best_bid).
+    pub gtc_taker_fee_heuristic: bool,
+}
+
+impl Default for RealismConfig {
+    fn default() -> Self {
+        Self {
+            slippage_ticks: 0,
+            typical_depth: Decimal::new(1000, 0),
+            depth_decay_near_expiry: false,
+            gtc_taker_fee_heuristic: false,
         }
     }
 }
@@ -84,6 +125,7 @@ impl Default for BacktestConfig {
 
             fetch_concurrency: 10,
             offline: false,
+            realism: RealismConfig::default(),
             sweep: None,
         }
     }
@@ -204,6 +246,7 @@ mod tests {
 
             fetch_concurrency: 10,
             offline: false,
+            realism: RealismConfig::default(),
             sweep: None,
         };
         assert_eq!(config.strategy_name, "test-strategy");

@@ -41,6 +41,10 @@ pub enum MarketDataEvent {
         price: Decimal,
         size: Decimal,
         timestamp: DateTime<Utc>,
+        /// Trade side from the data source (e.g. subgraph). `None` for live feeds
+        /// where side is not available at the event level.
+        #[serde(default)]
+        side: Option<OrderSide>,
     },
     ExternalPrice {
         symbol: String,

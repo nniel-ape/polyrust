@@ -6,12 +6,12 @@ pub mod progress;
 pub mod report;
 pub mod sweep;
 
-pub use config::{BacktestConfig, FeeConfig};
+pub use config::{BacktestConfig, FeeConfig, RealismConfig};
 pub use data::{
     DataFetchConfig, DataFetcher, HistoricalCryptoPrice, HistoricalDataStore, HistoricalMarket,
     HistoricalPrice, HistoricalTrade,
 };
-pub use engine::{BacktestEngine, BacktestTrade, CloseReason, HistoricalEvent};
+pub use engine::{BacktestEngine, BacktestTrade, CloseReason, HistoricalEvent, TokenMaps};
 pub use error::{BacktestError, BacktestResult};
 pub use progress::ProgressBarGuard;
 pub use report::BacktestReport;

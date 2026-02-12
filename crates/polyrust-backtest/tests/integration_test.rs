@@ -163,6 +163,7 @@ async fn test_full_backtest_pipeline() {
 
         fetch_concurrency: 10,
         offline: false,
+        realism: Default::default(),
         sweep: None,
     };
 
@@ -249,6 +250,7 @@ async fn test_backtest_with_no_data() {
 
         fetch_concurrency: 10,
         offline: false,
+        realism: Default::default(),
         sweep: None,
     };
 

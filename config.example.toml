@@ -236,3 +236,11 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # Fee model (matches strategy config for realistic P&L)
 # [backtest.fees]
 # taker_fee_rate = 0.0315  # 3.15% at 50/50 probability (Polymarket dynamic fee model)
+
+# Realism settings — model real-world frictions for more accurate simulation.
+# All defaults are zero-friction (conservative) so existing backtests are unaffected.
+# [backtest.realism]
+# slippage_ticks = 1             # Ticks (0.01 each) of slippage per fill (BUY +, SELL -)
+# typical_depth = 150            # Shares at best bid/ask (replaces default 1000)
+# depth_decay_near_expiry = true # Linearly reduce depth as market approaches expiration
+# gtc_taker_fee_heuristic = true # Charge taker fee on GTC orders that cross the spread

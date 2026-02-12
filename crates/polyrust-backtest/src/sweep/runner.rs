@@ -8,7 +8,7 @@ use polyrust_strategies::{ArbitrageConfig, CryptoArbBase, ReferenceQualityLevel,
 
 use crate::config::BacktestConfig;
 use crate::data::store::HistoricalDataStore;
-use crate::engine::{BacktestEngine, HistoricalEvent};
+use crate::engine::{BacktestEngine, HistoricalEvent, TokenMaps};
 use crate::error::{BacktestError, BacktestResult};
 use crate::report::BacktestReport;
 
@@ -81,9 +81,7 @@ impl SweepRunner {
         );
         // Extract token maps built during load_events() for sharing with per-combo engines.
         // Without these, MarketExpired settlement silently no-ops and capital stays locked.
-        let (market_tokens, token_to_market) = loader_engine.token_maps();
-        let market_tokens = Arc::new(market_tokens);
-        let token_to_market = Arc::new(token_to_market);
+        let token_maps = Arc::new(loader_engine.token_maps());
         info!(event_count = events.len(), "Events pre-loaded");
 
         // Determine parallelism
@@ -136,8 +134,7 @@ impl SweepRunner {
 
             // Spawn this combination
             let events = Arc::clone(&events);
-            let market_tokens = Arc::clone(&market_tokens);
-            let token_to_market = Arc::clone(&token_to_market);
+            let token_maps = Arc::clone(&token_maps);
             let backtest_config = self.backtest_config.clone();
             let mut arb_config = self.arb_config.clone();
             let data_store = Arc::clone(&self.data_store);
@@ -159,8 +156,7 @@ impl SweepRunner {
                     backtest_config,
                     arb_config,
                     data_store,
-                    market_tokens,
-                    token_to_market,
+                    token_maps,
                 )
                 .await
             });
@@ -210,7 +206,6 @@ impl SweepRunner {
 }
 
 /// Run a single backtest combination.
-#[allow(clippy::too_many_arguments)]
 async fn run_single(
     combo_index: usize,
     params_map: std::collections::BTreeMap<String, String>,
@@ -218,8 +213,7 @@ async fn run_single(
     backtest_config: BacktestConfig,
     arb_config: ArbitrageConfig,
     data_store: Arc<HistoricalDataStore>,
-    market_tokens: Arc<std::collections::HashMap<String, (String, String)>>,
-    token_to_market: Arc<std::collections::HashMap<String, String>>,
+    token_maps: Arc<TokenMaps>,
 ) -> BacktestResult<SweepResult> {
     let run_start = Instant::now();
 
@@ -235,7 +229,12 @@ async fn run_single(
     let mut engine = BacktestEngine::new_without_store(backtest_config, strategy, data_store).await;
 
     // Inject token maps so MarketExpired settlement works (maps built by loader engine)
-    engine.set_token_maps((*market_tokens).clone(), (*token_to_market).clone());
+    engine.set_token_maps(TokenMaps {
+        market_tokens: token_maps.market_tokens.clone(),
+        token_to_market: token_maps.token_to_market.clone(),
+        market_end_dates: token_maps.market_end_dates.clone(),
+        market_durations: token_maps.market_durations.clone(),
+    });
 
     // Call on_start before replay
     engine
