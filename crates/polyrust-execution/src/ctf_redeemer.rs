@@ -1,10 +1,10 @@
 #![allow(clippy::too_many_arguments)]
 
 use alloy::network::EthereumWallet;
-use alloy::primitives::{address, Address, Bytes, FixedBytes, U256};
+use alloy::primitives::{Address, Bytes, FixedBytes, U256, address};
 use alloy::providers::ProviderBuilder;
-use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
+use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use alloy::sol_types::SolCall;
 use polyrust_core::error::{PolyError, Result};
@@ -133,10 +133,7 @@ pub async fn check_approvals_readonly(
             .map_err(|e| {
                 PolyError::Execution(format!("isApprovedForAll check for {name} failed: {e}"))
             })?;
-        results.push(ApprovalStatus {
-            name,
-            approved,
-        });
+        results.push(ApprovalStatus { name, approved });
     }
 
     let usdc = IERC20::new(USDC_ADDRESS, &provider);
@@ -476,7 +473,9 @@ impl CtfRedeemer {
                     // (contains transactionHash in the raw response), wait briefly for
                     // it to settle before falling back — avoids nonce collision (GS026).
                     if e.to_string().contains("transactionHash") {
-                        debug!("Relayer may have submitted tx to mempool, waiting before direct RPC fallback");
+                        debug!(
+                            "Relayer may have submitted tx to mempool, waiting before direct RPC fallback"
+                        );
                         tokio::time::sleep(Duration::from_secs(5)).await;
                     }
                 }
@@ -628,8 +627,7 @@ impl CtfRedeemer {
         if !receipt.status() {
             return Err(PolyError::Execution(format!(
                 "execTransaction reverted (tx: {:#x}, gas_used: {})",
-                receipt.transaction_hash,
-                receipt.gas_used
+                receipt.transaction_hash, receipt.gas_used
             )));
         }
 
@@ -889,7 +887,9 @@ fn extract_revert_reason(err: &alloy::contract::Error) -> String {
     // Try to find a raw revert data hex for known Safe error codes
     for code in &["GS000", "GS001", "GS013", "GS025", "GS026"] {
         if msg.contains(code) {
-            return format!("Safe error {code} (see https://github.com/safe-global/safe-smart-account/blob/main/docs/error_codes.md)");
+            return format!(
+                "Safe error {code} (see https://github.com/safe-global/safe-smart-account/blob/main/docs/error_codes.md)"
+            );
         }
     }
     msg

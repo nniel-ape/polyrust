@@ -244,10 +244,7 @@ pub async fn trades(State(state): State<AppState>) -> std::result::Result<Html<S
                 .entry_price
                 .map(|d| d.to_string())
                 .unwrap_or_else(|| "\u{2014}".into()),
-            close_reason: t
-                .close_reason
-                .clone()
-                .unwrap_or_else(|| "\u{2014}".into()),
+            close_reason: t.close_reason.clone().unwrap_or_else(|| "\u{2014}".into()),
         })
         .collect();
 

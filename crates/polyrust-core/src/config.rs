@@ -302,8 +302,8 @@ impl Config {
     /// Apply POLY_* environment variable overrides.
     pub fn with_env_overrides(mut self) -> Self {
         // Detect if TOML file populated polymarket secrets (deprecated path)
-        let toml_had_secrets = self.polymarket.private_key.is_some()
-            || self.polymarket.builder_api_key.is_some();
+        let toml_had_secrets =
+            self.polymarket.private_key.is_some() || self.polymarket.builder_api_key.is_some();
 
         if let Ok(v) = std::env::var("POLY_PRIVATE_KEY") {
             self.polymarket.private_key = Some(v);

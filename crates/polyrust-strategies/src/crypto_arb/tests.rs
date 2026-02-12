@@ -545,22 +545,14 @@ async fn reservation_blocks_concurrent_access() {
 
     // First reservation succeeds
     assert!(
-        base.try_reserve_market(
-            &"market1".to_string(),
-            ArbitrageMode::TailEnd,
-            1,
-        )
-        .await
+        base.try_reserve_market(&"market1".to_string(), ArbitrageMode::TailEnd, 1,)
+            .await
     );
 
     // Second reservation for same market fails
     assert!(
         !base
-            .try_reserve_market(
-                &"market1".to_string(),
-                ArbitrageMode::TwoSided,
-                2,
-            )
+            .try_reserve_market(&"market1".to_string(), ArbitrageMode::TwoSided, 2,)
             .await
     );
 }
@@ -1018,7 +1010,11 @@ async fn rejection_cooldown_blocks_reevaluation() {
     assert!(base.is_rejection_cooled_down(&market_id).await);
 
     // Different market should not be cooled down
-    assert!(!base.is_rejection_cooled_down(&"other-market".to_string()).await);
+    assert!(
+        !base
+            .is_rejection_cooled_down(&"other-market".to_string())
+            .await
+    );
 }
 
 #[tokio::test]
@@ -2852,13 +2848,22 @@ async fn reconcile_detects_filled_order() {
 
     // Verify order-2 was removed from tracking
     let limits = base.open_limit_orders.read().await;
-    assert!(limits.contains_key("order-1"), "order-1 should still be tracked");
-    assert!(!limits.contains_key("order-2"), "order-2 should be removed (reconciled fill)");
+    assert!(
+        limits.contains_key("order-1"),
+        "order-1 should still be tracked"
+    );
+    assert!(
+        !limits.contains_key("order-2"),
+        "order-2 should be removed (reconciled fill)"
+    );
     drop(limits);
 
     // Verify position was created for the filled order
     let positions = base.positions.read().await;
-    assert!(positions.contains_key("market-B"), "position should exist for market-B");
+    assert!(
+        positions.contains_key("market-B"),
+        "position should exist for market-B"
+    );
     let market_positions = positions.get("market-B").unwrap();
     assert_eq!(market_positions.len(), 1);
     assert_eq!(market_positions[0].entry_price, dec!(0.92));
@@ -2868,7 +2873,12 @@ async fn reconcile_detects_filled_order() {
     // Verify RecordFill + "reconciled-fill" signal were emitted
     assert_eq!(actions.len(), 2);
     match &actions[0] {
-        Action::RecordFill { order_id, market_id, side, .. } => {
+        Action::RecordFill {
+            order_id,
+            market_id,
+            side,
+            ..
+        } => {
             assert_eq!(order_id, "order-2");
             assert_eq!(market_id, "market-B");
             assert_eq!(*side, OrderSide::Buy);
@@ -2876,7 +2886,10 @@ async fn reconcile_detects_filled_order() {
         other => panic!("expected RecordFill, got {:?}", other),
     }
     match &actions[1] {
-        Action::EmitSignal { signal_type, payload } => {
+        Action::EmitSignal {
+            signal_type,
+            payload,
+        } => {
             assert_eq!(signal_type, "reconciled-fill");
             assert_eq!(payload["order_id"], "order-2");
             assert_eq!(payload["market_id"], "market-B");
@@ -2903,7 +2916,10 @@ async fn reconcile_skips_cancel_pending_orders() {
 
     // Order should still be tracked (cancel_pending orders are skipped)
     let limits = base.open_limit_orders.read().await;
-    assert!(limits.contains_key("order-1"), "cancel_pending order should not be reconciled");
+    assert!(
+        limits.contains_key("order-1"),
+        "cancel_pending order should not be reconciled"
+    );
     assert!(actions.is_empty(), "no actions for cancel_pending orders");
 }
 
@@ -2919,18 +2935,26 @@ async fn handle_cancel_failed_matched_creates_position() {
     }
 
     // Simulate cancel failure because order was matched by counterparty
-    let (found, actions) = base.handle_cancel_failed("order-1", "order was matched").await;
+    let (found, actions) = base
+        .handle_cancel_failed("order-1", "order was matched")
+        .await;
 
     assert!(found, "order should have been found in tracking");
 
     // Verify order removed from tracking
     let limits = base.open_limit_orders.read().await;
-    assert!(!limits.contains_key("order-1"), "matched order should be removed");
+    assert!(
+        !limits.contains_key("order-1"),
+        "matched order should be removed"
+    );
     drop(limits);
 
     // Verify position was created (this was the bug — previously only emitted signal)
     let positions = base.positions.read().await;
-    assert!(positions.contains_key("market-A"), "position should exist for market-A");
+    assert!(
+        positions.contains_key("market-A"),
+        "position should exist for market-A"
+    );
     let market_positions = positions.get("market-A").unwrap();
     assert_eq!(market_positions.len(), 1);
     assert_eq!(market_positions[0].entry_price, dec!(0.92));
@@ -2941,7 +2965,12 @@ async fn handle_cancel_failed_matched_creates_position() {
     // Verify RecordFill + "matched-fill" signal emitted
     assert_eq!(actions.len(), 2);
     match &actions[0] {
-        Action::RecordFill { order_id, market_id, side, .. } => {
+        Action::RecordFill {
+            order_id,
+            market_id,
+            side,
+            ..
+        } => {
             assert_eq!(order_id, "order-1");
             assert_eq!(market_id, "market-A");
             assert_eq!(*side, OrderSide::Buy);
@@ -2949,7 +2978,10 @@ async fn handle_cancel_failed_matched_creates_position() {
         other => panic!("expected RecordFill, got {:?}", other),
     }
     match &actions[1] {
-        Action::EmitSignal { signal_type, payload } => {
+        Action::EmitSignal {
+            signal_type,
+            payload,
+        } => {
             assert_eq!(signal_type, "matched-fill");
             assert_eq!(payload["order_id"], "order-1");
             assert_eq!(payload["market_id"], "market-A");
@@ -2970,19 +3002,30 @@ async fn handle_cancel_failed_not_matched_does_not_create_position() {
     }
 
     // Cancel failed for a transient reason (not matched/canceled/not found)
-    let (found, actions) = base.handle_cancel_failed("order-1", "timeout connecting to CLOB").await;
+    let (found, actions) = base
+        .handle_cancel_failed("order-1", "timeout connecting to CLOB")
+        .await;
 
     assert!(found);
     assert!(actions.is_empty(), "no actions for transient failure");
 
     // Order should still be tracked with cancel_pending reset
     let limits = base.open_limit_orders.read().await;
-    assert!(limits.contains_key("order-1"), "order should still be tracked");
-    assert!(!limits["order-1"].cancel_pending, "cancel_pending should be reset");
+    assert!(
+        limits.contains_key("order-1"),
+        "order should still be tracked"
+    );
+    assert!(
+        !limits["order-1"].cancel_pending,
+        "cancel_pending should be reset"
+    );
 
     // No position created
     let positions = base.positions.read().await;
-    assert!(!positions.contains_key("market-A"), "no position for transient failure");
+    assert!(
+        !positions.contains_key("market-A"),
+        "no position for transient failure"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3022,8 +3065,14 @@ async fn strike_proximity_rejects_within_threshold() {
             "token_down".to_string(),
             OrderbookSnapshot {
                 token_id: "token_down".to_string(),
-                bids: vec![OrderbookLevel { price: dec!(0.92), size: dec!(100) }],
-                asks: vec![OrderbookLevel { price: dec!(0.94), size: dec!(100) }],
+                bids: vec![OrderbookLevel {
+                    price: dec!(0.92),
+                    size: dec!(100),
+                }],
+                asks: vec![OrderbookLevel {
+                    price: dec!(0.94),
+                    size: dec!(100),
+                }],
                 timestamp: Utc::now(),
             },
         );
@@ -3072,8 +3121,14 @@ async fn strike_proximity_allows_beyond_threshold() {
             "token_down".to_string(),
             OrderbookSnapshot {
                 token_id: "token_down".to_string(),
-                bids: vec![OrderbookLevel { price: dec!(0.935), size: dec!(100) }],
-                asks: vec![OrderbookLevel { price: dec!(0.94), size: dec!(100) }],
+                bids: vec![OrderbookLevel {
+                    price: dec!(0.935),
+                    size: dec!(100),
+                }],
+                asks: vec![OrderbookLevel {
+                    price: dec!(0.94),
+                    size: dec!(100),
+                }],
                 timestamp: Utc::now(),
             },
         );
@@ -3154,8 +3209,13 @@ async fn liquidity_rejection_marks_gtc_fallback() {
 
     // Add position
     let pos = make_position(
-        "m1", "token_gtc", OutcomeSide::Up,
-        dec!(0.90), dec!(10), dec!(50000), dec!(0.90),
+        "m1",
+        "token_gtc",
+        OutcomeSide::Up,
+        dec!(0.90),
+        dec!(10),
+        dec!(50000),
+        dec!(0.90),
     );
     base.record_position(pos).await;
 
@@ -3166,15 +3226,25 @@ async fn liquidity_rejection_marks_gtc_fallback() {
     }
 
     // Handle liquidity rejection
-    base.handle_stop_loss_rejection(&"token_gtc".to_string(), "couldn't be fully filled", "TailEnd")
-        .await;
+    base.handle_stop_loss_rejection(
+        &"token_gtc".to_string(),
+        "couldn't be fully filled",
+        "TailEnd",
+    )
+    .await;
 
     // Should be marked for GTC fallback
     let gtc_set = base.stop_loss_use_gtc.read().await;
-    assert!(gtc_set.contains("token_gtc"), "Liquidity rejection should mark for GTC");
+    assert!(
+        gtc_set.contains("token_gtc"),
+        "Liquidity rejection should mark for GTC"
+    );
 
     // Should use fast cooldown (1s for first rejection)
-    assert!(base.is_stop_loss_cooled_down(&"token_gtc".to_string()).await);
+    assert!(
+        base.is_stop_loss_cooled_down(&"token_gtc".to_string())
+            .await
+    );
 }
 
 #[tokio::test]
@@ -3182,8 +3252,13 @@ async fn balance_rejection_does_not_mark_gtc_fallback() {
     let base = make_base_no_chainlink();
 
     let pos = make_position(
-        "m1", "token_bal", OutcomeSide::Up,
-        dec!(0.90), dec!(10), dec!(50000), dec!(0.90),
+        "m1",
+        "token_bal",
+        OutcomeSide::Up,
+        dec!(0.90),
+        dec!(10),
+        dec!(50000),
+        dec!(0.90),
     );
     base.record_position(pos).await;
 
@@ -3197,7 +3272,10 @@ async fn balance_rejection_does_not_mark_gtc_fallback() {
 
     // Should NOT be marked for GTC
     let gtc_set = base.stop_loss_use_gtc.read().await;
-    assert!(!gtc_set.contains("token_bal"), "Balance rejection should NOT mark for GTC");
+    assert!(
+        !gtc_set.contains("token_bal"),
+        "Balance rejection should NOT mark for GTC"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3217,8 +3295,13 @@ async fn check_stop_loss_constructs_gtc_when_flagged() {
 
     // Position with both conditions met for dual trigger
     let pos = make_position(
-        "m1", "token_up", OutcomeSide::Up,
-        dec!(0.90), dec!(10), dec!(50000), dec!(0.90),
+        "m1",
+        "token_up",
+        OutcomeSide::Up,
+        dec!(0.90),
+        dec!(10),
+        dec!(50000),
+        dec!(0.90),
     );
     let snapshot = make_snapshot("token_up", dec!(0.84), dec!(0.86));
 
@@ -3233,11 +3316,19 @@ async fn check_stop_loss_constructs_gtc_when_flagged() {
 
     let (action, exit_price, _trigger) = result.unwrap();
     // GTC price = current_bid - tick_size * offset = 0.84 - 0.01 * 1 = 0.83
-    assert_eq!(exit_price, dec!(0.83), "GTC fallback should price below bid");
+    assert_eq!(
+        exit_price,
+        dec!(0.83),
+        "GTC fallback should price below bid"
+    );
 
     match action {
         Action::PlaceOrder(order) => {
-            assert_eq!(order.order_type, OrderType::Gtc, "Should use GTC order type");
+            assert_eq!(
+                order.order_type,
+                OrderType::Gtc,
+                "Should use GTC order type"
+            );
             assert_eq!(order.side, OrderSide::Sell);
             assert_eq!(order.price, dec!(0.83));
         }
@@ -3246,7 +3337,10 @@ async fn check_stop_loss_constructs_gtc_when_flagged() {
 
     // Flag should be consumed
     let gtc_set = base.stop_loss_use_gtc.read().await;
-    assert!(!gtc_set.contains("token_up"), "GTC flag should be consumed after use");
+    assert!(
+        !gtc_set.contains("token_up"),
+        "GTC flag should be consumed after use"
+    );
 }
 
 #[tokio::test]
@@ -3261,8 +3355,13 @@ async fn check_stop_loss_uses_fok_when_not_flagged() {
     }
 
     let pos = make_position(
-        "m1", "token_up", OutcomeSide::Up,
-        dec!(0.90), dec!(10), dec!(50000), dec!(0.90),
+        "m1",
+        "token_up",
+        OutcomeSide::Up,
+        dec!(0.90),
+        dec!(10),
+        dec!(50000),
+        dec!(0.90),
     );
     let snapshot = make_snapshot("token_up", dec!(0.84), dec!(0.86));
 
@@ -3275,7 +3374,11 @@ async fn check_stop_loss_uses_fok_when_not_flagged() {
 
     match action {
         Action::PlaceOrder(order) => {
-            assert_eq!(order.order_type, OrderType::Fok, "Should use FOK by default");
+            assert_eq!(
+                order.order_type,
+                OrderType::Fok,
+                "Should use FOK by default"
+            );
         }
         _ => panic!("Expected PlaceOrder action"),
     }
@@ -3360,8 +3463,13 @@ async fn remove_position_clears_gtc_flag() {
     let base = make_base_no_chainlink();
 
     let pos = make_position(
-        "m1", "token_cleanup", OutcomeSide::Up,
-        dec!(0.90), dec!(10), dec!(50000), dec!(0.90),
+        "m1",
+        "token_cleanup",
+        OutcomeSide::Up,
+        dec!(0.90),
+        dec!(10),
+        dec!(50000),
+        dec!(0.90),
     );
     base.record_position(pos).await;
 

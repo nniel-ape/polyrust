@@ -434,10 +434,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = discovery_feed.stop().await;
 
     // Abort all background tasks for clean shutdown
-    info!(
-        tasks = bg_handles.len(),
-        "Aborting background tasks"
-    );
+    info!(tasks = bg_handles.len(), "Aborting background tasks");
     for handle in &bg_handles {
         handle.abort();
     }

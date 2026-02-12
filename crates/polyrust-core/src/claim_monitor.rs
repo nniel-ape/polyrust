@@ -332,10 +332,7 @@ impl ClaimMonitor {
         let settlement_delay = Duration::seconds(self.config.settlement_delay_secs as i64);
         let resolved_claims: Vec<MarketId> = pending
             .iter()
-            .filter(|(_, c)| {
-                c.resolved_at
-                    .is_some_and(|t| now - t >= settlement_delay)
-            })
+            .filter(|(_, c)| c.resolved_at.is_some_and(|t| now - t >= settlement_delay))
             .map(|(mid, _)| mid.clone())
             .collect();
 

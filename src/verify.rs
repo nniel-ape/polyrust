@@ -66,7 +66,9 @@ pub async fn run_verify() -> anyhow::Result<()> {
 
 /// Load private key from POLY_PRIVATE_KEY env var.
 fn load_private_key() -> Option<String> {
-    std::env::var("POLY_PRIVATE_KEY").ok().filter(|s| !s.is_empty())
+    std::env::var("POLY_PRIVATE_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// Load RPC URLs from POLY_RPC_URLS env var.
@@ -210,19 +212,18 @@ async fn check_approvals() -> CheckResult {
 
     let result = tokio::time::timeout(Duration::from_secs(15), async {
         // Determine owner: Safe address if set, else EOA from private key
-        let owner: Address =
-            if let Ok(safe_addr) = std::env::var("POLY_SAFE_ADDRESS")
-                && !safe_addr.is_empty()
-            {
-                safe_addr
-                    .parse()
-                    .map_err(|e| format!("Invalid POLY_SAFE_ADDRESS: {e}"))?
-            } else {
-                let signer: PrivateKeySigner = private_key
-                    .parse()
-                    .map_err(|e| format!("Invalid private key: {e}"))?;
-                signer.address()
-            };
+        let owner: Address = if let Ok(safe_addr) = std::env::var("POLY_SAFE_ADDRESS")
+            && !safe_addr.is_empty()
+        {
+            safe_addr
+                .parse()
+                .map_err(|e| format!("Invalid POLY_SAFE_ADDRESS: {e}"))?
+        } else {
+            let signer: PrivateKeySigner = private_key
+                .parse()
+                .map_err(|e| format!("Invalid private key: {e}"))?;
+            signer.address()
+        };
 
         let statuses = polyrust_execution::check_approvals_readonly(&rpc_urls[0], owner)
             .await

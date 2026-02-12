@@ -481,7 +481,7 @@ mod tests {
             OrderSide::Buy,
             OrderType::Fok,
             dec!(0.01),
-            0, // fee_rate_bps
+            0,     // fee_rate_bps
             false, // post_only
             SdkAddress::ZERO,
             None,

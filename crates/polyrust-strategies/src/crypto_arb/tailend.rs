@@ -296,13 +296,18 @@ impl TailEndStrategy {
                         // open_limit_orders — FOK orders don't get tracked there)
                         // Actually, we need to track GTC SL orders separately since they
                         // aren't entry orders. Track all SL orders with order_ids.
-                        let exit_price = *pending_sl.get(&result.token_id).unwrap_or(&Decimal::ZERO);
+                        let exit_price =
+                            *pending_sl.get(&result.token_id).unwrap_or(&Decimal::ZERO);
                         drop(pending_sl);
 
                         // Peek at the position to get market_id and size
                         let pos_info = {
                             let positions = self.base.positions.read().await;
-                            positions.values().flat_map(|v| v.iter()).find(|p| p.token_id == result.token_id).map(|p| (p.market_id.clone(), p.size))
+                            positions
+                                .values()
+                                .flat_map(|v| v.iter())
+                                .find(|p| p.token_id == result.token_id)
+                                .map(|p| (p.market_id.clone(), p.size))
                         };
 
                         if let Some((market_id, size)) = pos_info {
@@ -557,7 +562,10 @@ impl TailEndStrategy {
                 }
             };
 
-            let opp = match self.evaluate_opportunity(&market_id, effective_price, ctx).await {
+            let opp = match self
+                .evaluate_opportunity(&market_id, effective_price, ctx)
+                .await
+            {
                 Some(opp) => opp,
                 None => {
                     self.base.release_reservation(&market_id).await;
@@ -630,7 +638,8 @@ impl TailEndStrategy {
             // Tick-aware pricing: step N ticks above the best ask using the market's tick_size.
             let tick_size = market_info.market.tick_size;
             let tick_steps = Decimal::from(self.base.config.order.tick_steps_above_ask);
-            let aggressive_price = (opp.buy_price + tick_size * tick_steps).min(Decimal::new(99, 2));
+            let aggressive_price =
+                (opp.buy_price + tick_size * tick_steps).min(Decimal::new(99, 2));
             let neg_risk = market_info.market.neg_risk;
             let fee_rate_bps = market_info.market.fee_rate_bps;
             let mut order = OrderRequest::new(
@@ -876,8 +885,8 @@ impl TailEndStrategy {
                 if let Some(pos) = self.base.remove_position_by_token(&sl_order.token_id).await {
                     if pos.mode == ArbitrageMode::TailEnd {
                         // GTC fills are maker orders → 0% fee on exit
-                        let pnl = (price - pos.entry_price) * pos.size
-                            - (pos.estimated_fee * pos.size);
+                        let pnl =
+                            (price - pos.entry_price) * pos.size - (pos.estimated_fee * pos.size);
                         self.base.record_trade_pnl(&pos.mode, pnl).await;
                         info!(
                             token_id = %sl_order.token_id,
@@ -907,8 +916,7 @@ impl TailEndStrategy {
                 drop(pending_sl);
                 if let Some(pos) = self.base.remove_position_by_token(token_id).await {
                     if pos.mode == ArbitrageMode::TailEnd {
-                        let exit_fee =
-                            taker_fee(exit_price, self.base.config.fee.taker_fee_rate);
+                        let exit_fee = taker_fee(exit_price, self.base.config.fee.taker_fee_rate);
                         let pnl = (exit_price - pos.entry_price) * pos.size
                             - (pos.estimated_fee * pos.size)
                             - (exit_fee * pos.size);
@@ -1070,7 +1078,9 @@ impl Strategy for TailEndStrategy {
                         drop(pending);
 
                         let cooldown = self.base.config.tailend.rejection_cooldown_secs;
-                        self.base.record_rejection_cooldown(&market_id, cooldown).await;
+                        self.base
+                            .record_rejection_cooldown(&market_id, cooldown)
+                            .await;
                         warn!(
                             token_id = %token_id,
                             market = %market_id,
@@ -1148,8 +1158,7 @@ impl Strategy for TailEndStrategy {
             }
 
             Event::System(SystemEvent::OpenOrderSnapshot(ids)) => {
-                let id_set: std::collections::HashSet<String> =
-                    ids.iter().cloned().collect();
+                let id_set: std::collections::HashSet<String> = ids.iter().cloned().collect();
                 self.base.reconcile_limit_orders(&id_set).await
             }
 

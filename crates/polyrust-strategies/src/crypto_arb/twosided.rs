@@ -370,17 +370,16 @@ impl Strategy for TwoSidedStrategy {
                     }
 
                     // Determine order type and price
-                    let (order_type, up_price, down_price) =
-                        if self.base.config.order.hybrid_mode {
-                            let offset = self.base.config.order.limit_offset;
-                            (
-                                OrderType::Gtc,
-                                (opps[0].buy_price - offset).max(Decimal::new(1, 2)),
-                                (opps[1].buy_price - offset).max(Decimal::new(1, 2)),
-                            )
-                        } else {
-                            (OrderType::Fok, opps[0].buy_price, opps[1].buy_price)
-                        };
+                    let (order_type, up_price, down_price) = if self.base.config.order.hybrid_mode {
+                        let offset = self.base.config.order.limit_offset;
+                        (
+                            OrderType::Gtc,
+                            (opps[0].buy_price - offset).max(Decimal::new(1, 2)),
+                            (opps[1].buy_price - offset).max(Decimal::new(1, 2)),
+                        )
+                    } else {
+                        (OrderType::Fok, opps[0].buy_price, opps[1].buy_price)
+                    };
 
                     // Get market info for tick_size and fee_rate_bps
                     let markets = self.base.active_markets.read().await;
@@ -526,8 +525,7 @@ impl Strategy for TwoSidedStrategy {
             }
 
             Event::System(SystemEvent::OpenOrderSnapshot(ids)) => {
-                let id_set: std::collections::HashSet<String> =
-                    ids.iter().cloned().collect();
+                let id_set: std::collections::HashSet<String> = ids.iter().cloned().collect();
                 self.base.reconcile_limit_orders(&id_set).await
             }
 

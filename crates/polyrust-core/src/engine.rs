@@ -238,17 +238,14 @@ impl Engine {
                             let mut md = context.market_data.write().await;
                             md.external_prices.insert(symbol.clone(), *price);
                             // Also update per-source price map
-                            md.sourced_prices
-                                .entry(symbol.clone())
-                                .or_default()
-                                .insert(
-                                    source.clone(),
-                                    crate::context::SourcedPrice {
-                                        price: *price,
-                                        source: source.clone(),
-                                        timestamp: *timestamp,
-                                    },
-                                );
+                            md.sourced_prices.entry(symbol.clone()).or_default().insert(
+                                source.clone(),
+                                crate::context::SourcedPrice {
+                                    price: *price,
+                                    source: source.clone(),
+                                    timestamp: *timestamp,
+                                },
+                            );
                             debug!(symbol = %symbol, price = %price, source = %source, "Updated external price in context");
                         }
                         Event::MarketData(MarketDataEvent::MarketDiscovered(info)) => {
@@ -305,9 +302,8 @@ impl Engine {
                     }
                     return;
                 }
-                let mut interval = tokio::time::interval(
-                    std::time::Duration::from_secs(interval_secs),
-                );
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(interval_secs));
                 // Don't fire immediately on startup (let orders settle first)
                 interval.tick().await;
                 loop {
@@ -537,9 +533,7 @@ pub async fn execute_action(
                                 let orderbook_snapshot =
                                     if result.side == crate::types::OrderSide::Buy {
                                         let md = context.market_data.read().await;
-                                        md.orderbooks
-                                            .get(&result.token_id)
-                                            .map(snapshot_to_json)
+                                        md.orderbooks.get(&result.token_id).map(snapshot_to_json)
                                     } else {
                                         None
                                     };
@@ -624,15 +618,14 @@ pub async fn execute_action(
                                 {
                                     // Batch orders: compute fee for FOK, capture orderbook for buys
                                     let fee = None; // Batch orders are typically GTC
-                                    let orderbook_snapshot =
-                                        if result.side == crate::types::OrderSide::Buy {
-                                            let md = context.market_data.read().await;
-                                            md.orderbooks
-                                                .get(&result.token_id)
-                                                .map(snapshot_to_json)
-                                        } else {
-                                            None
-                                        };
+                                    let orderbook_snapshot = if result.side
+                                        == crate::types::OrderSide::Buy
+                                    {
+                                        let md = context.market_data.read().await;
+                                        md.orderbooks.get(&result.token_id).map(snapshot_to_json)
+                                    } else {
+                                        None
+                                    };
 
                                     event_bus.publish(Event::OrderUpdate(OrderEvent::Filled {
                                         order_id: order_id.clone(),

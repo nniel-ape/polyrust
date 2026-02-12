@@ -513,7 +513,9 @@ impl TailEndDashboard {
 
         // Header with back link
         html.push_str(r#"<div class="mb-4">"#);
-        html.push_str(r#"<a href="/strategy/crypto-arb" class="bp-back-link">&larr; Back to Overview</a>"#);
+        html.push_str(
+            r#"<a href="/strategy/crypto-arb" class="bp-back-link">&larr; Back to Overview</a>"#,
+        );
         html.push_str(r#"<h1 class="bp-page-title mt-2">TailEnd Mode</h1>"#);
 
         // Status
@@ -689,10 +691,16 @@ impl TailEndDashboard {
                                     };
                                     (ask_display, format!("{:.1}%", pct), style)
                                 }
-                                None => (ask_display, "-".to_string(), "color:var(--text-secondary)"),
+                                None => {
+                                    (ask_display, "-".to_string(), "color:var(--text-secondary)")
+                                }
                             }
                         }
-                        None => ("-".to_string(), "-".to_string(), "color:var(--text-secondary)"),
+                        None => (
+                            "-".to_string(),
+                            "-".to_string(),
+                            "color:var(--text-secondary)",
+                        ),
                     };
 
                     let quality_factor =
@@ -767,7 +775,9 @@ impl TwoSidedDashboard {
 
         // Header with back link
         html.push_str(r#"<div class="mb-4">"#);
-        html.push_str(r#"<a href="/strategy/crypto-arb" class="bp-back-link">&larr; Back to Overview</a>"#);
+        html.push_str(
+            r#"<a href="/strategy/crypto-arb" class="bp-back-link">&larr; Back to Overview</a>"#,
+        );
         html.push_str(r#"<h1 class="bp-page-title mt-2">TwoSided Mode</h1>"#);
 
         let status = if self.base.config.twosided.enabled {

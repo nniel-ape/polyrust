@@ -148,9 +148,7 @@ async fn run_coinbase_ws_loop(product_ids: Vec<String>, bus: EventBus) {
                                 let mid = match (&ticker.best_bid, &ticker.best_ask) {
                                     (Some(bid_s), Some(ask_s)) => {
                                         match (bid_s.parse::<Decimal>(), ask_s.parse::<Decimal>()) {
-                                            (Ok(bid), Ok(ask)) => {
-                                                (bid + ask) / Decimal::new(2, 0)
-                                            }
+                                            (Ok(bid), Ok(ask)) => (bid + ask) / Decimal::new(2, 0),
                                             _ => continue,
                                         }
                                     }

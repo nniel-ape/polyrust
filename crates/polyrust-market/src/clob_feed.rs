@@ -202,7 +202,10 @@ impl MarketDataFeed for ClobFeed {
                             match subscribe_market_impl(&ws_client, &bus, &state, &info).await {
                                 Ok(handle) => {
                                     let mut s = state.write().await;
-                                    let entry = s.market_handles.entry(market_id).or_insert_with(|| (token_ids, Vec::new()));
+                                    let entry = s
+                                        .market_handles
+                                        .entry(market_id)
+                                        .or_insert_with(|| (token_ids, Vec::new()));
                                     entry.1.push(handle);
                                 }
                                 Err(e) => {
@@ -212,7 +215,8 @@ impl MarketDataFeed for ClobFeed {
                         }
                         FeedCommand::Unsubscribe(market_id) => {
                             let mut s = state.write().await;
-                            if let Some((token_ids, handles)) = s.market_handles.remove(&market_id) {
+                            if let Some((token_ids, handles)) = s.market_handles.remove(&market_id)
+                            {
                                 for tid in &token_ids {
                                     s.subscribed_assets.remove(tid);
                                 }
@@ -252,11 +256,13 @@ impl MarketDataFeed for ClobFeed {
             market.token_ids.outcome_a.clone(),
             market.token_ids.outcome_b.clone(),
         ];
-        let handle =
-            subscribe_market_impl(client, event_bus, &self.state, market).await?;
+        let handle = subscribe_market_impl(client, event_bus, &self.state, market).await?;
 
         let mut s = self.state.write().await;
-        let entry = s.market_handles.entry(market.id.clone()).or_insert_with(|| (token_ids, Vec::new()));
+        let entry = s
+            .market_handles
+            .entry(market.id.clone())
+            .or_insert_with(|| (token_ids, Vec::new()));
         entry.1.push(handle);
 
         Ok(())

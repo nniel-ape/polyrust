@@ -400,22 +400,24 @@ impl BacktestEngine {
                         },
                     );
                 }
-                Event::MarketData(MarketDataEvent::ExternalPrice { symbol, price, source, timestamp }) => {
+                Event::MarketData(MarketDataEvent::ExternalPrice {
+                    symbol,
+                    price,
+                    source,
+                    timestamp,
+                }) => {
                     // Store in external_prices keyed by coin symbol (used by strategy discovery)
                     self.token_prices.insert(symbol.clone(), *price);
                     let mut md = self.ctx.market_data.write().await;
                     md.external_prices.insert(symbol.clone(), *price);
-                    md.sourced_prices
-                        .entry(symbol.clone())
-                        .or_default()
-                        .insert(
-                            source.clone(),
-                            SourcedPrice {
-                                price: *price,
-                                source: source.clone(),
-                                timestamp: *timestamp,
-                            },
-                        );
+                    md.sourced_prices.entry(symbol.clone()).or_default().insert(
+                        source.clone(),
+                        SourcedPrice {
+                            price: *price,
+                            source: source.clone(),
+                            timestamp: *timestamp,
+                        },
+                    );
                 }
                 _ => {}
             }
@@ -751,8 +753,7 @@ impl BacktestEngine {
                 self.market_end_dates
                     .insert(m.market_id.clone(), m.end_date);
                 let duration = (m.end_date - m.start_date).num_seconds();
-                self.market_durations
-                    .insert(m.market_id.clone(), duration);
+                self.market_durations.insert(m.market_id.clone(), duration);
                 vec![m.token_a.clone(), m.token_b.clone()]
             } else {
                 // Market not found in cache - assume market_id IS a token_id for backwards compatibility
@@ -1182,9 +1183,7 @@ impl BacktestEngine {
                 if !self.config.realism.gtc_taker_fee_heuristic {
                     return false;
                 }
-                if let Some(&(best_bid, best_ask)) =
-                    self.token_best_prices.get(&order.token_id)
-                {
+                if let Some(&(best_bid, best_ask)) = self.token_best_prices.get(&order.token_id) {
                     match order.side {
                         OrderSide::Buy => order.price >= best_ask,
                         OrderSide::Sell => order.price <= best_bid,
@@ -2266,7 +2265,9 @@ mod tests {
         let data_store = Arc::new(HistoricalDataStore::new(":memory:").await.unwrap());
         let mut engine = BacktestEngine::new_without_store(
             config,
-            Box::new(TestStrategy { price_event_count: 0 }),
+            Box::new(TestStrategy {
+                price_event_count: 0,
+            }),
             data_store,
         )
         .await;

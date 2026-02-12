@@ -68,11 +68,7 @@ impl StopLossRejectionKind {
     }
 
     /// Get the cooldown schedule for this rejection kind.
-    pub fn cooldown_schedule<'a>(
-        &self,
-        liquidity: &'a [u64],
-        balance: &'a [u64],
-    ) -> &'a [u64] {
+    pub fn cooldown_schedule<'a>(&self, liquidity: &'a [u64], balance: &'a [u64]) -> &'a [u64] {
         match self {
             Self::Liquidity => liquidity,
             Self::BalanceAllowance | Self::Transient => balance,
@@ -396,8 +392,7 @@ impl CryptoArbBase {
         let mut success = 0u32;
         while let Some(Ok((coin, _bts, result))) = join_set.join_next().await {
             if let Ok(Ok(cp)) = result {
-                let ts =
-                    DateTime::from_timestamp(cp.timestamp as i64, 0).unwrap_or_else(Utc::now);
+                let ts = DateTime::from_timestamp(cp.timestamp as i64, 0).unwrap_or_else(Utc::now);
                 let mut history = self.price_history.write().await;
                 let entry = history.entry(coin).or_default();
                 entry.push_back((ts, cp.price, "chainlink".to_string()));
@@ -552,7 +547,11 @@ impl CryptoArbBase {
                         );
                         return Some(cp.price);
                     }
-                    warn!(coin, staleness_s = staleness, "Chainlink settlement too stale");
+                    warn!(
+                        coin,
+                        staleness_s = staleness,
+                        "Chainlink settlement too stale"
+                    );
                 }
                 Err(e) => warn!(coin, error = %e, "Chainlink settlement lookup failed"),
             }
@@ -1854,7 +1853,9 @@ impl CryptoArbBase {
             &self.config.stop_loss.liquidity_cooldowns,
             &self.config.stop_loss.balance_cooldowns,
         );
-        let idx = (retry_count as usize).saturating_sub(1).min(schedule.len().saturating_sub(1));
+        let idx = (retry_count as usize)
+            .saturating_sub(1)
+            .min(schedule.len().saturating_sub(1));
         let cooldown_secs = schedule.get(idx).copied().unwrap_or(60);
 
         if retry_count >= 5 {
@@ -1987,10 +1988,7 @@ impl CryptoArbBase {
     /// "reconciled-fill" signal.
     ///
     /// Returns actions (signals) for each detected fill.
-    pub async fn reconcile_limit_orders(
-        &self,
-        clob_open_ids: &HashSet<String>,
-    ) -> Vec<Action> {
+    pub async fn reconcile_limit_orders(&self, clob_open_ids: &HashSet<String>) -> Vec<Action> {
         let mut limits = self.open_limit_orders.write().await;
         let mut actions = Vec::new();
         let now = self.event_time().await;
@@ -2094,10 +2092,7 @@ impl CryptoArbBase {
                 // Track cancel in telemetry
                 let mut telem = self.order_telemetry.lock().unwrap();
                 telem.total_cancels += 1;
-                *telem
-                    .cancel_before_fill
-                    .entry(lo.coin.clone())
-                    .or_insert(0) += 1;
+                *telem.cancel_before_fill.entry(lo.coin.clone()).or_insert(0) += 1;
             }
         }
         actions

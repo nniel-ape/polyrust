@@ -389,10 +389,9 @@ impl RelayerClient {
             )));
         }
 
-        let body_text = resp
-            .text()
-            .await
-            .map_err(|e| PolyError::Execution(format!("Failed to read submit response body: {e}")))?;
+        let body_text = resp.text().await.map_err(|e| {
+            PolyError::Execution(format!("Failed to read submit response body: {e}"))
+        })?;
 
         debug!(body = %body_text, "Relayer /submit raw response");
 
@@ -455,7 +454,9 @@ impl RelayerClient {
                 }
             };
 
-            let tx_resp: TransactionResponse = match serde_json::from_str::<Vec<TransactionResponse>>(&body_text) {
+            let tx_resp: TransactionResponse = match serde_json::from_str::<Vec<TransactionResponse>>(
+                &body_text,
+            ) {
                 Ok(mut arr) if !arr.is_empty() => arr.remove(0),
                 Ok(_) => {
                     warn!(poll, body = %body_text, "Empty array from relayer, retrying");
