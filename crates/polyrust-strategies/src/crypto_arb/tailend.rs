@@ -20,6 +20,7 @@ use crate::crypto_arb::base::{CryptoArbBase, GtcStopLossOrder, taker_fee};
 use crate::crypto_arb::dashboard::try_emit_dashboard_updates;
 use crate::crypto_arb::types::{
     ArbitrageMode, ArbitrageOpportunity, ArbitragePosition, OpenLimitOrder, PendingOrder,
+    PendingStopLoss,
 };
 
 /// TailEnd strategy: trades near expiration with high market prices.
@@ -284,61 +285,56 @@ impl TailEndStrategy {
         // with the persistence handler (which also needs the position for P&L).
         {
             let pending_sl = self.base.pending_stop_loss.read().await;
-            if pending_sl.contains_key(&result.token_id) {
+            if let Some(sl_info) = pending_sl.get(&result.token_id) {
+                let exit_price = sl_info.exit_price;
+                let sl_order_type = sl_info.order_type;
+                drop(pending_sl);
+
                 if result.success {
-                    // Track GTC stop-loss orders for lifecycle management
-                    if let Some(order_id) = &result.order_id {
-                        // Check if this was a GTC stop-loss (price was set by GTC fallback path)
-                        // We detect this by checking if the order result has an order_id and
-                        // the pending_sl entry exists (all stop-loss sells go through pending_sl)
-                        let now = self.base.event_time().await;
-                        // If the stop-loss used GTC (we check by looking for the order in
-                        // open_limit_orders — FOK orders don't get tracked there)
-                        // Actually, we need to track GTC SL orders separately since they
-                        // aren't entry orders. Track all SL orders with order_ids.
-                        let exit_price =
-                            *pending_sl.get(&result.token_id).unwrap_or(&Decimal::ZERO);
-                        drop(pending_sl);
+                    // Only track GTC stop-loss orders for lifecycle management.
+                    // FOK orders fill immediately — tracking them here would cause
+                    // the fill handler to use the 0% maker fee path instead of taker fee.
+                    if sl_order_type == OrderType::Gtc {
+                        if let Some(order_id) = &result.order_id {
+                            let now = self.base.event_time().await;
+                            let pos_info = {
+                                let positions = self.base.positions.read().await;
+                                positions
+                                    .values()
+                                    .flat_map(|v| v.iter())
+                                    .find(|p| p.token_id == result.token_id)
+                                    .map(|p| (p.market_id.clone(), p.size))
+                            };
 
-                        // Peek at the position to get market_id and size
-                        let pos_info = {
-                            let positions = self.base.positions.read().await;
-                            positions
-                                .values()
-                                .flat_map(|v| v.iter())
-                                .find(|p| p.token_id == result.token_id)
-                                .map(|p| (p.market_id.clone(), p.size))
-                        };
+                            if let Some((market_id, size)) = pos_info {
+                                let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
+                                gtc_sl.insert(
+                                    order_id.clone(),
+                                    GtcStopLossOrder {
+                                        order_id: order_id.clone(),
+                                        token_id: result.token_id.clone(),
+                                        market_id,
+                                        price: exit_price,
+                                        size,
+                                        placed_at: now,
+                                    },
+                                );
+                            }
 
-                        if let Some((market_id, size)) = pos_info {
-                            let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
-                            gtc_sl.insert(
-                                order_id.clone(),
-                                GtcStopLossOrder {
-                                    order_id: order_id.clone(),
-                                    token_id: result.token_id.clone(),
-                                    market_id,
-                                    price: exit_price,
-                                    size,
-                                    placed_at: now,
-                                },
+                            info!(
+                                token_id = %result.token_id,
+                                order_id = %order_id,
+                                "TailEnd GTC stop-loss sell order placed, awaiting fill"
                             );
                         }
-
-                        info!(
-                            token_id = %result.token_id,
-                            order_id = %order_id,
-                            "TailEnd stop-loss sell order placed, awaiting fill"
-                        );
                     } else {
-                        drop(pending_sl);
                         info!(
                             token_id = %result.token_id,
+                            order_type = ?sl_order_type,
                             "TailEnd stop-loss sell order placed (FOK), awaiting fill"
                         );
                     }
                 } else {
-                    drop(pending_sl);
                     warn!(
                         token_id = %result.token_id,
                         message = %result.message,
@@ -400,6 +396,7 @@ impl TailEndStrategy {
                         tick_size: pending.tick_size,
                         fee_rate_bps: pending.fee_rate_bps,
                         cancel_pending: false,
+                        reconcile_miss_count: 0,
                     },
                 );
             }
@@ -791,7 +788,7 @@ impl TailEndStrategy {
                 continue;
             }
 
-            if let Some((action, exit_price, trigger)) = self
+            if let Some((action, exit_price, sl_order_type, trigger)) = self
                 .base
                 .check_stop_loss(&pos, snapshot, self.base.event_time().await)
                 .await
@@ -801,6 +798,7 @@ impl TailEndStrategy {
                     entry = %pos.entry_price,
                     exit = %exit_price,
                     side = ?pos.side,
+                    order_type = ?sl_order_type,
                     reason = trigger.reason,
                     peak_bid = %trigger.peak_bid,
                     effective_distance = %trigger.effective_distance,
@@ -808,7 +806,13 @@ impl TailEndStrategy {
                     "TailEnd stop-loss triggered"
                 );
                 let mut pending_sl = self.base.pending_stop_loss.write().await;
-                pending_sl.insert(pos.token_id.clone(), exit_price);
+                pending_sl.insert(
+                    pos.token_id.clone(),
+                    PendingStopLoss {
+                        exit_price,
+                        order_type: sl_order_type,
+                    },
+                );
                 actions.push(action);
                 continue;
             }
@@ -855,7 +859,13 @@ impl TailEndStrategy {
                     .with_tick_size(pos.tick_size)
                     .with_fee_rate_bps(pos.fee_rate_bps);
                     let mut pending_sl = self.base.pending_stop_loss.write().await;
-                    pending_sl.insert(pos.token_id.clone(), current_bid);
+                    pending_sl.insert(
+                        pos.token_id.clone(),
+                        PendingStopLoss {
+                            exit_price: current_bid,
+                            order_type: OrderType::Fok,
+                        },
+                    );
                     actions.push(Action::PlaceOrder(order));
                 }
             }
@@ -882,17 +892,32 @@ impl TailEndStrategy {
                     let mut pending_sl = self.base.pending_stop_loss.write().await;
                     pending_sl.remove(&sl_order.token_id);
                 }
-                if let Some(pos) = self.base.remove_position_by_token(&sl_order.token_id).await {
+                if let Some((pos, fully_closed)) = self
+                    .base
+                    .reduce_or_remove_position_by_token(&sl_order.token_id, size)
+                    .await
+                {
                     if pos.mode == ArbitrageMode::TailEnd {
                         // GTC fills are maker orders → 0% fee on exit
                         let pnl =
-                            (price - pos.entry_price) * pos.size - (pos.estimated_fee * pos.size);
+                            (price - pos.entry_price) * size - (pos.estimated_fee * size);
                         self.base.record_trade_pnl(&pos.mode, pnl).await;
+                        if !fully_closed {
+                            warn!(
+                                token_id = %sl_order.token_id,
+                                order_id = %order_id,
+                                fill_size = %size,
+                                remaining = %(pos.size - size),
+                                "GTC stop-loss partial fill: residual position kept"
+                            );
+                        }
                         info!(
                             token_id = %sl_order.token_id,
                             order_id = %order_id,
                             mode = %pos.mode,
                             pnl = %pnl,
+                            fill_size = %size,
+                            fully_closed,
                             "TailEnd GTC stop-loss sell filled (maker, 0% fee)"
                         );
                     } else {
@@ -912,19 +937,34 @@ impl TailEndStrategy {
         // Check if this is a FOK stop-loss sell fill (by token_id in pending_stop_loss)
         {
             let mut pending_sl = self.base.pending_stop_loss.write().await;
-            if let Some(exit_price) = pending_sl.remove(token_id) {
+            if let Some(sl_info) = pending_sl.remove(token_id) {
                 drop(pending_sl);
-                if let Some(pos) = self.base.remove_position_by_token(token_id).await {
+                let exit_price = sl_info.exit_price;
+                if let Some((pos, fully_closed)) = self
+                    .base
+                    .reduce_or_remove_position_by_token(token_id, size)
+                    .await
+                {
                     if pos.mode == ArbitrageMode::TailEnd {
                         let exit_fee = taker_fee(exit_price, self.base.config.fee.taker_fee_rate);
-                        let pnl = (exit_price - pos.entry_price) * pos.size
-                            - (pos.estimated_fee * pos.size)
-                            - (exit_fee * pos.size);
+                        let pnl = (exit_price - pos.entry_price) * size
+                            - (pos.estimated_fee * size)
+                            - (exit_fee * size);
                         self.base.record_trade_pnl(&pos.mode, pnl).await;
+                        if !fully_closed {
+                            warn!(
+                                token_id = %token_id,
+                                fill_size = %size,
+                                remaining = %(pos.size - size),
+                                "FOK stop-loss partial fill: residual position kept"
+                            );
+                        }
                         info!(
                             token_id = %token_id,
                             mode = %pos.mode,
                             pnl = %pnl,
+                            fill_size = %size,
+                            fully_closed,
                             "TailEnd stop-loss sell filled"
                         );
                     } else {
@@ -1493,6 +1533,7 @@ mod tests {
                     tick_size: dec!(0.01),
                     fee_rate_bps: 0,
                     cancel_pending: false,
+                    reconcile_miss_count: 0,
                 },
             );
         }

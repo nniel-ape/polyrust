@@ -20,7 +20,7 @@ use super::base::{
 use super::config::{ArbitrageConfig, SizingConfig};
 use super::types::{
     ArbitrageMode, ArbitragePosition, BoundarySnapshot, MarketWithReference, ModeStats,
-    OpenLimitOrder, ReferenceQuality,
+    OpenLimitOrder, PendingStopLoss, ReferenceQuality,
 };
 
 // ---------------------------------------------------------------------------
@@ -1148,7 +1148,7 @@ async fn stop_loss_triggers_on_both_conditions() {
         "Stop-loss should trigger when both conditions met"
     );
 
-    let (action, exit_price, trigger) = result.unwrap();
+    let (action, exit_price, _, trigger) = result.unwrap();
     assert_eq!(exit_price, dec!(0.84));
     assert_eq!(trigger.reason, "dual_trigger");
     // Verify it's a PlaceOrder (FOK sell)
@@ -1441,7 +1441,7 @@ async fn stop_loss_uses_fok_order() {
     );
     let snapshot = make_snapshot("token_up", dec!(0.84), dec!(0.86));
 
-    let (action, _, _trigger) = base
+    let (action, _, _, _trigger) = base
         .check_stop_loss(&pos, &snapshot, Utc::now())
         .await
         .unwrap();
@@ -1496,7 +1496,7 @@ async fn stop_loss_order_uses_market_neg_risk_flag() {
     );
     let snapshot = make_snapshot("token_up", dec!(0.84), dec!(0.86));
 
-    let (action, _, _) = base
+    let (action, _, _, _) = base
         .check_stop_loss(&pos, &snapshot, Utc::now())
         .await
         .unwrap();
@@ -1679,7 +1679,7 @@ async fn trailing_stop_time_decay_at_90s_floored() {
         result2.is_some(),
         "Trailing stop should trigger when drop exceeds floor"
     );
-    let (_, _, trigger) = result2.unwrap();
+    let (_, _, _, trigger) = result2.unwrap();
     assert_eq!(trigger.reason, "trailing_stop");
     assert_eq!(trigger.effective_distance, dec!(0.05));
 }
@@ -1811,7 +1811,7 @@ async fn stop_loss_rejection_balance_allowance_keeps_position_and_cools_down() {
     // Add to pending_stop_loss
     {
         let mut pending_sl = base.pending_stop_loss.write().await;
-        pending_sl.insert("token1".to_string(), dec!(0.85));
+        pending_sl.insert("token1".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
     }
 
     // Handle rejection with balance error
@@ -1852,7 +1852,7 @@ async fn stop_loss_rejection_transient_applies_cooldown() {
     // Add to pending_stop_loss
     {
         let mut pending_sl = base.pending_stop_loss.write().await;
-        pending_sl.insert("token1".to_string(), dec!(0.85));
+        pending_sl.insert("token1".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
     }
 
     // Handle rejection with transient error
@@ -2193,6 +2193,7 @@ async fn can_open_position_counts_all_order_types() {
                 tick_size: dec!(0.01),
                 fee_rate_bps: 0,
                 cancel_pending: false,
+                reconcile_miss_count: 0,
             },
         );
     }
@@ -2234,6 +2235,7 @@ async fn stale_limit_order_cancelled_after_max_age() {
                 tick_size: dec!(0.01),
                 fee_rate_bps: 0,
                 cancel_pending: false,
+                reconcile_miss_count: 0,
             },
         );
     }
@@ -2277,6 +2279,7 @@ async fn stale_order_cancel_pending_prevents_double() {
                 tick_size: dec!(0.01),
                 fee_rate_bps: 0,
                 cancel_pending: true, // Already has cancel in flight
+                reconcile_miss_count: 0,
             },
         );
     }
@@ -2376,7 +2379,7 @@ async fn trailing_stop_arms_at_min_distance_above_entry() {
         result.is_some(),
         "Trailing stop should arm when peak >= entry + min_distance"
     );
-    let (_, _, trigger) = result.unwrap();
+    let (_, _, _, trigger) = result.unwrap();
     assert_eq!(trigger.reason, "trailing_stop");
 }
 
@@ -2473,7 +2476,7 @@ async fn handle_stop_loss_rejection_balance_allowance_does_not_mark_stale() {
     // Add to pending_stop_loss
     {
         let mut pending_sl = base.pending_stop_loss.write().await;
-        pending_sl.insert("token_stale".to_string(), dec!(0.85));
+        pending_sl.insert("token_stale".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
     }
 
     // Handle rejection with balance error
@@ -2561,7 +2564,7 @@ async fn stop_loss_trigger_returns_trailing_metadata() {
 
     let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_some());
-    let (_, _, trigger) = result.unwrap();
+    let (_, _, _, trigger) = result.unwrap();
     assert_eq!(trigger.reason, "trailing_stop");
     assert_eq!(trigger.peak_bid, dec!(0.96));
     // effective_distance is base * (time/900), floored to min_distance=0.05
@@ -2823,11 +2826,12 @@ fn make_open_limit_order(order_id: &str, market_id: &str, token_id: &str) -> Ope
         tick_size: dec!(0.01),
         fee_rate_bps: 0,
         cancel_pending: false,
+        reconcile_miss_count: 0,
     }
 }
 
 #[tokio::test]
-async fn reconcile_detects_filled_order() {
+async fn reconcile_detects_filled_order_after_two_misses() {
     let base = make_base_no_chainlink();
 
     // Pre-populate with 2 open limit orders
@@ -2840,10 +2844,23 @@ async fn reconcile_detects_filled_order() {
         limits.insert("order-2".to_string(), lo2);
     }
 
-    // CLOB reports only order-1 as open — order-2 must have been filled
+    // CLOB reports only order-1 as open — order-2 is missing
     let mut clob_open = std::collections::HashSet::new();
     clob_open.insert("order-1".to_string());
 
+    // First reconciliation: order-2 gets miss_count=1, no position created yet
+    let actions = base.reconcile_limit_orders(&clob_open).await;
+    assert!(actions.is_empty(), "First miss should not create position");
+    {
+        let limits = base.open_limit_orders.read().await;
+        assert!(limits.contains_key("order-2"), "order-2 should still be tracked after first miss");
+        assert_eq!(limits["order-2"].reconcile_miss_count, 1);
+    }
+    let positions = base.positions.read().await;
+    assert!(!positions.contains_key("market-B"), "no position after first miss");
+    drop(positions);
+
+    // Second reconciliation: order-2 gets miss_count=2, now confirmed fill
     let actions = base.reconcile_limit_orders(&clob_open).await;
 
     // Verify order-2 was removed from tracking
@@ -3222,7 +3239,7 @@ async fn liquidity_rejection_marks_gtc_fallback() {
     // Add to pending_stop_loss
     {
         let mut psl = base.pending_stop_loss.write().await;
-        psl.insert("token_gtc".to_string(), dec!(0.85));
+        psl.insert("token_gtc".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
     }
 
     // Handle liquidity rejection
@@ -3264,7 +3281,7 @@ async fn balance_rejection_does_not_mark_gtc_fallback() {
 
     {
         let mut psl = base.pending_stop_loss.write().await;
-        psl.insert("token_bal".to_string(), dec!(0.85));
+        psl.insert("token_bal".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
     }
 
     base.handle_stop_loss_rejection(&"token_bal".to_string(), "not enough balance", "TailEnd")
@@ -3314,7 +3331,7 @@ async fn check_stop_loss_constructs_gtc_when_flagged() {
     let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_some());
 
-    let (action, exit_price, _trigger) = result.unwrap();
+    let (action, exit_price, _, _trigger) = result.unwrap();
     // GTC price = current_bid - tick_size * offset = 0.84 - 0.01 * 1 = 0.83
     assert_eq!(
         exit_price,
@@ -3369,7 +3386,7 @@ async fn check_stop_loss_uses_fok_when_not_flagged() {
     let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_some());
 
-    let (action, exit_price, _) = result.unwrap();
+    let (action, exit_price, _, _) = result.unwrap();
     assert_eq!(exit_price, dec!(0.84), "FOK should use current bid");
 
     match action {
@@ -3399,7 +3416,7 @@ async fn cooldown_schedule_escalates_per_rejection_kind() {
     // First liquidity rejection → 1s cooldown
     {
         let mut psl = base.pending_stop_loss.write().await;
-        psl.insert("tok1".to_string(), dec!(0.85));
+        psl.insert("tok1".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
     }
     base.handle_stop_loss_rejection(&"tok1".to_string(), "couldn't be fully filled", "Test")
         .await;
@@ -3411,7 +3428,7 @@ async fn cooldown_schedule_escalates_per_rejection_kind() {
     // Second liquidity rejection → 3s cooldown
     {
         let mut psl = base.pending_stop_loss.write().await;
-        psl.insert("tok1".to_string(), dec!(0.85));
+        psl.insert("tok1".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
     }
     base.handle_stop_loss_rejection(&"tok1".to_string(), "couldn't be fully filled", "Test")
         .await;
@@ -3423,7 +3440,7 @@ async fn cooldown_schedule_escalates_per_rejection_kind() {
     // Balance rejection on different token → uses balance schedule
     {
         let mut psl = base.pending_stop_loss.write().await;
-        psl.insert("tok2".to_string(), dec!(0.85));
+        psl.insert("tok2".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
     }
     base.handle_stop_loss_rejection(&"tok2".to_string(), "not enough balance", "Test")
         .await;
@@ -3492,4 +3509,189 @@ async fn remove_position_clears_gtc_flag() {
     assert!(!gtc_set.contains("token_cleanup"));
     let counts = base.stop_loss_retry_counts.read().await;
     assert!(!counts.contains_key("token_cleanup"));
+}
+
+// ---------------------------------------------------------------------------
+// Fix 1: Reconcile miss counter grace period
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reconcile_miss_counter_resets_on_reappear() {
+    let base = make_base_no_chainlink();
+
+    let lo = make_open_limit_order("order-1", "market-A", "token-A-up");
+    {
+        let mut limits = base.open_limit_orders.write().await;
+        limits.insert("order-1".to_string(), lo);
+    }
+
+    let empty_clob = std::collections::HashSet::new();
+
+    // First miss: miss_count goes to 1
+    let actions = base.reconcile_limit_orders(&empty_clob).await;
+    assert!(actions.is_empty());
+    {
+        let limits = base.open_limit_orders.read().await;
+        assert_eq!(limits["order-1"].reconcile_miss_count, 1);
+    }
+
+    // Order reappears in the next snapshot — miss_count resets to 0
+    let mut clob_with_order = std::collections::HashSet::new();
+    clob_with_order.insert("order-1".to_string());
+    let actions = base.reconcile_limit_orders(&clob_with_order).await;
+    assert!(actions.is_empty());
+    {
+        let limits = base.open_limit_orders.read().await;
+        assert_eq!(limits["order-1"].reconcile_miss_count, 0);
+    }
+
+    // Order disappears again — needs 2 new misses, not 1
+    let actions = base.reconcile_limit_orders(&empty_clob).await;
+    assert!(actions.is_empty(), "Should not reconcile on first miss after reset");
+    {
+        let limits = base.open_limit_orders.read().await;
+        assert_eq!(limits["order-1"].reconcile_miss_count, 1);
+    }
+}
+
+#[tokio::test]
+async fn market_expiry_cleans_up_entry_orders() {
+    let base = make_base_no_chainlink();
+
+    // Add an active market
+    let market = MarketWithReference {
+        market: make_market_info("market-X", Utc::now() + Duration::seconds(10)),
+        reference_price: dec!(50000),
+        reference_quality: ReferenceQuality::Exact,
+        discovery_time: Utc::now(),
+        coin: "BTC".to_string(),
+        window_ts: 0,
+    };
+    base.active_markets
+        .write()
+        .await
+        .insert("market-X".to_string(), market);
+
+    // Add GTC entry orders for this market
+    let lo = make_open_limit_order("entry-order-1", "market-X", "token-X-up");
+    {
+        let mut limits = base.open_limit_orders.write().await;
+        limits.insert("entry-order-1".to_string(), lo);
+    }
+
+    // Expire the market
+    let actions = base.on_market_expired("market-X").await;
+
+    // Entry order should be cancelled
+    let has_cancel = actions
+        .iter()
+        .any(|a| matches!(a, Action::CancelOrder(id) if id == "entry-order-1"));
+    assert!(has_cancel, "Should cancel entry order on market expiry");
+
+    // Entry order should be removed from tracking (not converted to position)
+    let limits = base.open_limit_orders.read().await;
+    assert!(!limits.contains_key("entry-order-1"));
+
+    // No phantom position should be created
+    let positions = base.positions.read().await;
+    assert!(
+        !positions.contains_key("market-X"),
+        "Expired entry orders should not create positions"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix 2: FOK stop-loss not tracked in gtc_stop_loss_orders
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pending_stop_loss_stores_order_type() {
+    let base = make_base_no_chainlink();
+
+    // Insert FOK pending stop-loss
+    {
+        let mut psl = base.pending_stop_loss.write().await;
+        psl.insert(
+            "token-fok".to_string(),
+            PendingStopLoss {
+                exit_price: dec!(0.85),
+                order_type: OrderType::Fok,
+            },
+        );
+        psl.insert(
+            "token-gtc".to_string(),
+            PendingStopLoss {
+                exit_price: dec!(0.82),
+                order_type: OrderType::Gtc,
+            },
+        );
+    }
+
+    // Verify we can read back order types
+    let psl = base.pending_stop_loss.read().await;
+    assert_eq!(psl["token-fok"].order_type, OrderType::Fok);
+    assert_eq!(psl["token-fok"].exit_price, dec!(0.85));
+    assert_eq!(psl["token-gtc"].order_type, OrderType::Gtc);
+    assert_eq!(psl["token-gtc"].exit_price, dec!(0.82));
+}
+
+// ---------------------------------------------------------------------------
+// Fix 3: Partial fill uses actual size, position reduced
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reduce_or_remove_full_close() {
+    let base = make_base_no_chainlink();
+
+    let pos = make_position("m1", "t1", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    base.record_position(pos).await;
+
+    // Full close: fill_size == pos.size
+    let result = base.reduce_or_remove_position_by_token("t1", dec!(10)).await;
+    assert!(result.is_some());
+    let (snapshot, fully_closed) = result.unwrap();
+    assert!(fully_closed);
+    assert_eq!(snapshot.size, dec!(10));
+
+    // Position should be completely removed
+    let positions = base.positions.read().await;
+    assert!(!positions.contains_key("m1"));
+
+    // Stop-loss state should be cleared
+    let counts = base.stop_loss_retry_counts.read().await;
+    assert!(!counts.contains_key("t1"));
+}
+
+#[tokio::test]
+async fn reduce_or_remove_partial_close() {
+    let base = make_base_no_chainlink();
+
+    let pos = make_position("m1", "t1", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    base.record_position(pos).await;
+
+    // Partial close: fill_size < pos.size
+    let result = base.reduce_or_remove_position_by_token("t1", dec!(6)).await;
+    assert!(result.is_some());
+    let (snapshot, fully_closed) = result.unwrap();
+    assert!(!fully_closed);
+    assert_eq!(snapshot.size, dec!(10), "Snapshot should have original size");
+
+    // Position should still exist with reduced size
+    let positions = base.positions.read().await;
+    let pos_list = positions.get("m1").unwrap();
+    assert_eq!(pos_list.len(), 1);
+    assert_eq!(pos_list[0].size, dec!(4), "Remaining size should be 10 - 6 = 4");
+
+    // Stop-loss state should NOT be cleared (position still open)
+    drop(positions);
+    // Insert a retry count to verify it's preserved
+    {
+        let mut counts = base.stop_loss_retry_counts.write().await;
+        counts.insert("t1".to_string(), 2);
+    }
+    let result2 = base.reduce_or_remove_position_by_token("t1", dec!(2)).await;
+    let (_, fully_closed2) = result2.unwrap();
+    assert!(!fully_closed2);
+    let counts = base.stop_loss_retry_counts.read().await;
+    assert_eq!(*counts.get("t1").unwrap(), 2, "Retry count preserved on partial close");
 }

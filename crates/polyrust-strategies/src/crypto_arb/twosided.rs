@@ -174,6 +174,7 @@ impl TwoSidedStrategy {
                         tick_size: pending.tick_size,
                         fee_rate_bps: pending.fee_rate_bps,
                         cancel_pending: false,
+                        reconcile_miss_count: 0,
                     },
                 );
             }

@@ -23,7 +23,7 @@ use polyrust_market::ChainlinkHistoricalClient;
 use crate::crypto_arb::config::{ArbitrageConfig, SizingConfig};
 use crate::crypto_arb::types::{
     ArbitrageMode, ArbitragePosition, BoundarySnapshot, MarketWithReference, ModeStats,
-    OpenLimitOrder, OrderTelemetry, PendingOrder, ReferenceQuality, SpikeEvent,
+    OpenLimitOrder, OrderTelemetry, PendingOrder, PendingStopLoss, ReferenceQuality, SpikeEvent,
 };
 
 /// Result of a composite fair price calculation from multiple data sources.
@@ -253,8 +253,8 @@ pub struct CryptoArbBase {
     /// Open GTC limit orders awaiting fill, keyed by order_id.
     pub open_limit_orders: RwLock<HashMap<OrderId, OpenLimitOrder>>,
     /// Token IDs with active stop-loss sell orders awaiting confirmation.
-    /// Value is the exit (sell) price for P&L calculation.
-    pub pending_stop_loss: RwLock<HashMap<TokenId, Decimal>>,
+    /// Carries exit price and order type for correct fee model at fill time.
+    pub pending_stop_loss: RwLock<HashMap<TokenId, PendingStopLoss>>,
     /// Markets discovered before prices were available, keyed by coin.
     /// Promoted to active_markets once a price arrives for the coin.
     /// Vec allows multiple markets per coin (e.g. multiple BTC windows at backtest start).
@@ -1223,6 +1223,31 @@ impl CryptoArbBase {
             actions
         };
 
+        // Cancel outstanding GTC entry orders for this expired market.
+        // These orders are dead — the market no longer exists. Do NOT create
+        // synthetic positions; just cancel and remove from tracking.
+        let entry_cancel_actions: Vec<Action> = {
+            let mut limits = self.open_limit_orders.write().await;
+            let to_cancel: Vec<OrderId> = limits
+                .iter()
+                .filter(|(_, lo)| lo.market_id == market_id)
+                .map(|(oid, _)| oid.clone())
+                .collect();
+            let mut actions = Vec::new();
+            for oid in to_cancel {
+                if let Some(lo) = limits.remove(&oid) {
+                    info!(
+                        order_id = %oid,
+                        token_id = %lo.token_id,
+                        market = %market_id,
+                        "Cancelling GTC entry order on market expiry"
+                    );
+                    actions.push(Action::CancelOrder(oid));
+                }
+            }
+            actions
+        };
+
         // Resolve any remaining positions
         let removed = {
             let mut positions = self.positions.write().await;
@@ -1261,6 +1286,7 @@ impl CryptoArbBase {
         self.rebuild_nearest_expiry().await;
 
         let mut result = cancel_actions;
+        result.extend(entry_cancel_actions);
         result.push(Action::UnsubscribeMarket(market_id.to_string()));
         result
     }
@@ -1578,6 +1604,61 @@ impl CryptoArbBase {
         removed
     }
 
+    /// Reduce a position's size by `fill_size`, or remove it entirely if fully closed.
+    ///
+    /// Returns `(position_snapshot, was_fully_closed)`:
+    /// - If `fill_size >= pos.size`: removes position entirely, clears stop-loss state
+    /// - If `fill_size < pos.size`: reduces `pos.size` in-place, returns clone before reduction
+    ///
+    /// The returned snapshot always has the **original** size (before reduction) for P&L calculation.
+    pub async fn reduce_or_remove_position_by_token(
+        &self,
+        token_id: &str,
+        fill_size: Decimal,
+    ) -> Option<(ArbitragePosition, bool)> {
+        let result = {
+            let mut positions = self.positions.write().await;
+            let mut result = None;
+            let mut empty_markets = Vec::new();
+
+            for (market_id, pos_list) in positions.iter_mut() {
+                if let Some(idx) = pos_list.iter().position(|p| p.token_id == token_id) {
+                    let pos = &pos_list[idx];
+                    if fill_size >= pos.size {
+                        // Full close: remove entirely
+                        let removed = pos_list.remove(idx);
+                        result = Some((removed, true));
+                    } else {
+                        // Partial close: snapshot before reducing
+                        let snapshot = pos.clone();
+                        pos_list[idx].size -= fill_size;
+                        result = Some((snapshot, false));
+                    }
+                }
+                if pos_list.is_empty() {
+                    empty_markets.push(market_id.clone());
+                }
+            }
+
+            for market_id in empty_markets {
+                positions.remove(&market_id);
+            }
+
+            result
+        };
+
+        // Clear stop-loss state only on full close
+        if let Some((_, true)) = &result {
+            let mut counts = self.stop_loss_retry_counts.write().await;
+            counts.remove(token_id);
+            drop(counts);
+            let mut gtc_set = self.stop_loss_use_gtc.write().await;
+            gtc_set.remove(token_id);
+        }
+
+        result
+    }
+
     /// Update peak_bid for trailing stop-loss tracking.
     pub async fn update_peak_bid(&self, token_id: &TokenId, current_bid: Decimal) {
         let mut positions = self.positions.write().await;
@@ -1601,13 +1682,13 @@ impl CryptoArbBase {
     /// 2. Market price dropped by >= stop_loss_min_drop (5¢) from entry
     /// 3. Time remaining > 60s (don't sell in final minute)
     ///
-    /// Returns `Some((action, exit_price, trigger))` when stop-loss should trigger.
+    /// Returns `Some((action, exit_price, order_type, trigger))` when stop-loss should trigger.
     pub async fn check_stop_loss(
         &self,
         pos: &ArbitragePosition,
         snapshot: &OrderbookSnapshot,
         now: DateTime<Utc>,
-    ) -> Option<(Action, Decimal, StopLossTrigger)> {
+    ) -> Option<(Action, Decimal, OrderType, StopLossTrigger)> {
         // Read time_remaining from active_markets, then drop the lock before
         // acquiring price_history (via get_latest_price) to avoid inconsistent
         // lock ordering with record_price which acquires them in reverse order.
@@ -1725,7 +1806,7 @@ impl CryptoArbBase {
             )
             .with_tick_size(pos.tick_size)
             .with_fee_rate_bps(pos.fee_rate_bps);
-            Some((Action::PlaceOrder(order), sell_price, trigger))
+            Some((Action::PlaceOrder(order), sell_price, order_type, trigger))
         } else {
             None
         }
@@ -1983,27 +2064,61 @@ impl CryptoArbBase {
     /// Reconcile tracked limit orders against the CLOB's actual open order set.
     ///
     /// Orders in `open_limit_orders` that are NOT in `clob_open_ids` (and not
-    /// already cancel_pending) are assumed to have been filled by a counterparty.
-    /// For each detected fill, creates an `ArbitragePosition` and emits a
-    /// "reconciled-fill" signal.
+    /// already cancel_pending) are treated as potentially filled. However, a
+    /// single miss could be a transient API snapshot gap, so we require **2
+    /// consecutive misses** before creating a synthetic fill position.
     ///
-    /// Returns actions (signals) for each detected fill.
+    /// - First miss: increment `reconcile_miss_count`, log warning, skip
+    /// - Second+ miss: proceed with synthetic fill (position + RecordFill)
+    /// - Order reappears in snapshot: reset `reconcile_miss_count` to 0
+    ///
+    /// Returns actions (signals) for each confirmed fill.
     pub async fn reconcile_limit_orders(&self, clob_open_ids: &HashSet<String>) -> Vec<Action> {
         let mut limits = self.open_limit_orders.write().await;
-        let mut actions = Vec::new();
+        let mut confirmed_fills = Vec::new();
         let now = self.event_time().await;
 
-        // Collect order IDs that are missing from the CLOB (presumably filled)
-        let missing: Vec<String> = limits
-            .keys()
-            .filter(|oid| {
-                let lo = &limits[*oid];
-                !lo.cancel_pending && !clob_open_ids.contains(*oid)
-            })
-            .cloned()
+        // Phase 1: Update miss counters and reset orders that reappeared
+        let all_oids: Vec<String> = limits.keys().cloned().collect();
+        for oid in &all_oids {
+            let lo = limits.get_mut(oid).unwrap();
+            if lo.cancel_pending {
+                continue;
+            }
+            if clob_open_ids.contains(oid) {
+                // Order is still on the book — reset miss counter
+                if lo.reconcile_miss_count > 0 {
+                    debug!(
+                        order_id = %oid,
+                        prev_misses = lo.reconcile_miss_count,
+                        "Order reappeared in CLOB snapshot, resetting miss counter"
+                    );
+                    lo.reconcile_miss_count = 0;
+                }
+            } else {
+                // Order missing from snapshot
+                lo.reconcile_miss_count += 1;
+                if lo.reconcile_miss_count < 2 {
+                    warn!(
+                        order_id = %oid,
+                        market = %lo.market_id,
+                        token = %lo.token_id,
+                        miss_count = lo.reconcile_miss_count,
+                        "Order missing from CLOB snapshot (miss {}/2), deferring reconciliation",
+                        lo.reconcile_miss_count
+                    );
+                }
+            }
+        }
+
+        // Phase 2: Collect confirmed misses (miss_count >= 2) for synthetic fill
+        let confirmed_oids: Vec<String> = limits
+            .iter()
+            .filter(|(_, lo)| !lo.cancel_pending && lo.reconcile_miss_count >= 2)
+            .map(|(oid, _)| oid.clone())
             .collect();
 
-        for order_id in missing {
+        for order_id in confirmed_oids {
             let lo = limits.remove(&order_id).unwrap();
             info!(
                 order_id = %order_id,
@@ -2012,7 +2127,9 @@ impl CryptoArbBase {
                 price = %lo.price,
                 size = %lo.size,
                 mode = %lo.mode,
-                "Reconciled fill: order missing from CLOB, creating position"
+                miss_count = lo.reconcile_miss_count,
+                "Reconciled fill: order confirmed missing from CLOB after {} snapshots",
+                lo.reconcile_miss_count
             );
 
             let position = ArbitragePosition::from_limit_order(
@@ -2022,14 +2139,12 @@ impl CryptoArbBase {
                 Some(order_id.clone()),
                 now,
             );
-            // Must drop limits lock before calling record_position (which acquires positions lock)
-            // So we collect positions and record after the loop
-            actions.push((position, order_id, lo));
+            confirmed_fills.push((position, order_id, lo));
         }
         drop(limits);
 
         let mut result_actions = Vec::new();
-        for (position, order_id, lo) in actions {
+        for (position, order_id, lo) in confirmed_fills {
             self.record_position(position).await;
             // Emit RecordFill so the persistence handler records this trade.
             // Reconciled fills are always entry buys (GTC maker = 0 fee).

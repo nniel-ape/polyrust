@@ -155,6 +155,18 @@ impl std::fmt::Display for ArbitrageMode {
     }
 }
 
+/// Metadata for a pending stop-loss sell order.
+///
+/// Carries the exit price and order type so the fill handler can apply
+/// the correct fee model (0% for GTC maker, taker fee for FOK).
+#[derive(Debug, Clone)]
+pub struct PendingStopLoss {
+    /// Exit (sell) price for P&L calculation.
+    pub exit_price: Decimal,
+    /// Order type used for this stop-loss (GTC or FOK).
+    pub order_type: OrderType,
+}
+
 /// A detected arbitrage opportunity ready for execution.
 ///
 /// Contains all information needed to place an order: market, outcome, price,
@@ -443,4 +455,8 @@ pub struct OpenLimitOrder {
     /// Whether a cancel request is in flight for this order.
     /// Prevents duplicate cancel actions on subsequent event cycles.
     pub cancel_pending: bool,
+    /// Number of consecutive reconciliation snapshots where this order was missing
+    /// from the CLOB. A synthetic fill is only created after `>= 2` consecutive
+    /// misses, protecting against transient API snapshot gaps.
+    pub reconcile_miss_count: u8,
 }
