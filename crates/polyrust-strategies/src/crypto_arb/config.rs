@@ -114,6 +114,10 @@ pub struct TailEndConfig {
     /// is attempted. The CLOB needs time to settle a buy before conditional
     /// tokens are available for selling. Default: 15.
     pub min_sell_delay_secs: i64,
+    /// Minimum distance from strike as percentage of reference price.
+    /// Rejects entries when crypto price is too close to strike (high flip risk).
+    /// Default: 0.0008 (0.08% ≈ $1.60 at $2000 ETH).
+    pub min_strike_distance_pct: Decimal,
 }
 
 fn default_min_sustained_ticks() -> usize {
@@ -152,6 +156,7 @@ impl Default for TailEndConfig {
             max_dispersion_bps: Decimal::new(50, 0),
             feed_stale_secs: 30,
             min_sell_delay_secs: 15,
+            min_strike_distance_pct: Decimal::new(8, 4), // 0.0008 = 0.08%
         }
     }
 }
@@ -333,6 +338,34 @@ pub struct StopLossConfig {
     /// positions that are about to settle. Default: 0 (always active).
     /// Previously hardcoded to 60, which suppressed ALL tailend stop-losses.
     pub min_remaining_secs: i64,
+    /// Cooldown schedule for liquidity rejections ("couldn't be fully filled").
+    /// Fast retry since the issue is transient market depth.
+    /// Default: [1, 5, 15, 30] seconds (indexed by retry count).
+    #[serde(default = "default_liquidity_cooldowns")]
+    pub liquidity_cooldowns: Vec<u64>,
+    /// Cooldown schedule for balance/allowance rejections.
+    /// Longer cooldown since underlying issue may need settlement.
+    /// Default: [5, 15, 30, 60] seconds (indexed by retry count).
+    #[serde(default = "default_balance_cooldowns")]
+    pub balance_cooldowns: Vec<u64>,
+    /// Enable GTC fallback after FOK liquidity rejection.
+    /// After a FOK stop-loss sell is rejected for liquidity, the next attempt
+    /// uses a GTC order resting below the current bid. Default: true.
+    pub gtc_fallback: bool,
+    /// Number of ticks below current bid for GTC stop-loss orders.
+    /// Default: 1 (e.g. bid=0.91 → GTC at 0.90).
+    pub gtc_fallback_tick_offset: u32,
+    /// Maximum age in seconds for a GTC stop-loss order before cancellation.
+    /// Stale GTC orders are cancelled and re-evaluated fresh. Default: 10.
+    pub gtc_stop_loss_max_age_secs: u64,
+}
+
+fn default_liquidity_cooldowns() -> Vec<u64> {
+    vec![1, 5, 15, 30]
+}
+
+fn default_balance_cooldowns() -> Vec<u64> {
+    vec![5, 15, 30, 60]
 }
 
 impl Default for StopLossConfig {
@@ -343,9 +376,14 @@ impl Default for StopLossConfig {
             trailing_enabled: true,
             trailing_distance: Decimal::new(3, 2), // 0.03
             time_decay: true,
-            trailing_min_distance: Decimal::new(1, 2), // 0.01
+            trailing_min_distance: Decimal::new(5, 2), // 0.05 (widened from 0.01)
             stale_market_cooldown_secs: 120,
             min_remaining_secs: 0, // Always active (was hardcoded 60)
+            liquidity_cooldowns: default_liquidity_cooldowns(),
+            balance_cooldowns: default_balance_cooldowns(),
+            gtc_fallback: true,
+            gtc_fallback_tick_offset: 1,
+            gtc_stop_loss_max_age_secs: 10,
         }
     }
 }

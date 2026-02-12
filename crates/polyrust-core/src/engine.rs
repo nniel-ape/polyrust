@@ -530,6 +530,7 @@ pub async fn execute_action(
                                     price: result.price,
                                     size: result.size,
                                     strategy_name: strategy_name.to_string(),
+                                    realized_pnl: None,
                                 }));
                             } else {
                                 error!(
@@ -604,6 +605,7 @@ pub async fn execute_action(
                                         price: result.price,
                                         size: result.size,
                                         strategy_name: strategy_name.to_string(),
+                                        realized_pnl: None,
                                     }));
                                 } else {
                                     error!(
@@ -704,6 +706,26 @@ pub async fn execute_action(
                 signal_type: signal_type.clone(),
                 payload: payload.clone(),
                 timestamp: chrono::Utc::now(),
+            }));
+        }
+        Action::RecordFill {
+            order_id,
+            market_id,
+            token_id,
+            side,
+            price,
+            size,
+            realized_pnl,
+        } => {
+            event_bus.publish(Event::OrderUpdate(OrderEvent::Filled {
+                order_id: order_id.clone(),
+                market_id: market_id.clone(),
+                token_id: token_id.clone(),
+                side: *side,
+                price: *price,
+                size: *size,
+                strategy_name: strategy_name.to_string(),
+                realized_pnl: *realized_pnl,
             }));
         }
         Action::SubscribeMarket(info) => {

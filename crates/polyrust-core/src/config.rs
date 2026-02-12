@@ -201,10 +201,14 @@ fn default_db_path() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaperConfig {
-    #[serde(default)]
+    #[serde(default = "default_paper_enabled")]
     pub enabled: bool,
     #[serde(default = "default_initial_balance")]
     pub initial_balance: Decimal,
+}
+
+fn default_paper_enabled() -> bool {
+    true
 }
 
 impl Default for PaperConfig {

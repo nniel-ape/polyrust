@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 
 use polyrust_core::prelude::*;
 
-use crate::crypto_arb::base::{CryptoArbBase, taker_fee};
+use crate::crypto_arb::base::{CryptoArbBase, GtcStopLossOrder, taker_fee};
 use crate::crypto_arb::dashboard::try_emit_dashboard_updates;
 use crate::crypto_arb::types::{
     ArbitrageMode, ArbitrageOpportunity, ArbitragePosition, OpenLimitOrder, PendingOrder,
@@ -58,7 +58,7 @@ impl TailEndStrategy {
     }
 
     /// Evaluate tail-end opportunity for a market.
-    async fn evaluate_opportunity(
+    pub(crate) async fn evaluate_opportunity(
         &self,
         market_id: &MarketId,
         current_price: Decimal,
@@ -129,6 +129,26 @@ impl TailEndStrategy {
                 return None;
             }
         };
+
+        // Strike proximity filter: reject entries when crypto is too close to the strike.
+        // A tiny margin means a single candle of noise can flip the outcome.
+        let min_distance_pct = self.base.config.tailend.min_strike_distance_pct;
+        if !market.reference_price.is_zero() && !min_distance_pct.is_zero() {
+            let distance_pct =
+                (current_price - market.reference_price).abs() / market.reference_price;
+            if distance_pct < min_distance_pct {
+                debug!(
+                    market = %market_id,
+                    distance_pct = %distance_pct,
+                    min = %min_distance_pct,
+                    current_price = %current_price,
+                    reference_price = %market.reference_price,
+                    "TailEnd skip: crypto too close to strike"
+                );
+                self.base.record_tailend_skip("strike_proximity").await;
+                return None;
+            }
+        }
 
         let md = ctx.market_data.read().await;
         let token_id = match predicted {
@@ -259,31 +279,61 @@ impl TailEndStrategy {
 
     /// Handle order placement result.
     async fn on_order_placed(&self, result: &OrderResult) -> Vec<Action> {
-        // Check if this is a stop-loss sell confirmation
+        // Check if this is a stop-loss sell confirmation.
+        // Don't remove position here — defer to Filled event to avoid race
+        // with the persistence handler (which also needs the position for P&L).
         {
-            let mut pending_sl = self.base.pending_stop_loss.write().await;
-            if let Some(exit_price) = pending_sl.remove(&result.token_id) {
+            let pending_sl = self.base.pending_stop_loss.read().await;
+            if pending_sl.contains_key(&result.token_id) {
                 if result.success {
-                    if let Some(pos) = self.base.remove_position_by_token(&result.token_id).await {
-                        if pos.mode == ArbitrageMode::TailEnd {
-                            let exit_fee =
-                                taker_fee(exit_price, self.base.config.fee.taker_fee_rate);
-                            let pnl = (exit_price - pos.entry_price) * pos.size
-                                - (pos.estimated_fee * pos.size)
-                                - (exit_fee * pos.size);
-                            self.base.record_trade_pnl(&pos.mode, pnl).await;
-                            info!(
-                                token_id = %result.token_id,
-                                mode = %pos.mode,
-                                pnl = %pnl,
-                                "TailEnd stop-loss sell confirmed"
+                    // Track GTC stop-loss orders for lifecycle management
+                    if let Some(order_id) = &result.order_id {
+                        // Check if this was a GTC stop-loss (price was set by GTC fallback path)
+                        // We detect this by checking if the order result has an order_id and
+                        // the pending_sl entry exists (all stop-loss sells go through pending_sl)
+                        let now = self.base.event_time().await;
+                        // If the stop-loss used GTC (we check by looking for the order in
+                        // open_limit_orders — FOK orders don't get tracked there)
+                        // Actually, we need to track GTC SL orders separately since they
+                        // aren't entry orders. Track all SL orders with order_ids.
+                        let exit_price = *pending_sl.get(&result.token_id).unwrap_or(&Decimal::ZERO);
+                        drop(pending_sl);
+
+                        // Peek at the position to get market_id and size
+                        let pos_info = {
+                            let positions = self.base.positions.read().await;
+                            positions.values().flat_map(|v| v.iter()).find(|p| p.token_id == result.token_id).map(|p| (p.market_id.clone(), p.size))
+                        };
+
+                        if let Some((market_id, size)) = pos_info {
+                            let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
+                            gtc_sl.insert(
+                                order_id.clone(),
+                                GtcStopLossOrder {
+                                    order_id: order_id.clone(),
+                                    token_id: result.token_id.clone(),
+                                    market_id,
+                                    price: exit_price,
+                                    size,
+                                    placed_at: now,
+                                },
                             );
-                        } else {
-                            // Not our mode, put position back
-                            self.base.record_position(pos).await;
                         }
+
+                        info!(
+                            token_id = %result.token_id,
+                            order_id = %order_id,
+                            "TailEnd stop-loss sell order placed, awaiting fill"
+                        );
+                    } else {
+                        drop(pending_sl);
+                        info!(
+                            token_id = %result.token_id,
+                            "TailEnd stop-loss sell order placed (FOK), awaiting fill"
+                        );
                     }
                 } else {
+                    drop(pending_sl);
                     warn!(
                         token_id = %result.token_id,
                         message = %result.message,
@@ -658,8 +708,35 @@ impl TailEndStrategy {
                 .await;
         }
 
-        // Check stop-losses on our positions
+        // Cancel stale GTC stop-loss orders (older than max_age_secs)
         let mut actions = Vec::new();
+        {
+            let max_age = self.base.config.stop_loss.gtc_stop_loss_max_age_secs as i64;
+            let now = self.base.event_time().await;
+            let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
+            let stale: Vec<OrderId> = gtc_sl
+                .iter()
+                .filter(|(_, sl)| (now - sl.placed_at).num_seconds() >= max_age)
+                .map(|(oid, _)| oid.clone())
+                .collect();
+            for oid in stale {
+                if let Some(sl) = gtc_sl.remove(&oid) {
+                    info!(
+                        order_id = %oid,
+                        token_id = %sl.token_id,
+                        age_secs = (now - sl.placed_at).num_seconds(),
+                        "Cancelling stale GTC stop-loss order for re-evaluation"
+                    );
+                    // Clear pending_stop_loss so stop-loss can re-trigger
+                    let mut pending_sl = self.base.pending_stop_loss.write().await;
+                    pending_sl.remove(&sl.token_id);
+                    drop(pending_sl);
+                    actions.push(Action::CancelOrder(oid));
+                }
+            }
+        }
+
+        // Check stop-losses on our positions
         let position_ids: Vec<(MarketId, ArbitragePosition)> = {
             let positions = self.base.positions.read().await;
             positions
@@ -776,14 +853,84 @@ impl TailEndStrategy {
         actions
     }
 
-    /// Handle a fully filled GTC order event.
+    /// Handle a fully filled order event (GTC entry fills, stop-loss sells, GTC SL fills).
     async fn on_order_filled(
         &self,
         order_id: &str,
-        _token_id: &str,
+        token_id: &str,
         price: Decimal,
         size: Decimal,
     ) -> Vec<Action> {
+        // Check if this is a GTC stop-loss fill (by order_id)
+        {
+            let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
+            if let Some(sl_order) = gtc_sl.remove(order_id) {
+                drop(gtc_sl);
+                // Clear pending_stop_loss for this token
+                {
+                    let mut pending_sl = self.base.pending_stop_loss.write().await;
+                    pending_sl.remove(&sl_order.token_id);
+                }
+                if let Some(pos) = self.base.remove_position_by_token(&sl_order.token_id).await {
+                    if pos.mode == ArbitrageMode::TailEnd {
+                        // GTC fills are maker orders → 0% fee on exit
+                        let pnl = (price - pos.entry_price) * pos.size
+                            - (pos.estimated_fee * pos.size);
+                        self.base.record_trade_pnl(&pos.mode, pnl).await;
+                        info!(
+                            token_id = %sl_order.token_id,
+                            order_id = %order_id,
+                            mode = %pos.mode,
+                            pnl = %pnl,
+                            "TailEnd GTC stop-loss sell filled (maker, 0% fee)"
+                        );
+                    } else {
+                        self.base.record_position(pos).await;
+                    }
+                } else {
+                    warn!(
+                        token_id = %sl_order.token_id,
+                        order_id = %order_id,
+                        "GTC stop-loss fill: position already removed (race)"
+                    );
+                }
+                return vec![];
+            }
+        }
+
+        // Check if this is a FOK stop-loss sell fill (by token_id in pending_stop_loss)
+        {
+            let mut pending_sl = self.base.pending_stop_loss.write().await;
+            if let Some(exit_price) = pending_sl.remove(token_id) {
+                drop(pending_sl);
+                if let Some(pos) = self.base.remove_position_by_token(token_id).await {
+                    if pos.mode == ArbitrageMode::TailEnd {
+                        let exit_fee =
+                            taker_fee(exit_price, self.base.config.fee.taker_fee_rate);
+                        let pnl = (exit_price - pos.entry_price) * pos.size
+                            - (pos.estimated_fee * pos.size)
+                            - (exit_fee * pos.size);
+                        self.base.record_trade_pnl(&pos.mode, pnl).await;
+                        info!(
+                            token_id = %token_id,
+                            mode = %pos.mode,
+                            pnl = %pnl,
+                            "TailEnd stop-loss sell filled"
+                        );
+                    } else {
+                        // Not our mode, put position back
+                        self.base.record_position(pos).await;
+                    }
+                } else {
+                    warn!(
+                        token_id = %token_id,
+                        "TailEnd stop-loss fill: position already removed (race)"
+                    );
+                }
+                return vec![];
+            }
+        }
+
         let lo = {
             let mut limits = self.base.open_limit_orders.write().await;
             match limits.remove(order_id) {
@@ -930,7 +1077,7 @@ impl Strategy for TailEndStrategy {
                         );
                     }
 
-                    // Handle stop-loss rejection with balance-aware cleanup
+                    // Handle stop-loss rejection with classification and GTC fallback
                     if self
                         .base
                         .pending_stop_loss
@@ -938,6 +1085,24 @@ impl Strategy for TailEndStrategy {
                         .await
                         .contains_key(token_id)
                     {
+                        // If a GTC SL was rejected, clear the GTC tracking and revert to FOK
+                        {
+                            let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
+                            let gtc_order_ids: Vec<OrderId> = gtc_sl
+                                .iter()
+                                .filter(|(_, sl)| sl.token_id == *token_id)
+                                .map(|(oid, _)| oid.clone())
+                                .collect();
+                            for oid in gtc_order_ids {
+                                gtc_sl.remove(&oid);
+                                warn!(
+                                    order_id = %oid,
+                                    token_id = %token_id,
+                                    "GTC stop-loss rejected, reverting to FOK for next attempt"
+                                );
+                            }
+                        }
+
                         self.base
                             .handle_stop_loss_rejection(token_id, reason, "TailEnd")
                             .await;
@@ -947,6 +1112,21 @@ impl Strategy for TailEndStrategy {
             }
 
             Event::OrderUpdate(OrderEvent::Cancelled(order_id)) => {
+                // Check if this is a GTC stop-loss cancel (stale re-eval or market expiry)
+                {
+                    let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
+                    if let Some(sl) = gtc_sl.remove(order_id) {
+                        info!(
+                            order_id = %order_id,
+                            token_id = %sl.token_id,
+                            "GTC stop-loss order cancelled, will re-evaluate"
+                        );
+                        // pending_stop_loss already cleared in handle_orderbook_update
+                        // or on_market_expired — stop-loss will re-trigger on next OB update
+                        return Ok(vec![]);
+                    }
+                }
+
                 let mut limits = self.base.open_limit_orders.write().await;
                 if let Some(lo) = limits.remove(order_id)
                     && lo.mode == ArbitrageMode::TailEnd

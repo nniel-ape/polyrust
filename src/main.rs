@@ -120,19 +120,17 @@ async fn main() -> anyhow::Result<()> {
 
     info!("polyrust starting");
 
-    // Load configuration
+    // Load configuration — parse errors are fatal (silent defaults are dangerous for live trading)
     let (config, arb_config) = match std::fs::read_to_string("config.toml") {
         Ok(contents) => {
             let config: Config = toml::from_str(&contents)
-                .map_err(|e| warn!("failed to parse config: {e}"))
-                .unwrap_or_default();
+                .map_err(|e| anyhow::anyhow!("failed to parse config.toml: {e}"))?;
             let wrapper: ConfigWrapper = toml::from_str(&contents)
-                .map_err(|e| warn!("failed to parse config wrapper: {e}"))
-                .unwrap_or_default();
+                .map_err(|e| anyhow::anyhow!("failed to parse config.toml: {e}"))?;
             (config, wrapper.arbitrage)
         }
         Err(e) => {
-            info!("no config file loaded ({e}), using defaults");
+            info!("no config file found ({e}), using defaults");
             (Config::default(), ArbitrageConfig::default())
         }
     };
@@ -322,19 +320,33 @@ async fn main() -> anyhow::Result<()> {
                     price,
                     size,
                     strategy_name,
+                    realized_pnl: event_pnl,
                 })) => {
-                    // Calculate realized P&L for closing trades (Sell orders)
-                    let realized_pnl = if side == OrderSide::Sell {
-                        let positions = persistence_context.positions.read().await;
-                        // Find position by token_id
-                        positions
-                            .open_positions
-                            .values()
-                            .find(|p| p.token_id == token_id)
-                            .map(|pos| (price - pos.entry_price) * size)
-                    } else {
-                        None
-                    };
+                    // Use strategy-provided P&L if available, else compute from position state
+                    let realized_pnl = event_pnl.or_else(|| {
+                        // Not async — use try_read to avoid blocking. Fall back to None
+                        // if the lock is held (position lookup is best-effort).
+                        if side == OrderSide::Sell {
+                            // try_read: non-blocking attempt — returns None on contention
+                            // rather than blocking the persistence task
+                            if let Ok(positions) = persistence_context.positions.try_read() {
+                                positions
+                                    .open_positions
+                                    .values()
+                                    .find(|p| p.token_id == token_id)
+                                    .map(|pos| (price - pos.entry_price) * size)
+                            } else {
+                                warn!(
+                                    order_id = %order_id,
+                                    token_id = %token_id,
+                                    "Sell trade P&L: position lock contended, P&L will be None"
+                                );
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    });
 
                     let trade = Trade {
                         id: Uuid::new_v4(),
@@ -529,12 +541,11 @@ async fn fetch_markets_with_progress(
 async fn run_backtest() -> anyhow::Result<()> {
     use polyrust_backtest::DataFetchConfig;
 
-    // Load backtest configuration
+    // Load backtest configuration — parse errors are fatal
     let (mut backtest_config, mut arb_config) = match std::fs::read_to_string("config.toml") {
         Ok(contents) => {
             let wrapper: ConfigWrapper = toml::from_str(&contents)
-                .map_err(|e| warn!("failed to parse config: {e}"))
-                .unwrap_or_default();
+                .map_err(|e| anyhow::anyhow!("failed to parse config.toml: {e}"))?;
             let backtest_config = wrapper
                 .backtest
                 .ok_or_else(|| anyhow::anyhow!("Missing [backtest] section in config.toml"))?
@@ -744,12 +755,11 @@ async fn run_backtest() -> anyhow::Result<()> {
 async fn run_backtest_sweep() -> anyhow::Result<()> {
     use polyrust_backtest::{DataFetchConfig, SweepRunner};
 
-    // Load configuration (same as run_backtest)
+    // Load configuration — parse errors are fatal
     let (mut backtest_config, mut arb_config) = match std::fs::read_to_string("config.toml") {
         Ok(contents) => {
             let wrapper: ConfigWrapper = toml::from_str(&contents)
-                .map_err(|e| warn!("failed to parse config: {e}"))
-                .unwrap_or_default();
+                .map_err(|e| anyhow::anyhow!("failed to parse config.toml: {e}"))?;
             let backtest_config = wrapper
                 .backtest
                 .ok_or_else(|| anyhow::anyhow!("Missing [backtest] section in config.toml"))?

@@ -132,8 +132,10 @@ struct SignatureParams {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SubmitResponse {
-    #[serde(default)]
+    #[serde(default, alias = "transactionID")]
     transaction_id: Option<String>,
+    #[serde(default)]
+    transaction_hash: Option<String>,
     #[serde(default)]
     state: Option<String>,
 }
@@ -407,7 +409,11 @@ impl RelayerClient {
         })?;
 
         let state = submit_resp.state.unwrap_or_else(|| "unknown".to_string());
-        debug!(tx_id = %tx_id, state = %state, "Transaction submitted to relayer");
+        if let Some(ref tx_hash) = submit_resp.transaction_hash {
+            debug!(tx_id = %tx_id, tx_hash = %tx_hash, state = %state, "Transaction submitted to relayer");
+        } else {
+            debug!(tx_id = %tx_id, state = %state, "Transaction submitted to relayer");
+        }
 
         Ok(tx_id)
     }
@@ -441,10 +447,22 @@ impl RelayerClient {
                 continue;
             }
 
-            let tx_resp: TransactionResponse = match resp.json().await {
-                Ok(r) => r,
+            let body_text = match resp.text().await {
+                Ok(t) => t,
                 Err(e) => {
-                    warn!(poll, error = %e, "Failed to parse transaction response, retrying");
+                    warn!(poll, error = %e, "Failed to read transaction response body, retrying");
+                    continue;
+                }
+            };
+
+            let tx_resp: TransactionResponse = match serde_json::from_str::<Vec<TransactionResponse>>(&body_text) {
+                Ok(mut arr) if !arr.is_empty() => arr.remove(0),
+                Ok(_) => {
+                    warn!(poll, body = %body_text, "Empty array from relayer, retrying");
+                    continue;
+                }
+                Err(e) => {
+                    warn!(poll, error = %e, body = %body_text, "Failed to parse transaction response, retrying");
                     continue;
                 }
             };

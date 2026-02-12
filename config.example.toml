@@ -104,6 +104,11 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # time_threshold_secs = 120      # Max time remaining to enter (default 120s)
 # ask_threshold = 0.90           # Minimum ask price to enter (default 0.90)
 # min_sustained_ticks = 2        # Minimum price ticks confirming direction (default 2)
+# min_strike_distance_pct = 0.0008  # Min crypto distance from strike (0.08% ≈ $1.60 at ETH $2000)
+# use_composite_price = false     # Use weighted composite price from multiple sources (default false)
+# max_source_stale_secs = 10      # Max age per source in seconds (default 10)
+# min_sources = 2                 # Minimum fresh sources required (default 2)
+# max_dispersion_bps = 50         # Max allowed source disagreement in bps (default 50)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TwoSided Mode
@@ -164,7 +169,13 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # min_drop = 0.05             # $0.05 minimum market price drop
 # trailing_enabled = true     # Enable trailing stop-loss
 # trailing_distance = 0.03    # $0.03 from peak bid
+# trailing_min_distance = 0.05 # Floor on effective trailing distance (prevents noise triggers)
 # time_decay = true           # Tighten stops near expiration
+# liquidity_cooldowns = [1, 5, 15, 30]   # Cooldowns for "couldn't be fully filled" (seconds)
+# balance_cooldowns = [5, 15, 30, 60]    # Cooldowns for balance/allowance errors (seconds)
+# gtc_fallback = true         # Fall back to GTC after FOK liquidity rejection
+# gtc_fallback_tick_offset = 1 # Ticks below bid for GTC stop-loss (e.g. bid=0.91 → 0.90)
+# gtc_stop_loss_max_age_secs = 10  # Cancel stale GTC stop-loss orders after this (seconds)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Performance Tracking & Auto-Disable

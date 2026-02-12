@@ -1146,6 +1146,7 @@ impl BacktestEngine {
                 price: trade.price,
                 size: trade.size,
                 strategy_name: self.strategy.name().to_string(),
+                realized_pnl: None,
             });
             let filled_actions = self.strategy.on_event(&filled_event, &self.ctx).await?;
             for action in filled_actions {

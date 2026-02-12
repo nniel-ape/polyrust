@@ -472,6 +472,13 @@ impl CtfRedeemer {
                 }
                 Err(e) => {
                     warn!(error = %e, "Relayer failed, falling back to direct RPC");
+                    // If the error suggests a tx was already submitted to the mempool
+                    // (contains transactionHash in the raw response), wait briefly for
+                    // it to settle before falling back — avoids nonce collision (GS026).
+                    if e.to_string().contains("transactionHash") {
+                        debug!("Relayer may have submitted tx to mempool, waiting before direct RPC fallback");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
                 }
             }
         }
@@ -761,6 +768,9 @@ impl CtfRedeemer {
                     count = inner_calls.len(),
                     "Batch multiSend failed, falling back to individual redemptions"
                 );
+                // Wait for any pending batch tx to settle before retrying individually
+                // to avoid nonce collisions if the batch was submitted to the mempool.
+                tokio::time::sleep(Duration::from_secs(3)).await;
                 let mut results: Vec<(String, Option<FixedBytes<32>>)> =
                     no_balance.iter().map(|c| (c.clone(), None)).collect();
                 let mut first_error: Option<PolyError> = None;

@@ -1527,8 +1527,9 @@ async fn trailing_stop_triggers_on_drop_from_peak() {
     }
 
     // Position profitable: entry=0.90, peak=0.96
-    // At 450s: decay_factor = 450/900 = 0.5, effective_distance = 0.03 * 0.5 = 0.015
-    // Current bid = 0.94, drop_from_peak = 0.96 - 0.94 = 0.02 >= 0.015 ✓
+    // At 450s: decay_factor = 450/900 = 0.5, raw = 0.03 * 0.5 = 0.015
+    // Floor = 0.05, so effective_distance = max(0.015, 0.05) = 0.05
+    // Current bid = 0.90, drop_from_peak = 0.96 - 0.90 = 0.06 >= 0.05 ✓
     let pos = make_position(
         "m1",
         "token_up",
@@ -1538,7 +1539,7 @@ async fn trailing_stop_triggers_on_drop_from_peak() {
         dec!(50000),
         dec!(0.96),
     );
-    let snapshot = make_snapshot("token_up", dec!(0.94), dec!(0.96));
+    let snapshot = make_snapshot("token_up", dec!(0.90), dec!(0.96));
 
     let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(
@@ -1589,8 +1590,9 @@ async fn trailing_stop_time_decay_at_900s() {
         history.insert("BTC".to_string(), entries);
     }
 
-    // At 900s: decay_factor = 900/900 = 1.0, effective_distance = 0.03 * 1.0 = 0.03
-    // peak=0.96, bid=0.93: drop = 0.03 >= 0.03 ✓ (exactly at threshold)
+    // At 900s: decay_factor = 900/900 = 1.0, raw = 0.03 * 1.0 = 0.03
+    // Floor = 0.05, so effective_distance = max(0.03, 0.05) = 0.05
+    // peak=0.96, bid=0.91: drop = 0.05 >= 0.05 ✓ (exactly at threshold)
     let pos = make_position(
         "m1",
         "token_up",
@@ -1600,7 +1602,7 @@ async fn trailing_stop_time_decay_at_900s() {
         dec!(50000),
         dec!(0.96),
     );
-    let snapshot = make_snapshot("token_up", dec!(0.93), dec!(0.95));
+    let snapshot = make_snapshot("token_up", dec!(0.91), dec!(0.95));
 
     let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(
@@ -1620,8 +1622,9 @@ async fn trailing_stop_time_decay_at_450s() {
         history.insert("BTC".to_string(), entries);
     }
 
-    // At 450s: decay_factor = 450/900 = 0.5, effective_distance = 0.03 * 0.5 = 0.015
-    // peak=0.96, bid=0.945: drop = 0.015 >= 0.015 ✓ (exactly at threshold)
+    // At 450s: decay_factor = 450/900 = 0.5, raw = 0.03 * 0.5 = 0.015
+    // Floor = 0.05, so effective_distance = max(0.015, 0.05) = 0.05
+    // peak=0.96, bid=0.91: drop = 0.05 >= 0.05 ✓ (exactly at threshold)
     let pos = make_position(
         "m1",
         "token_up",
@@ -1631,12 +1634,12 @@ async fn trailing_stop_time_decay_at_450s() {
         dec!(50000),
         dec!(0.96),
     );
-    let snapshot = make_snapshot("token_up", dec!(0.945), dec!(0.96));
+    let snapshot = make_snapshot("token_up", dec!(0.91), dec!(0.96));
 
     let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(
         result.is_some(),
-        "Trailing stop should trigger at 450s with half distance"
+        "Trailing stop should trigger at 450s with floor distance"
     );
 }
 
@@ -1652,8 +1655,8 @@ async fn trailing_stop_time_decay_at_90s_floored() {
     }
 
     // At 90s: decay_factor = 90/900 = 0.1, raw = 0.03 * 0.1 = 0.003
-    // But trailing_min_distance floor = 0.01, so effective_distance = 0.01
-    // peak=0.96, bid=0.956: drop = 0.004 < 0.01 → does NOT trigger (floor prevents noise)
+    // But trailing_min_distance floor = 0.05, so effective_distance = 0.05
+    // peak=0.96, bid=0.93: drop = 0.03 < 0.05 → does NOT trigger (floor prevents noise)
     let pos = make_position(
         "m1",
         "token_up",
@@ -1663,16 +1666,16 @@ async fn trailing_stop_time_decay_at_90s_floored() {
         dec!(50000),
         dec!(0.96),
     );
-    let snapshot = make_snapshot("token_up", dec!(0.956), dec!(0.96));
+    let snapshot = make_snapshot("token_up", dec!(0.93), dec!(0.96));
 
     let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(
         result.is_none(),
-        "Trailing stop should NOT trigger: drop (0.004) < floor (0.01)"
+        "Trailing stop should NOT trigger: drop (0.03) < floor (0.05)"
     );
 
-    // With a bigger drop: peak=0.96, bid=0.949 → drop = 0.011 >= 0.01 ✓
-    let snapshot_bigger = make_snapshot("token_up", dec!(0.949), dec!(0.96));
+    // With a bigger drop: peak=0.96, bid=0.909 → drop = 0.051 >= 0.05 ✓
+    let snapshot_bigger = make_snapshot("token_up", dec!(0.909), dec!(0.96));
     let result2 = base
         .check_stop_loss(&pos, &snapshot_bigger, Utc::now())
         .await;
@@ -1682,7 +1685,7 @@ async fn trailing_stop_time_decay_at_90s_floored() {
     );
     let (_, _, trigger) = result2.unwrap();
     assert_eq!(trigger.reason, "trailing_stop");
-    assert_eq!(trigger.effective_distance, dec!(0.01));
+    assert_eq!(trigger.effective_distance, dec!(0.05));
 }
 
 #[tokio::test]
@@ -2295,14 +2298,14 @@ async fn stale_order_cancel_pending_prevents_double() {
 
 #[tokio::test]
 async fn trailing_stop_floor_prevents_noise_trigger() {
-    // With a very short time remaining, the raw decay would make effective_distance
-    // absurdly small (e.g. 0.003 at 90s). The floor (0.01) prevents noise triggers.
+    // With the new wider floor (0.05), trailing stop requires peak >= entry + 0.05
+    // and a drop of at least 0.05 from peak. This prevents noise triggers.
     let mut config = super::config::ArbitrageConfig::default();
     config.use_chainlink = false;
     config.stop_loss.trailing_enabled = true;
     config.stop_loss.trailing_distance = dec!(0.03);
     config.stop_loss.time_decay = true;
-    config.stop_loss.trailing_min_distance = dec!(0.01);
+    // Uses default trailing_min_distance = 0.05
     let base = Arc::new(CryptoArbBase::new(config, vec![]));
 
     {
@@ -2326,23 +2329,23 @@ async fn trailing_stop_floor_prevents_noise_trigger() {
         history.insert("BTC".to_string(), entries);
     }
 
-    // entry=0.98, peak=0.98 → peak >= entry + 0.01 is false (0.98 < 0.98+0.01=0.99)
-    // So the trailing stop should NOT arm at all — this is the exact production bug
+    // entry=0.90, peak=0.93 → peak < entry + 0.05 (0.93 < 0.95)
+    // So the trailing stop should NOT arm at all
     let pos = make_position(
         "m1",
         "token_up",
         OutcomeSide::Up,
-        dec!(0.98),
+        dec!(0.90),
         dec!(10),
         dec!(50000),
-        dec!(0.98),
+        dec!(0.93),
     );
-    let snapshot = make_snapshot("token_up", dec!(0.98), dec!(0.99));
+    let snapshot = make_snapshot("token_up", dec!(0.88), dec!(0.99));
 
     let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(
         result.is_none(),
-        "Trailing stop should NOT arm when peak_bid == entry_price (need >= entry + min_distance)"
+        "Trailing stop should NOT arm when peak_bid < entry + min_distance (0.05)"
     );
 }
 
@@ -2357,10 +2360,10 @@ async fn trailing_stop_arms_at_min_distance_above_entry() {
         history.insert("BTC".to_string(), entries);
     }
 
-    // entry=0.90, peak=0.91 → peak >= entry + 0.01 ✓ (0.91 >= 0.91)
+    // entry=0.90, peak=0.96 → peak >= entry + 0.05 ✓ (0.96 >= 0.95)
     // At 300s: decay_factor = 300/900 = 0.333, raw = 0.03 * 0.333 = 0.01
-    // Floored to max(0.01, 0.01) = 0.01
-    // bid=0.899, drop = 0.91 - 0.899 = 0.011 >= 0.01 ✓
+    // Floored to max(0.01, 0.05) = 0.05
+    // bid=0.909, drop = 0.96 - 0.909 = 0.051 >= 0.05 ✓
     let pos = make_position(
         "m1",
         "token_up",
@@ -2368,9 +2371,9 @@ async fn trailing_stop_arms_at_min_distance_above_entry() {
         dec!(0.90),
         dec!(10),
         dec!(50000),
-        dec!(0.91),
+        dec!(0.96),
     );
-    let snapshot = make_snapshot("token_up", dec!(0.899), dec!(0.92));
+    let snapshot = make_snapshot("token_up", dec!(0.909), dec!(0.92));
 
     let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(
@@ -2392,7 +2395,7 @@ async fn trailing_stop_does_not_arm_below_min_distance() {
         history.insert("BTC".to_string(), entries);
     }
 
-    // entry=0.90, peak=0.905 → peak < entry + 0.01 (0.905 < 0.91)
+    // entry=0.90, peak=0.94 → peak < entry + 0.05 (0.94 < 0.95)
     // Trailing stop should NOT arm
     let pos = make_position(
         "m1",
@@ -2401,7 +2404,7 @@ async fn trailing_stop_does_not_arm_below_min_distance() {
         dec!(0.90),
         dec!(10),
         dec!(50000),
-        dec!(0.905),
+        dec!(0.94),
     );
     let snapshot = make_snapshot("token_up", dec!(0.85), dec!(0.87));
 
@@ -2502,9 +2505,14 @@ async fn handle_stop_loss_rejection_balance_allowance_does_not_mark_stale() {
 #[test]
 fn stop_loss_config_new_field_defaults() {
     let config = super::config::StopLossConfig::default();
-    assert_eq!(config.trailing_min_distance, dec!(0.01));
+    assert_eq!(config.trailing_min_distance, dec!(0.05));
     assert_eq!(config.stale_market_cooldown_secs, 120);
     assert_eq!(config.min_remaining_secs, 0);
+    assert_eq!(config.liquidity_cooldowns, vec![1, 5, 15, 30]);
+    assert_eq!(config.balance_cooldowns, vec![5, 15, 30, 60]);
+    assert!(config.gtc_fallback);
+    assert_eq!(config.gtc_fallback_tick_offset, 1);
+    assert_eq!(config.gtc_stop_loss_max_age_secs, 10);
 }
 
 #[test]
@@ -2518,9 +2526,12 @@ fn stop_loss_config_deserialize_missing_new_fields() {
         time_decay = true
     "#;
     let config: super::config::StopLossConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.trailing_min_distance, dec!(0.01));
+    assert_eq!(config.trailing_min_distance, dec!(0.05));
     assert_eq!(config.stale_market_cooldown_secs, 120);
     assert_eq!(config.min_remaining_secs, 0);
+    assert_eq!(config.liquidity_cooldowns, vec![1, 5, 15, 30]);
+    assert_eq!(config.balance_cooldowns, vec![5, 15, 30, 60]);
+    assert!(config.gtc_fallback);
 }
 
 // ---------------------------------------------------------------------------
@@ -2539,8 +2550,8 @@ async fn stop_loss_trigger_returns_trailing_metadata() {
     }
 
     // Trailing stop: entry=0.90, peak=0.96
-    // At 450s: decay_factor=0.5, raw=0.015, floored to max(0.015, 0.01)=0.015
-    // bid=0.94, drop=0.02 >= 0.015 ✓
+    // At 450s: decay_factor=0.5, raw=0.015, floored to max(0.015, 0.05)=0.05
+    // bid=0.909, drop=0.051 >= 0.05 ✓
     let pos = make_position(
         "m1",
         "token_up",
@@ -2550,19 +2561,18 @@ async fn stop_loss_trigger_returns_trailing_metadata() {
         dec!(50000),
         dec!(0.96),
     );
-    let snapshot = make_snapshot("token_up", dec!(0.94), dec!(0.96));
+    let snapshot = make_snapshot("token_up", dec!(0.909), dec!(0.96));
 
     let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(result.is_some());
     let (_, _, trigger) = result.unwrap();
     assert_eq!(trigger.reason, "trailing_stop");
     assert_eq!(trigger.peak_bid, dec!(0.96));
-    // effective_distance is base * (time/900), floored to min_distance
-    // With integer division: 450/900 may not be exactly 0.5, so check range
-    assert!(
-        trigger.effective_distance >= dec!(0.01) && trigger.effective_distance <= dec!(0.016),
-        "effective_distance should be ~0.015 (got {})",
-        trigger.effective_distance
+    // effective_distance is base * (time/900), floored to min_distance=0.05
+    assert_eq!(
+        trigger.effective_distance,
+        dec!(0.05),
+        "effective_distance should be 0.05 (floor)"
     );
     // time_remaining is approximate (±1s) so just check it's reasonable
     assert!(trigger.time_remaining >= 448 && trigger.time_remaining <= 451);
@@ -2855,9 +2865,17 @@ async fn reconcile_detects_filled_order() {
     assert_eq!(market_positions[0].size, dec!(10));
     drop(positions);
 
-    // Verify a "reconciled-fill" signal was emitted
-    assert_eq!(actions.len(), 1);
+    // Verify RecordFill + "reconciled-fill" signal were emitted
+    assert_eq!(actions.len(), 2);
     match &actions[0] {
+        Action::RecordFill { order_id, market_id, side, .. } => {
+            assert_eq!(order_id, "order-2");
+            assert_eq!(market_id, "market-B");
+            assert_eq!(*side, OrderSide::Buy);
+        }
+        other => panic!("expected RecordFill, got {:?}", other),
+    }
+    match &actions[1] {
         Action::EmitSignal { signal_type, payload } => {
             assert_eq!(signal_type, "reconciled-fill");
             assert_eq!(payload["order_id"], "order-2");
@@ -2920,9 +2938,17 @@ async fn handle_cancel_failed_matched_creates_position() {
     assert_eq!(market_positions[0].token_id, "token-A-up");
     drop(positions);
 
-    // Verify "matched-fill" signal emitted
-    assert_eq!(actions.len(), 1);
+    // Verify RecordFill + "matched-fill" signal emitted
+    assert_eq!(actions.len(), 2);
     match &actions[0] {
+        Action::RecordFill { order_id, market_id, side, .. } => {
+            assert_eq!(order_id, "order-1");
+            assert_eq!(market_id, "market-A");
+            assert_eq!(*side, OrderSide::Buy);
+        }
+        other => panic!("expected RecordFill, got {:?}", other),
+    }
+    match &actions[1] {
         Action::EmitSignal { signal_type, payload } => {
             assert_eq!(signal_type, "matched-fill");
             assert_eq!(payload["order_id"], "order-1");
@@ -2957,4 +2983,405 @@ async fn handle_cancel_failed_not_matched_does_not_create_position() {
     // No position created
     let positions = base.positions.read().await;
     assert!(!positions.contains_key("market-A"), "no position for transient failure");
+}
+
+// ---------------------------------------------------------------------------
+// Strike proximity filter tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strike_proximity_rejects_within_threshold() {
+    use super::tailend::TailEndStrategy;
+
+    let mut config = ArbitrageConfig::default();
+    config.use_chainlink = false;
+    config.tailend.enabled = true;
+    config.tailend.min_sustained_secs = 0;
+    config.tailend.min_sustained_ticks = 0;
+    config.tailend.max_recent_volatility = dec!(1.0);
+    config.tailend.min_strike_distance_pct = dec!(0.0008); // 0.08%
+    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+    let market = MarketWithReference {
+        market: make_market_info("m1", Utc::now() + Duration::seconds(60)),
+        reference_price: dec!(2000), // Strike at $2000
+        reference_quality: ReferenceQuality::Exact,
+        discovery_time: Utc::now(),
+        coin: "ETH".to_string(),
+        window_ts: 0,
+    };
+    base.active_markets
+        .write()
+        .await
+        .insert("m1".to_string(), market);
+
+    let ctx = StrategyContext::new();
+    {
+        let mut md = ctx.market_data.write().await;
+        md.orderbooks.insert(
+            "token_down".to_string(),
+            OrderbookSnapshot {
+                token_id: "token_down".to_string(),
+                bids: vec![OrderbookLevel { price: dec!(0.92), size: dec!(100) }],
+                asks: vec![OrderbookLevel { price: dec!(0.94), size: dec!(100) }],
+                timestamp: Utc::now(),
+            },
+        );
+    }
+
+    let strategy = TailEndStrategy::new(base);
+
+    // ETH at $1998.78 → distance from $2000 = $1.22 = 0.061% < 0.08% → reject
+    let opp = strategy
+        .evaluate_opportunity(&"m1".to_string(), dec!(1998.78), &ctx)
+        .await;
+    assert!(opp.is_none(), "Should reject: 0.061% < 0.08% threshold");
+}
+
+#[tokio::test]
+async fn strike_proximity_allows_beyond_threshold() {
+    use super::tailend::TailEndStrategy;
+
+    let mut config = ArbitrageConfig::default();
+    config.use_chainlink = false;
+    config.tailend.enabled = true;
+    config.tailend.min_sustained_secs = 0;
+    config.tailend.min_sustained_ticks = 0;
+    config.tailend.max_recent_volatility = dec!(1.0);
+    config.tailend.min_strike_distance_pct = dec!(0.0008); // 0.08%
+    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+    let market = MarketWithReference {
+        market: make_market_info("m1", Utc::now() + Duration::seconds(60)),
+        reference_price: dec!(2000), // Strike at $2000
+        reference_quality: ReferenceQuality::Exact,
+        discovery_time: Utc::now(),
+        coin: "ETH".to_string(),
+        window_ts: 0,
+    };
+    base.active_markets
+        .write()
+        .await
+        .insert("m1".to_string(), market);
+
+    let ctx = StrategyContext::new();
+    // Tight spread: bid=0.935, ask=0.94 → spread=0.53% < 2% max
+    {
+        let mut md = ctx.market_data.write().await;
+        md.orderbooks.insert(
+            "token_down".to_string(),
+            OrderbookSnapshot {
+                token_id: "token_down".to_string(),
+                bids: vec![OrderbookLevel { price: dec!(0.935), size: dec!(100) }],
+                asks: vec![OrderbookLevel { price: dec!(0.94), size: dec!(100) }],
+                timestamp: Utc::now(),
+            },
+        );
+    }
+
+    // Populate price history for ETH so sustained direction check passes
+    {
+        let mut history = base.price_history.write().await;
+        let mut entries = VecDeque::new();
+        let now = Utc::now();
+        entries.push_back((now - Duration::seconds(3), dec!(1996), "test".to_string()));
+        entries.push_back((now - Duration::seconds(1), dec!(1996), "test".to_string()));
+        history.insert("ETH".to_string(), entries);
+    }
+
+    let strategy = TailEndStrategy::new(base);
+
+    // ETH at $1996 → distance from $2000 = $4 = 0.2% > 0.08% → allow
+    let opp = strategy
+        .evaluate_opportunity(&"m1".to_string(), dec!(1996), &ctx)
+        .await;
+    assert!(opp.is_some(), "Should allow: 0.2% > 0.08% threshold");
+}
+
+// ---------------------------------------------------------------------------
+// StopLossRejectionKind classification tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rejection_kind_classifies_liquidity() {
+    use super::base::StopLossRejectionKind;
+
+    assert_eq!(
+        StopLossRejectionKind::classify("couldn't be fully filled"),
+        StopLossRejectionKind::Liquidity
+    );
+    assert_eq!(
+        StopLossRejectionKind::classify("no match found for order"),
+        StopLossRejectionKind::Liquidity
+    );
+}
+
+#[test]
+fn rejection_kind_classifies_balance() {
+    use super::base::StopLossRejectionKind;
+
+    assert_eq!(
+        StopLossRejectionKind::classify("not enough balance"),
+        StopLossRejectionKind::BalanceAllowance
+    );
+    assert_eq!(
+        StopLossRejectionKind::classify("insufficient allowance for token"),
+        StopLossRejectionKind::BalanceAllowance
+    );
+}
+
+#[test]
+fn rejection_kind_classifies_transient() {
+    use super::base::StopLossRejectionKind;
+
+    assert_eq!(
+        StopLossRejectionKind::classify("rate limited"),
+        StopLossRejectionKind::Transient
+    );
+    assert_eq!(
+        StopLossRejectionKind::classify("unknown error"),
+        StopLossRejectionKind::Transient
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GTC fallback flag tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn liquidity_rejection_marks_gtc_fallback() {
+    let base = make_base_no_chainlink();
+
+    // Add position
+    let pos = make_position(
+        "m1", "token_gtc", OutcomeSide::Up,
+        dec!(0.90), dec!(10), dec!(50000), dec!(0.90),
+    );
+    base.record_position(pos).await;
+
+    // Add to pending_stop_loss
+    {
+        let mut psl = base.pending_stop_loss.write().await;
+        psl.insert("token_gtc".to_string(), dec!(0.85));
+    }
+
+    // Handle liquidity rejection
+    base.handle_stop_loss_rejection(&"token_gtc".to_string(), "couldn't be fully filled", "TailEnd")
+        .await;
+
+    // Should be marked for GTC fallback
+    let gtc_set = base.stop_loss_use_gtc.read().await;
+    assert!(gtc_set.contains("token_gtc"), "Liquidity rejection should mark for GTC");
+
+    // Should use fast cooldown (1s for first rejection)
+    assert!(base.is_stop_loss_cooled_down(&"token_gtc".to_string()).await);
+}
+
+#[tokio::test]
+async fn balance_rejection_does_not_mark_gtc_fallback() {
+    let base = make_base_no_chainlink();
+
+    let pos = make_position(
+        "m1", "token_bal", OutcomeSide::Up,
+        dec!(0.90), dec!(10), dec!(50000), dec!(0.90),
+    );
+    base.record_position(pos).await;
+
+    {
+        let mut psl = base.pending_stop_loss.write().await;
+        psl.insert("token_bal".to_string(), dec!(0.85));
+    }
+
+    base.handle_stop_loss_rejection(&"token_bal".to_string(), "not enough balance", "TailEnd")
+        .await;
+
+    // Should NOT be marked for GTC
+    let gtc_set = base.stop_loss_use_gtc.read().await;
+    assert!(!gtc_set.contains("token_bal"), "Balance rejection should NOT mark for GTC");
+}
+
+// ---------------------------------------------------------------------------
+// check_stop_loss GTC order type selection
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn check_stop_loss_constructs_gtc_when_flagged() {
+    let base = make_base_with_market("m1", 300).await;
+
+    {
+        let mut history = base.price_history.write().await;
+        let mut entries = std::collections::VecDeque::new();
+        entries.push_back((Utc::now(), dec!(49700), "test".to_string()));
+        history.insert("BTC".to_string(), entries);
+    }
+
+    // Position with both conditions met for dual trigger
+    let pos = make_position(
+        "m1", "token_up", OutcomeSide::Up,
+        dec!(0.90), dec!(10), dec!(50000), dec!(0.90),
+    );
+    let snapshot = make_snapshot("token_up", dec!(0.84), dec!(0.86));
+
+    // Mark for GTC fallback
+    {
+        let mut gtc_set = base.stop_loss_use_gtc.write().await;
+        gtc_set.insert("token_up".to_string());
+    }
+
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
+    assert!(result.is_some());
+
+    let (action, exit_price, _trigger) = result.unwrap();
+    // GTC price = current_bid - tick_size * offset = 0.84 - 0.01 * 1 = 0.83
+    assert_eq!(exit_price, dec!(0.83), "GTC fallback should price below bid");
+
+    match action {
+        Action::PlaceOrder(order) => {
+            assert_eq!(order.order_type, OrderType::Gtc, "Should use GTC order type");
+            assert_eq!(order.side, OrderSide::Sell);
+            assert_eq!(order.price, dec!(0.83));
+        }
+        _ => panic!("Expected PlaceOrder action"),
+    }
+
+    // Flag should be consumed
+    let gtc_set = base.stop_loss_use_gtc.read().await;
+    assert!(!gtc_set.contains("token_up"), "GTC flag should be consumed after use");
+}
+
+#[tokio::test]
+async fn check_stop_loss_uses_fok_when_not_flagged() {
+    let base = make_base_with_market("m1", 300).await;
+
+    {
+        let mut history = base.price_history.write().await;
+        let mut entries = std::collections::VecDeque::new();
+        entries.push_back((Utc::now(), dec!(49700), "test".to_string()));
+        history.insert("BTC".to_string(), entries);
+    }
+
+    let pos = make_position(
+        "m1", "token_up", OutcomeSide::Up,
+        dec!(0.90), dec!(10), dec!(50000), dec!(0.90),
+    );
+    let snapshot = make_snapshot("token_up", dec!(0.84), dec!(0.86));
+
+    // NOT marked for GTC
+    let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
+    assert!(result.is_some());
+
+    let (action, exit_price, _) = result.unwrap();
+    assert_eq!(exit_price, dec!(0.84), "FOK should use current bid");
+
+    match action {
+        Action::PlaceOrder(order) => {
+            assert_eq!(order.order_type, OrderType::Fok, "Should use FOK by default");
+        }
+        _ => panic!("Expected PlaceOrder action"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Configurable cooldown schedule tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cooldown_schedule_escalates_per_rejection_kind() {
+    let mut config = ArbitrageConfig::default();
+    config.use_chainlink = false;
+    config.stop_loss.liquidity_cooldowns = vec![1, 3, 7];
+    config.stop_loss.balance_cooldowns = vec![10, 20, 40];
+    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+    // First liquidity rejection → 1s cooldown
+    {
+        let mut psl = base.pending_stop_loss.write().await;
+        psl.insert("tok1".to_string(), dec!(0.85));
+    }
+    base.handle_stop_loss_rejection(&"tok1".to_string(), "couldn't be fully filled", "Test")
+        .await;
+    {
+        let counts = base.stop_loss_retry_counts.read().await;
+        assert_eq!(*counts.get("tok1").unwrap(), 1);
+    }
+
+    // Second liquidity rejection → 3s cooldown
+    {
+        let mut psl = base.pending_stop_loss.write().await;
+        psl.insert("tok1".to_string(), dec!(0.85));
+    }
+    base.handle_stop_loss_rejection(&"tok1".to_string(), "couldn't be fully filled", "Test")
+        .await;
+    {
+        let counts = base.stop_loss_retry_counts.read().await;
+        assert_eq!(*counts.get("tok1").unwrap(), 2);
+    }
+
+    // Balance rejection on different token → uses balance schedule
+    {
+        let mut psl = base.pending_stop_loss.write().await;
+        psl.insert("tok2".to_string(), dec!(0.85));
+    }
+    base.handle_stop_loss_rejection(&"tok2".to_string(), "not enough balance", "Test")
+        .await;
+    {
+        let counts = base.stop_loss_retry_counts.read().await;
+        assert_eq!(*counts.get("tok2").unwrap(), 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TailEnd config backwards compat
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tailend_config_new_fields_default() {
+    let config = super::config::TailEndConfig::default();
+    assert_eq!(config.min_strike_distance_pct, dec!(0.0008));
+}
+
+#[test]
+fn tailend_config_deserialize_missing_strike_distance() {
+    let toml_str = r#"
+        enabled = true
+        time_threshold_secs = 120
+        ask_threshold = "0.90"
+    "#;
+    let config: super::config::TailEndConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.min_strike_distance_pct, dec!(0.0008));
+}
+
+// ---------------------------------------------------------------------------
+// Position removal cleans up GTC state
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn remove_position_clears_gtc_flag() {
+    let base = make_base_no_chainlink();
+
+    let pos = make_position(
+        "m1", "token_cleanup", OutcomeSide::Up,
+        dec!(0.90), dec!(10), dec!(50000), dec!(0.90),
+    );
+    base.record_position(pos).await;
+
+    // Mark for GTC and set retry count
+    {
+        let mut gtc_set = base.stop_loss_use_gtc.write().await;
+        gtc_set.insert("token_cleanup".to_string());
+    }
+    {
+        let mut counts = base.stop_loss_retry_counts.write().await;
+        counts.insert("token_cleanup".to_string(), 3);
+    }
+
+    // Remove position
+    let removed = base.remove_position_by_token("token_cleanup").await;
+    assert!(removed.is_some());
+
+    // Both GTC flag and retry count should be cleared
+    let gtc_set = base.stop_loss_use_gtc.read().await;
+    assert!(!gtc_set.contains("token_cleanup"));
+    let counts = base.stop_loss_retry_counts.read().await;
+    assert!(!counts.contains_key("token_cleanup"));
 }

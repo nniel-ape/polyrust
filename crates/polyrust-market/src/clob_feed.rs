@@ -33,6 +33,7 @@ pub struct ClobFeed {
     ws_client: Option<Arc<ws::Client>>,
     state: Arc<RwLock<SubscriptionState>>,
     command_rx: Option<FeedCommandReceiver>,
+    command_listener_handle: Option<JoinHandle<()>>,
 }
 
 impl ClobFeed {
@@ -45,6 +46,7 @@ impl ClobFeed {
                 market_handles: HashMap::new(),
             })),
             command_rx: None,
+            command_listener_handle: None,
         }
     }
 
@@ -187,7 +189,7 @@ impl MarketDataFeed for ClobFeed {
             let bus = self.event_bus.as_ref().unwrap().clone();
             let state = self.state.clone();
 
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 while let Some(cmd) = rx.recv().await {
                     match cmd {
                         FeedCommand::Subscribe(info) => {
@@ -232,6 +234,7 @@ impl MarketDataFeed for ClobFeed {
                 }
                 info!("feed command channel closed");
             });
+            self.command_listener_handle = Some(handle);
         }
 
         Ok(())
@@ -283,6 +286,11 @@ impl MarketDataFeed for ClobFeed {
 
     async fn stop(&mut self) -> Result<()> {
         info!("stopping CLOB orderbook feed");
+
+        // Abort command listener task
+        if let Some(handle) = self.command_listener_handle.take() {
+            handle.abort();
+        }
 
         let mut s = self.state.write().await;
         for (_market_id, (_token_ids, handles)) in s.market_handles.drain() {

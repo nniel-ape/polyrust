@@ -67,6 +67,9 @@ pub enum OrderEvent {
         price: Decimal,
         size: Decimal,
         strategy_name: String,
+        /// Strategy-provided realized P&L. When `Some`, persistence uses this
+        /// value directly instead of computing from position state.
+        realized_pnl: Option<Decimal>,
     },
     PartiallyFilled {
         order_id: OrderId,

@@ -39,6 +39,64 @@ pub struct CompositePriceResult {
     pub dispersion_bps: Decimal,
 }
 
+/// Classification of stop-loss sell rejection reasons.
+///
+/// Determines which cooldown schedule to use and whether to fall back to GTC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopLossRejectionKind {
+    /// "couldn't be fully filled" or "no match" — transient liquidity gap.
+    /// Uses fast cooldowns and marks token for GTC fallback.
+    Liquidity,
+    /// "not enough balance" or "allowance" — token settlement issue.
+    /// Uses longer cooldowns.
+    BalanceAllowance,
+    /// Everything else — treated like balance/allowance (longer cooldowns).
+    Transient,
+}
+
+impl StopLossRejectionKind {
+    /// Classify a rejection reason string.
+    pub fn classify(reason: &str) -> Self {
+        let lower = reason.to_lowercase();
+        if lower.contains("fully filled") || lower.contains("no match") {
+            Self::Liquidity
+        } else if lower.contains("not enough balance") || lower.contains("allowance") {
+            Self::BalanceAllowance
+        } else {
+            Self::Transient
+        }
+    }
+
+    /// Get the cooldown schedule for this rejection kind.
+    pub fn cooldown_schedule<'a>(
+        &self,
+        liquidity: &'a [u64],
+        balance: &'a [u64],
+    ) -> &'a [u64] {
+        match self {
+            Self::Liquidity => liquidity,
+            Self::BalanceAllowance | Self::Transient => balance,
+        }
+    }
+}
+
+/// A GTC stop-loss order resting on the book after FOK rejection.
+#[derive(Debug, Clone)]
+pub struct GtcStopLossOrder {
+    /// The CLOB order ID.
+    pub order_id: OrderId,
+    /// Token being sold.
+    pub token_id: TokenId,
+    /// Market this position belongs to.
+    pub market_id: MarketId,
+    /// GTC sell price (bid - tick_offset).
+    pub price: Decimal,
+    /// Size in shares.
+    pub size: Decimal,
+    /// When the GTC order was placed (for staleness check).
+    pub placed_at: DateTime<Utc>,
+}
+
 /// Metadata about why a stop-loss was triggered, for diagnostic logging.
 #[derive(Debug, Clone)]
 pub struct StopLossTrigger {
@@ -247,6 +305,11 @@ pub struct CryptoArbBase {
     /// Signal veto counters for diagnostics.
     /// Tracks why entries were vetoed (stale feeds, dispersion, etc.).
     pub signal_veto_stats: std::sync::Mutex<HashMap<&'static str, u64>>,
+    /// Token IDs marked for GTC fallback on next stop-loss attempt.
+    /// Set when a FOK stop-loss sell is rejected for liquidity.
+    pub stop_loss_use_gtc: RwLock<HashSet<TokenId>>,
+    /// Outstanding GTC stop-loss sell orders, keyed by order_id.
+    pub gtc_stop_loss_orders: RwLock<HashMap<OrderId, GtcStopLossOrder>>,
     /// Coins configured for this strategy.
     coins: HashSet<String>,
     /// Last event timestamp from the strategy context (simulated or real).
@@ -292,6 +355,8 @@ impl CryptoArbBase {
             order_telemetry: std::sync::Mutex::new(OrderTelemetry::default()),
             feed_last_seen: RwLock::new(HashMap::new()),
             signal_veto_stats: std::sync::Mutex::new(HashMap::new()),
+            stop_loss_use_gtc: RwLock::new(HashSet::new()),
+            gtc_stop_loss_orders: RwLock::new(HashMap::new()),
             coins,
             last_event_time: RwLock::new(Utc::now()),
         }
@@ -652,6 +717,13 @@ impl CryptoArbBase {
             .unwrap_or(Decimal::ZERO);
 
         if dispersion_bps > max_dispersion_bps {
+            warn!(
+                coin = %coin,
+                dispersion_bps = %dispersion_bps,
+                max_dispersion_bps = %max_dispersion_bps,
+                sources_used = sources_used,
+                "Composite price rejected: source dispersion exceeds threshold"
+            );
             return None;
         }
 
@@ -1074,6 +1146,37 @@ impl CryptoArbBase {
             reservations.remove(market_id);
         }
 
+        // Cancel outstanding GTC stop-loss orders for this market
+        let cancel_actions: Vec<Action> = {
+            let mut gtc_sl = self.gtc_stop_loss_orders.write().await;
+            let to_cancel: Vec<OrderId> = gtc_sl
+                .iter()
+                .filter(|(_, sl)| sl.market_id == market_id)
+                .map(|(oid, _)| oid.clone())
+                .collect();
+            let mut actions = Vec::new();
+            for oid in to_cancel {
+                if let Some(sl) = gtc_sl.remove(&oid) {
+                    info!(
+                        order_id = %oid,
+                        token_id = %sl.token_id,
+                        market = %market_id,
+                        "Cancelling GTC stop-loss order on market expiry"
+                    );
+                    // Clear pending_stop_loss
+                    let mut pending_sl = self.pending_stop_loss.write().await;
+                    pending_sl.remove(&sl.token_id);
+                    drop(pending_sl);
+                    // Clear GTC flag
+                    let mut gtc_set = self.stop_loss_use_gtc.write().await;
+                    gtc_set.remove(&sl.token_id);
+                    drop(gtc_set);
+                    actions.push(Action::CancelOrder(oid));
+                }
+            }
+            actions
+        };
+
         // Resolve any remaining positions
         let removed = {
             let mut positions = self.positions.write().await;
@@ -1106,7 +1209,9 @@ impl CryptoArbBase {
 
         self.rebuild_nearest_expiry().await;
 
-        vec![Action::UnsubscribeMarket(market_id.to_string())]
+        let mut result = cancel_actions;
+        result.push(Action::UnsubscribeMarket(market_id.to_string()));
+        result
     }
 
     /// Promote pending markets when a price becomes available.
@@ -1410,10 +1515,13 @@ impl CryptoArbBase {
             removed
         };
 
-        // Clear stop-loss retry count when position is removed
+        // Clear stop-loss state when position is removed
         if removed.is_some() {
             let mut counts = self.stop_loss_retry_counts.write().await;
             counts.remove(token_id);
+            drop(counts);
+            let mut gtc_set = self.stop_loss_use_gtc.write().await;
+            gtc_set.remove(token_id);
         }
 
         removed
@@ -1533,17 +1641,40 @@ impl CryptoArbBase {
                 effective_distance,
                 time_remaining,
             };
+
+            // Check if this token is marked for GTC fallback (after FOK liquidity rejection)
+            let use_gtc = {
+                let gtc_set = self.stop_loss_use_gtc.read().await;
+                gtc_set.contains(&pos.token_id)
+            };
+
+            let (order_type, sell_price) = if use_gtc {
+                // GTC fallback: rest below current bid as maker order (0% fee)
+                let tick_size = pos.tick_size;
+                let offset = Decimal::from(self.config.stop_loss.gtc_fallback_tick_offset);
+                let gtc_price = (current_bid - tick_size * offset).max(tick_size);
+                (OrderType::Gtc, gtc_price)
+            } else {
+                (OrderType::Fok, current_bid)
+            };
+
+            // Clear GTC flag after constructing order (consumed)
+            if use_gtc {
+                let mut gtc_set = self.stop_loss_use_gtc.write().await;
+                gtc_set.remove(&pos.token_id);
+            }
+
             let order = OrderRequest::new(
                 pos.token_id.clone(),
-                current_bid,
+                sell_price,
                 pos.size,
                 OrderSide::Sell,
-                OrderType::Fok,
+                order_type,
                 neg_risk,
             )
             .with_tick_size(pos.tick_size)
             .with_fee_rate_bps(pos.fee_rate_bps);
-            Some((Action::PlaceOrder(order), current_bid, trigger))
+            Some((Action::PlaceOrder(order), sell_price, trigger))
         } else {
             None
         }
@@ -1640,9 +1771,12 @@ impl CryptoArbBase {
 
     /// Handle a rejected stop-loss sell order.
     ///
-    /// Balance/allowance failures are treated as retryable with escalating cooldowns:
-    /// 5s → 15s → 30s → 60s. After 5+ consecutive failures, logs ERROR-level alert.
-    /// Other failures use the same escalation. Keep the position and retry later.
+    /// Classifies the rejection reason and applies the appropriate cooldown schedule:
+    /// - Liquidity: fast cooldowns (default [1, 5, 15, 30]s), marks for GTC fallback
+    /// - Balance/Allowance: longer cooldowns (default [5, 15, 30, 60]s)
+    /// - Transient: same as balance/allowance
+    ///
+    /// After 5+ consecutive failures, logs ERROR-level alert.
     pub async fn handle_stop_loss_rejection(
         &self,
         token_id: &TokenId,
@@ -1653,6 +1787,8 @@ impl CryptoArbBase {
         pending_sl.remove(token_id);
         drop(pending_sl);
 
+        let kind = StopLossRejectionKind::classify(reason);
+
         // Increment retry count for escalating cooldowns
         let retry_count = {
             let mut counts = self.stop_loss_retry_counts.write().await;
@@ -1661,13 +1797,13 @@ impl CryptoArbBase {
             *count
         };
 
-        // Escalating cooldowns: 5s → 15s → 30s → 60s
-        let cooldown_secs: u64 = match retry_count {
-            1 => 5,
-            2 => 15,
-            3 => 30,
-            _ => 60,
-        };
+        // Pick cooldown from the appropriate schedule based on retry count
+        let schedule = kind.cooldown_schedule(
+            &self.config.stop_loss.liquidity_cooldowns,
+            &self.config.stop_loss.balance_cooldowns,
+        );
+        let idx = (retry_count as usize).saturating_sub(1).min(schedule.len().saturating_sub(1));
+        let cooldown_secs = schedule.get(idx).copied().unwrap_or(60);
 
         if retry_count >= 5 {
             error!(
@@ -1675,18 +1811,22 @@ impl CryptoArbBase {
                 mode = mode_name,
                 retry_count = retry_count,
                 reason = %reason,
+                kind = ?kind,
                 "Stop-loss sell repeatedly failing — may need manual intervention"
             );
         }
 
-        if reason.contains("not enough balance") || reason.contains("allowance") {
+        // For liquidity rejections, mark token for GTC fallback on next attempt
+        if kind == StopLossRejectionKind::Liquidity && self.config.stop_loss.gtc_fallback {
+            let mut gtc_set = self.stop_loss_use_gtc.write().await;
+            gtc_set.insert(token_id.clone());
             warn!(
                 token_id = %token_id,
                 mode = mode_name,
                 reason = %reason,
                 retry_count = retry_count,
                 cooldown_secs = cooldown_secs,
-                "Stop-loss sell rejected (balance/allowance), scheduling retry"
+                "Stop-loss FOK rejected (liquidity), marked for GTC fallback"
             );
         } else {
             warn!(
@@ -1695,7 +1835,8 @@ impl CryptoArbBase {
                 reason = %reason,
                 retry_count = retry_count,
                 cooldown_secs = cooldown_secs,
-                "Stop-loss sell rejected (transient), cooldown applied"
+                kind = ?kind,
+                "Stop-loss sell rejected, cooldown applied"
             );
         }
 
@@ -1745,6 +1886,18 @@ impl CryptoArbBase {
                         now,
                     );
                     self.record_position(position).await;
+                    // Emit RecordFill so the persistence handler records this trade.
+                    // Matched fills are always entry buys.
+                    actions.push(Action::RecordFill {
+                        order_id: order_id.to_string(),
+                        market_id: lo.market_id.clone(),
+                        token_id: lo.token_id.clone(),
+                        side: OrderSide::Buy,
+                        price: lo.price,
+                        size: lo.size,
+                        realized_pnl: None,
+                    });
+                    // Also emit signal for dashboard/logging consumers
                     actions.push(Action::EmitSignal {
                         signal_type: "matched-fill".to_string(),
                         payload: serde_json::json!({
@@ -1825,6 +1978,18 @@ impl CryptoArbBase {
         let mut result_actions = Vec::new();
         for (position, order_id, lo) in actions {
             self.record_position(position).await;
+            // Emit RecordFill so the persistence handler records this trade.
+            // Reconciled fills are always entry buys (GTC buy orders).
+            result_actions.push(Action::RecordFill {
+                order_id: order_id.clone(),
+                market_id: lo.market_id.clone(),
+                token_id: lo.token_id.clone(),
+                side: OrderSide::Buy,
+                price: lo.price,
+                size: lo.size,
+                realized_pnl: None,
+            });
+            // Also emit signal for dashboard/logging consumers
             result_actions.push(Action::EmitSignal {
                 signal_type: "reconciled-fill".to_string(),
                 payload: serde_json::json!({
