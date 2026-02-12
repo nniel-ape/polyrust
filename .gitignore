@@ -5,7 +5,7 @@ target/
 config.toml
 
 # Docker volumes and overrides
-data/
+/data/
 docker-compose.override.yml
 
 # SOPS deploy key (never commit private keys)
