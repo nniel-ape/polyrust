@@ -9,7 +9,7 @@ use polyrust_core::prelude::*;
 use polyrust_dashboard::Dashboard;
 use polyrust_execution::{FillMode, LiveBackend, PaperBackend};
 use polyrust_market::{
-    BinanceFeed, ClobFeed, DiscoveryConfig, DiscoveryFeed, MarketDataFeed, PriceFeed,
+    BinanceFeed, ClobFeed, CoinbaseFeed, DiscoveryConfig, DiscoveryFeed, MarketDataFeed, PriceFeed,
 };
 use polyrust_store::Store;
 use polyrust_strategies::{
@@ -131,8 +131,9 @@ async fn main() -> anyhow::Result<()> {
             (config, wrapper.arbitrage)
         }
         Err(e) => {
-            info!("no config file found ({e}), using defaults");
-            (Config::default(), ArbitrageConfig::default())
+            return Err(anyhow::anyhow!(
+                "config.toml not found ({e}). Copy config.example.toml to config.toml and customize it."
+            ));
         }
     };
     let config = config.with_env_overrides();
@@ -262,47 +263,27 @@ async fn main() -> anyhow::Result<()> {
         coins: arb_config.coins.clone(),
         ..DiscoveryConfig::default()
     });
+    let mut binance_feed = BinanceFeed::new(arb_config.coins.clone());
+    let mut coinbase_feed = CoinbaseFeed::new(arb_config.coins.clone());
 
-    let clob_bus = event_bus.clone();
-    let price_bus = event_bus.clone();
-    let discovery_bus = event_bus.clone();
-
-    bg_handles.push(tokio::spawn(async move {
-        if let Err(e) = clob_feed.start(clob_bus).await {
-            error!("CLOB feed failed to start: {e}");
-        }
-    }));
-
-    bg_handles.push(tokio::spawn(async move {
-        if let Err(e) = price_feed.start(price_bus).await {
-            error!("price feed failed to start: {e}");
-        }
-    }));
-
-    // Start discovery feed in main scope (NOT spawned) so its shutdown_tx
-    // stays alive. Moving it into tokio::spawn would drop the sender on return,
-    // causing the internal polling loop to exit immediately.
-    if let Err(e) = discovery_feed.start(discovery_bus).await {
+    // Start all feeds in main scope (NOT spawned). Each feed's start() spawns
+    // internal tasks and returns immediately — wrapping in tokio::spawn would
+    // complete instantly and prevent calling stop() on shutdown.
+    if let Err(e) = clob_feed.start(event_bus.clone()).await {
+        error!("CLOB feed failed to start: {e}");
+    }
+    if let Err(e) = price_feed.start(event_bus.clone()).await {
+        error!("price feed failed to start: {e}");
+    }
+    if let Err(e) = discovery_feed.start(event_bus.clone()).await {
         error!("discovery feed failed to start: {e}");
     }
-
-    // Start direct Binance feed (spot + futures) alongside RTDS
-    let mut binance_feed = BinanceFeed::new(arb_config.coins.clone());
-    let binance_bus = event_bus.clone();
-    bg_handles.push(tokio::spawn(async move {
-        if let Err(e) = binance_feed.start(binance_bus).await {
-            error!("Binance feed failed to start: {e}");
-        }
-    }));
-
-    // Start Coinbase feed for cross-exchange price diversity
-    let mut coinbase_feed = polyrust_market::CoinbaseFeed::new(arb_config.coins.clone());
-    let coinbase_bus = event_bus.clone();
-    bg_handles.push(tokio::spawn(async move {
-        if let Err(e) = coinbase_feed.start(coinbase_bus).await {
-            error!("Coinbase feed failed to start: {e}");
-        }
-    }));
+    if let Err(e) = binance_feed.start(event_bus.clone()).await {
+        error!("Binance feed failed to start: {e}");
+    }
+    if let Err(e) = coinbase_feed.start(event_bus.clone()).await {
+        error!("Coinbase feed failed to start: {e}");
+    }
 
     // Start trade persistence task
     let persistence_store = Arc::clone(&store);
@@ -430,8 +411,12 @@ async fn main() -> anyhow::Result<()> {
     // Run engine (blocks until Ctrl+C)
     engine.run().await?;
 
-    // Stop discovery feed gracefully (sends shutdown signal to polling loop)
+    // Stop all feeds gracefully (sends shutdown signal to internal loops)
+    let _ = clob_feed.stop().await;
+    let _ = price_feed.stop().await;
     let _ = discovery_feed.stop().await;
+    let _ = binance_feed.stop().await;
+    let _ = coinbase_feed.stop().await;
 
     // Abort all background tasks for clean shutdown
     info!(tasks = bg_handles.len(), "Aborting background tasks");

@@ -181,6 +181,12 @@ impl BacktestConfig {
             let lower = v.trim().to_lowercase();
             self.offline = matches!(lower.as_str(), "1" | "true" | "yes");
         }
+        // Validate fetch_concurrency
+        if self.fetch_concurrency == 0 {
+            return Err(polyrust_core::error::PolyError::Config(
+                "fetch_concurrency must be > 0".into(),
+            ));
+        }
         // Validate fidelity
         if self.data_fidelity_secs == 0 {
             return Err(polyrust_core::error::PolyError::Config(
