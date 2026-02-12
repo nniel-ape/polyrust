@@ -297,6 +297,52 @@ impl CryptoArbBase {
         }
     }
 
+    /// Pre-seed price_history with Chainlink prices at recent 15-min boundaries.
+    /// Runs before feeds/discovery start so that `find_best_reference()` can use
+    /// Historical-quality lookups for markets discovered shortly after startup.
+    pub async fn warm_up(&self) {
+        let Some(client) = &self.chainlink_client else {
+            info!("Chainlink disabled, skipping price warm-up");
+            return;
+        };
+
+        let now_ts = Utc::now().timestamp();
+        let current_boundary = now_ts - (now_ts % WINDOW_SECS);
+
+        // 5 boundaries: 0, 15, 30, 45, 60 min ago — covers TailEnd markets up to ~75 min old
+        let boundaries: Vec<i64> = (0..5).map(|i| current_boundary - i * WINDOW_SECS).collect();
+
+        let mut join_set = tokio::task::JoinSet::new();
+        for coin in self.coins.iter() {
+            for &boundary_ts in &boundaries {
+                let client = Arc::clone(client);
+                let coin = coin.clone();
+                join_set.spawn(async move {
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        client.get_price_at_timestamp(&coin, boundary_ts as u64, 100),
+                    )
+                    .await;
+                    (coin, boundary_ts, result)
+                });
+            }
+        }
+
+        let mut success = 0u32;
+        while let Some(Ok((coin, _bts, result))) = join_set.join_next().await {
+            if let Ok(Ok(cp)) = result {
+                let ts =
+                    DateTime::from_timestamp(cp.timestamp as i64, 0).unwrap_or_else(Utc::now);
+                let mut history = self.price_history.write().await;
+                let entry = history.entry(coin).or_default();
+                entry.push_back((ts, cp.price, "chainlink".to_string()));
+                success += 1;
+            }
+        }
+
+        info!(seeded = success, "Chainlink warm-up complete");
+    }
+
     /// Update the cached event time from the strategy context.
     /// Should be called at the start of each on_event handler.
     pub async fn update_event_time(&self, ctx: &StrategyContext) {

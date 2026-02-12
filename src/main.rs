@@ -187,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
         arb_config.clone(),
         config.polymarket.rpc_urls.clone(),
     ));
+    base.warm_up().await;
 
     // Build engine with conditionally registered strategies based on config
     let mut builder = Engine::builder()
