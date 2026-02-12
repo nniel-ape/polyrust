@@ -1,0 +1,49 @@
+services:
+  polyrust:
+    build: .
+    container_name: polyrust-bot
+    ports:
+      - "3000:3000" # Dashboard HTTP
+    volumes:
+      # Config file (read-only) - polymarket creds come from .env, not config.toml
+      - ./config.toml:/app/config.toml:ro
+      # Database persistence - data/ directory will be created automatically
+      - ./data:/app/data
+    environment:
+      # Runtime configuration overrides (optional)
+      # Uncomment and customize as needed:
+
+      # - POLY_PAPER_TRADING=true
+      - POLY_DASHBOARD_HOST=0.0.0.0 # Allow access from host machine
+      # - POLY_DASHBOARD_PORT=3000
+      - POLY_DB_PATH=/app/data/polyrust.db
+
+      # Wallet credentials (REQUIRED for live trading)
+      # Recommended: use docker-compose.override.yml or .env file for secrets
+      # - POLY_PRIVATE_KEY=
+      # - POLY_SAFE_ADDRESS=
+
+      # Builder API credentials (REQUIRED for live trading)
+      # - POLY_BUILDER_API_KEY=
+      # - POLY_BUILDER_API_SECRET=
+      # - POLY_BUILDER_API_PASSPHRASE=
+
+      # RPC endpoints (optional, comma-separated)
+      # - POLY_RPC_URLS=https://polygon-rpc.com,https://rpc.ankr.com/polygon
+
+      # Logging — polyrust=debug enables pipeline skip-reason diagnostics
+      - RUST_LOG=${RUST_LOG:-info,polyrust=info}
+    restart: unless-stopped
+    networks:
+      - polyrust-net
+    # Uncomment for health checks (requires /health endpoint implementation)
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 40s
+
+networks:
+  polyrust-net:
+    driver: bridge

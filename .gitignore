@@ -8,6 +8,9 @@ config.toml
 data/
 docker-compose.override.yml
 
+# SOPS deploy key (never commit private keys)
+.sops/deploy-key.txt
+
 # ralphex progress logs
 progress*.txt
 .DS_Store
