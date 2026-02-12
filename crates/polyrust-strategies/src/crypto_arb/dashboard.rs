@@ -28,23 +28,21 @@ use crate::crypto_arb::types::{ArbitrageMode, ReferenceQuality};
 
 /// Render reference prices & predictions table (shared across dashboards).
 async fn render_reference_prices(base: &CryptoArbBase, html: &mut String) {
-    html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
-    html.push_str(r#"<h2 class="text-lg font-bold mb-3">Reference Prices &amp; Predictions</h2>"#);
+    html.push_str(r#"<div class="bp-card mb-4">"#);
+    html.push_str(r#"<h2 class="bp-section-title">Reference Prices &amp; Predictions</h2>"#);
 
     let active_markets = base.active_markets.read().await;
     let price_history = base.price_history.read().await;
 
     if active_markets.is_empty() {
-        html.push_str(r#"<p class="text-gray-500">No active markets</p>"#);
+        html.push_str(r#"<p class="bp-text-muted">No active markets</p>"#);
     } else {
-        html.push_str(
-            r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
-        );
-        html.push_str("<th class=\"text-left py-1\">Coin</th>");
-        html.push_str("<th class=\"text-right py-1\">Ref Price</th>");
-        html.push_str("<th class=\"text-right py-1\">Current</th>");
-        html.push_str("<th class=\"text-right py-1\">Change</th>");
-        html.push_str("<th class=\"text-right py-1\">Prediction</th>");
+        html.push_str(r#"<table class="bp-table"><thead><tr>"#);
+        html.push_str("<th class=\"text-left\">Coin</th>");
+        html.push_str("<th class=\"text-right\">Ref Price</th>");
+        html.push_str("<th class=\"text-right\">Current</th>");
+        html.push_str("<th class=\"text-right\">Change</th>");
+        html.push_str("<th class=\"text-right\">Prediction</th>");
         html.push_str("</tr></thead><tbody>");
 
         let mut seen_coins = HashSet::new();
@@ -74,9 +72,9 @@ async fn render_reference_prices(base: &CryptoArbBase, html: &mut String) {
                         ((cp - mwr.reference_price) / mwr.reference_price) * Decimal::new(100, 0)
                     };
                     let cls = if change >= Decimal::ZERO {
-                        "pnl-positive"
+                        "bp-profit"
                     } else {
-                        "pnl-negative"
+                        "bp-loss"
                     };
                     let pred = match mwr.predict_winner(cp) {
                         Some(OutcomeSide::Up) | Some(OutcomeSide::Yes) => "UP",
@@ -90,7 +88,7 @@ async fn render_reference_prices(base: &CryptoArbBase, html: &mut String) {
 
             let _ = write!(
                 html,
-                r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="text-right py-1">{ref_label}{ref_price}</td><td class="text-right py-1">{current}</td><td class="text-right py-1 {change_class}">{change}</td><td class="text-right py-1 font-bold">{prediction}</td></tr>"#,
+                r#"<tr><td class="py-1">{coin}</td><td class="text-right py-1">{ref_label}{ref_price}</td><td class="text-right py-1">{current}</td><td class="text-right py-1 {change_class}">{change}</td><td class="text-right py-1" style="font-weight:700">{prediction}</td></tr>"#,
                 coin = escape_html(&mwr.coin),
                 ref_label = ref_label,
                 ref_price = fmt_usd(mwr.reference_price),
@@ -119,26 +117,24 @@ async fn render_positions_for_mode(base: &CryptoArbBase, html: &mut String, mode
         .filter(|p| mode_matches(&p.mode, mode_filter))
         .collect();
 
-    html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+    html.push_str(r#"<div class="bp-card mb-4">"#);
     let _ = write!(
         html,
-        r#"<h2 class="text-lg font-bold mb-3">Open Positions ({})</h2>"#,
+        r#"<h2 class="bp-section-title">Open Positions ({})</h2>"#,
         mode_positions.len()
     );
 
     if mode_positions.is_empty() {
-        html.push_str(r#"<p class="text-gray-500">No open positions</p>"#);
+        html.push_str(r#"<p class="bp-text-muted">No open positions</p>"#);
     } else {
-        html.push_str(
-            r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
-        );
-        html.push_str("<th class=\"text-left py-1\">Market</th>");
-        html.push_str("<th class=\"text-left py-1\">Side</th>");
-        html.push_str("<th class=\"text-right py-1\">Entry</th>");
-        html.push_str("<th class=\"text-right py-1\">Current</th>");
-        html.push_str("<th class=\"text-right py-1\">PnL</th>");
-        html.push_str("<th class=\"text-right py-1\">Size</th>");
-        html.push_str("<th class=\"text-right py-1\">Kelly</th>");
+        html.push_str(r#"<table class="bp-table"><thead><tr>"#);
+        html.push_str("<th class=\"text-left\">Market</th>");
+        html.push_str("<th class=\"text-left\">Side</th>");
+        html.push_str("<th class=\"text-right\">Entry</th>");
+        html.push_str("<th class=\"text-right\">Current</th>");
+        html.push_str("<th class=\"text-right\">PnL</th>");
+        html.push_str("<th class=\"text-right\">Size</th>");
+        html.push_str("<th class=\"text-right\">Kelly</th>");
         html.push_str("</tr></thead><tbody>");
 
         for pos in &mode_positions {
@@ -147,9 +143,9 @@ async fn render_positions_for_mode(base: &CryptoArbBase, html: &mut String, mode
                 Some(cp) => {
                     let pnl = (cp - pos.entry_price) * pos.size - (pos.estimated_fee * pos.size);
                     let cls = if pnl >= Decimal::ZERO {
-                        "pnl-positive"
+                        "bp-profit"
                     } else {
-                        "pnl-negative"
+                        "bp-loss"
                     };
                     (cp.to_string(), format!("${pnl:.2}"), cls)
                 }
@@ -162,7 +158,7 @@ async fn render_positions_for_mode(base: &CryptoArbBase, html: &mut String, mode
 
             let _ = write!(
                 html,
-                r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="py-1">{side:?}</td><td class="text-right py-1">{entry}</td><td class="text-right py-1">{current}</td><td class="text-right py-1"><span class="{pnl_class}">{pnl}</span></td><td class="text-right py-1">{size}</td><td class="text-right py-1">{kelly}</td></tr>"#,
+                r#"<tr><td>{coin}</td><td>{side:?}</td><td class="text-right">{entry}</td><td class="text-right">{current}</td><td class="text-right"><span class="{pnl_class}">{pnl}</span></td><td class="text-right">{size}</td><td class="text-right">{kelly}</td></tr>"#,
                 coin = escape_html(&pos.coin),
                 side = pos.side,
                 entry = pos.entry_price,
@@ -182,8 +178,8 @@ async fn render_positions_for_mode(base: &CryptoArbBase, html: &mut String, mode
 async fn render_performance_for_mode(base: &CryptoArbBase, html: &mut String, mode_filter: &str) {
     let mode_stats = base.mode_stats.read().await;
 
-    html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
-    html.push_str(r#"<h2 class="text-lg font-bold mb-3">Performance Stats</h2>"#);
+    html.push_str(r#"<div class="bp-card mb-4">"#);
+    html.push_str(r#"<h2 class="bp-section-title">Performance Stats</h2>"#);
 
     // Find stats for this mode
     let stats = mode_stats
@@ -193,27 +189,25 @@ async fn render_performance_for_mode(base: &CryptoArbBase, html: &mut String, mo
 
     match stats {
         Some(s) => {
-            html.push_str(
-                r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
-            );
-            html.push_str("<th class=\"text-right py-1\">Trades</th>");
-            html.push_str("<th class=\"text-right py-1\">Won</th>");
-            html.push_str("<th class=\"text-right py-1\">Lost</th>");
-            html.push_str("<th class=\"text-right py-1\">Win Rate</th>");
-            html.push_str("<th class=\"text-right py-1\">Total P&amp;L</th>");
-            html.push_str("<th class=\"text-right py-1\">Avg P&amp;L</th>");
+            html.push_str(r#"<table class="bp-table"><thead><tr>"#);
+            html.push_str("<th class=\"text-right\">Trades</th>");
+            html.push_str("<th class=\"text-right\">Won</th>");
+            html.push_str("<th class=\"text-right\">Lost</th>");
+            html.push_str("<th class=\"text-right\">Win Rate</th>");
+            html.push_str("<th class=\"text-right\">Total P&amp;L</th>");
+            html.push_str("<th class=\"text-right\">Avg P&amp;L</th>");
             html.push_str("</tr></thead><tbody>");
 
             let win_rate_pct = s.win_rate() * Decimal::new(100, 0);
             let pnl_class = if s.total_pnl >= Decimal::ZERO {
-                "pnl-positive"
+                "bp-profit"
             } else {
-                "pnl-negative"
+                "bp-loss"
             };
 
             let _ = write!(
                 html,
-                r#"<tr class="border-b border-gray-800"><td class="text-right py-1">{trades}</td><td class="text-right py-1">{won}</td><td class="text-right py-1">{lost}</td><td class="text-right py-1">{win_rate:.1}%</td><td class="text-right py-1 {pnl_class}">${total_pnl:.2}</td><td class="text-right py-1">${avg_pnl:.4}</td></tr>"#,
+                r#"<tr><td class="text-right">{trades}</td><td class="text-right">{won}</td><td class="text-right">{lost}</td><td class="text-right">{win_rate:.1}%</td><td class="text-right {pnl_class}">${total_pnl:.2}</td><td class="text-right">${avg_pnl:.4}</td></tr>"#,
                 trades = s.total_trades(),
                 won = s.won,
                 lost = s.lost,
@@ -225,7 +219,7 @@ async fn render_performance_for_mode(base: &CryptoArbBase, html: &mut String, mo
             html.push_str("</tbody></table>");
         }
         None => {
-            html.push_str(r#"<p class="text-gray-500">No trades recorded yet</p>"#);
+            html.push_str(r#"<p class="bp-text-muted">No trades recorded yet</p>"#);
         }
     }
     html.push_str("</div>");
@@ -273,8 +267,8 @@ impl CryptoArbDashboard {
         let mut html = String::with_capacity(8192);
 
         // --- Mode Status & Navigation ---
-        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
-        html.push_str(r#"<h2 class="text-lg font-bold mb-3">Trading Modes</h2>"#);
+        html.push_str(r#"<div class="bp-card mb-4">"#);
+        html.push_str(r#"<h2 class="bp-section-title">Trading Modes</h2>"#);
         html.push_str(r#"<div class="grid grid-cols-2 gap-4">"#);
 
         let modes = [
@@ -283,19 +277,19 @@ impl CryptoArbDashboard {
         ];
 
         for (name, slug, enabled) in &modes {
-            let status_class = if *enabled {
-                "text-green-400"
+            let status_style = if *enabled {
+                "color: var(--color-enabled);"
             } else {
-                "text-gray-500"
+                "color: var(--text-muted);"
             };
             let status_text = if *enabled { "Enabled" } else { "Disabled" };
 
             let _ = write!(
                 html,
-                r#"<a href="/strategy/crypto-arb-{slug}" class="block p-3 bg-gray-800 rounded hover:bg-gray-700 transition-colors"><div class="font-bold">{name}</div><div class="{status_class} text-sm">{status_text}</div></a>"#,
+                r#"<a href="/strategy/crypto-arb-{slug}" class="bp-mode-card"><div class="bp-mode-card-title">{name}</div><div style="font-size:0.95rem;{status_style}">{status_text}</div></a>"#,
                 slug = slug,
                 name = name,
-                status_class = status_class,
+                status_style = status_style,
                 status_text = status_text,
             );
         }
@@ -305,28 +299,26 @@ impl CryptoArbDashboard {
         render_reference_prices(&self.base, &mut html).await;
 
         // --- Active Markets ---
-        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+        html.push_str(r#"<div class="bp-card mb-4">"#);
         let active_markets = self.base.active_markets.read().await;
         let _ = write!(
             html,
-            r#"<h2 class="text-lg font-bold mb-3">Active Markets ({})</h2>"#,
+            r#"<h2 class="bp-section-title">Active Markets ({})</h2>"#,
             active_markets.len()
         );
 
         let cached_asks = self.base.cached_asks.read().await;
 
         if active_markets.is_empty() {
-            html.push_str(r#"<p class="text-gray-500">No active markets</p>"#);
+            html.push_str(r#"<p class="bp-text-muted">No active markets</p>"#);
         } else {
-            html.push_str(
-                r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
-            );
-            html.push_str("<th class=\"text-left py-1\">Market</th>");
-            html.push_str("<th class=\"text-right py-1\">UP</th>");
-            html.push_str("<th class=\"text-right py-1\">DOWN</th>");
-            html.push_str("<th class=\"text-right py-1\">Fee</th>");
-            html.push_str("<th class=\"text-right py-1\">Net</th>");
-            html.push_str("<th class=\"text-right py-1\">Time Left</th>");
+            html.push_str(r#"<table class="bp-table"><thead><tr>"#);
+            html.push_str("<th class=\"text-left\">Market</th>");
+            html.push_str("<th class=\"text-right\">UP</th>");
+            html.push_str("<th class=\"text-right\">DOWN</th>");
+            html.push_str("<th class=\"text-right\">Fee</th>");
+            html.push_str("<th class=\"text-right\">Net</th>");
+            html.push_str("<th class=\"text-right\">Time Left</th>");
             html.push_str("</tr></thead><tbody>");
 
             let mut markets_by_time: Vec<_> = active_markets.values().collect();
@@ -375,7 +367,7 @@ impl CryptoArbDashboard {
 
                 let _ = write!(
                     html,
-                    r#"<tr class="border-b border-gray-800"><td class="py-1">{coin} Up/Down</td><td class="text-right py-1">{up}</td><td class="text-right py-1">{down}</td><td class="text-right py-1">{fee}</td><td class="text-right py-1">{net}</td><td class="text-right py-1">{time}</td></tr>"#,
+                    r#"<tr><td>{coin} Up/Down</td><td class="text-right">{up}</td><td class="text-right">{down}</td><td class="text-right">{fee}</td><td class="text-right">{net}</td><td class="text-right">{time}</td></tr>"#,
                     coin = escape_html(&mwr.coin),
                     up = up_price,
                     down = down_price,
@@ -393,16 +385,16 @@ impl CryptoArbDashboard {
 
         // --- All Open Positions (summary) ---
         let positions = self.base.positions.read().await;
-        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+        html.push_str(r#"<div class="bp-card mb-4">"#);
         let total_positions: usize = positions.values().map(|v| v.len()).sum();
         let _ = write!(
             html,
-            r#"<h2 class="text-lg font-bold mb-3">Open Positions ({})</h2>"#,
+            r#"<h2 class="bp-section-title">Open Positions ({})</h2>"#,
             total_positions
         );
 
         if positions.is_empty() {
-            html.push_str(r#"<p class="text-gray-500">No open positions</p>"#);
+            html.push_str(r#"<p class="bp-text-muted">No open positions</p>"#);
         } else {
             // Count by mode
             let mut mode_counts: std::collections::HashMap<String, usize> =
@@ -421,7 +413,7 @@ impl CryptoArbDashboard {
             for (mode, count) in &mode_counts {
                 let _ = write!(
                     html,
-                    r#"<span class="px-2 py-1 bg-gray-800 rounded text-sm">{mode}: {count}</span>"#,
+                    r#"<span class="bp-badge">{mode}: {count}</span>"#,
                     mode = mode,
                     count = count,
                 );
@@ -434,23 +426,21 @@ impl CryptoArbDashboard {
 
         // --- Performance Stats (all modes) ---
         let mode_stats = self.base.mode_stats.read().await;
-        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
-        html.push_str(r#"<h2 class="text-lg font-bold mb-3">Performance Stats</h2>"#);
+        html.push_str(r#"<div class="bp-card mb-4">"#);
+        html.push_str(r#"<h2 class="bp-section-title">Performance Stats</h2>"#);
 
         if mode_stats.is_empty() {
-            html.push_str(r#"<p class="text-gray-500">No trades recorded yet</p>"#);
+            html.push_str(r#"<p class="bp-text-muted">No trades recorded yet</p>"#);
         } else {
-            html.push_str(
-                r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
-            );
-            html.push_str("<th class=\"text-left py-1\">Mode</th>");
-            html.push_str("<th class=\"text-right py-1\">Trades</th>");
-            html.push_str("<th class=\"text-right py-1\">Won</th>");
-            html.push_str("<th class=\"text-right py-1\">Lost</th>");
-            html.push_str("<th class=\"text-right py-1\">Win Rate</th>");
-            html.push_str("<th class=\"text-right py-1\">Total P&amp;L</th>");
-            html.push_str("<th class=\"text-right py-1\">Avg P&amp;L</th>");
-            html.push_str("<th class=\"text-left py-1\">Status</th>");
+            html.push_str(r#"<table class="bp-table"><thead><tr>"#);
+            html.push_str("<th class=\"text-left\">Mode</th>");
+            html.push_str("<th class=\"text-right\">Trades</th>");
+            html.push_str("<th class=\"text-right\">Won</th>");
+            html.push_str("<th class=\"text-right\">Lost</th>");
+            html.push_str("<th class=\"text-right\">Win Rate</th>");
+            html.push_str("<th class=\"text-right\">Total P&amp;L</th>");
+            html.push_str("<th class=\"text-right\">Avg P&amp;L</th>");
+            html.push_str("<th class=\"text-left\">Status</th>");
             html.push_str("</tr></thead><tbody>");
 
             let mut modes: Vec<_> = mode_stats.iter().collect();
@@ -459,18 +449,18 @@ impl CryptoArbDashboard {
             for (mode, stats) in &modes {
                 let win_rate_pct = stats.win_rate() * Decimal::new(100, 0);
                 let pnl_class = if stats.total_pnl >= Decimal::ZERO {
-                    "pnl-positive"
+                    "bp-profit"
                 } else {
-                    "pnl-negative"
+                    "bp-loss"
                 };
                 let status = if self.base.is_mode_disabled(mode).await {
-                    r#"<span class="text-red-400">Disabled</span>"#
+                    r#"<span style="color:var(--color-loss)">Disabled</span>"#
                 } else {
-                    r#"<span class="text-green-400">Active</span>"#
+                    r#"<span style="color:var(--color-enabled)">Active</span>"#
                 };
                 let _ = write!(
                     html,
-                    r#"<tr class="border-b border-gray-800"><td class="py-1">{mode}</td><td class="text-right py-1">{trades}</td><td class="text-right py-1">{won}</td><td class="text-right py-1">{lost}</td><td class="text-right py-1">{win_rate:.1}%</td><td class="text-right py-1 {pnl_class}">${total_pnl:.2}</td><td class="text-right py-1">${avg_pnl:.4}</td><td class="py-1">{status}</td></tr>"#,
+                    r#"<tr><td>{mode}</td><td class="text-right">{trades}</td><td class="text-right">{won}</td><td class="text-right">{lost}</td><td class="text-right">{win_rate:.1}%</td><td class="text-right {pnl_class}">${total_pnl:.2}</td><td class="text-right">${avg_pnl:.4}</td><td>{status}</td></tr>"#,
                     mode = mode,
                     trades = stats.total_trades(),
                     won = stats.won,
@@ -523,34 +513,34 @@ impl TailEndDashboard {
 
         // Header with back link
         html.push_str(r#"<div class="mb-4">"#);
-        html.push_str(r#"<a href="/strategy/crypto-arb" class="text-blue-400 hover:underline">&larr; Back to Overview</a>"#);
-        html.push_str(r#"<h1 class="text-xl font-bold mt-2">TailEnd Mode</h1>"#);
+        html.push_str(r#"<a href="/strategy/crypto-arb" class="bp-back-link">&larr; Back to Overview</a>"#);
+        html.push_str(r#"<h1 class="bp-page-title mt-2">TailEnd Mode</h1>"#);
 
         // Status
         let status = if self.base.config.tailend.enabled {
-            r#"<span class="text-green-400">Enabled</span>"#
+            r#"<span style="color:var(--color-enabled)">Enabled</span>"#
         } else {
-            r#"<span class="text-gray-500">Disabled</span>"#
+            r#"<span class="bp-text-muted">Disabled</span>"#
         };
         let _ = write!(
             html,
-            r#"<p class="text-sm text-gray-400">Status: {}</p>"#,
+            r#"<p class="bp-text-secondary" style="font-size:0.95rem">Status: {}</p>"#,
             status
         );
         html.push_str("</div>");
 
         // Config summary
-        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
-        html.push_str(r#"<h2 class="text-lg font-bold mb-3">Configuration</h2>"#);
-        html.push_str(r#"<div class="grid grid-cols-2 gap-2 text-sm">"#);
+        html.push_str(r#"<div class="bp-card mb-4">"#);
+        html.push_str(r#"<h2 class="bp-section-title">Configuration</h2>"#);
+        html.push_str(r#"<div class="grid grid-cols-2 gap-2" style="font-size:0.95rem">"#);
         let _ = write!(
             html,
-            r#"<div class="text-gray-400">Time threshold:</div><div>&lt; {}s remaining</div>"#,
+            r#"<div class="bp-config-label">Time threshold:</div><div class="bp-config-value">&lt; {}s remaining</div>"#,
             self.base.config.tailend.time_threshold_secs
         );
         let _ = write!(
             html,
-            r#"<div class="text-gray-400">Ask threshold:</div><div>&ge; {}</div>"#,
+            r#"<div class="bp-config-label">Ask threshold:</div><div class="bp-config-value">&ge; {}</div>"#,
             self.base.config.tailend.ask_threshold
         );
         html.push_str("</div></div>");
@@ -564,25 +554,23 @@ impl TailEndDashboard {
             let mut markets_by_time: Vec<_> = active_markets.values().collect();
             markets_by_time.sort_by_key(|m| m.market.end_date);
 
-            html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+            html.push_str(r#"<div class="bp-card mb-4">"#);
             let _ = write!(
                 html,
-                r#"<h2 class="text-lg font-bold mb-3">Active Markets ({})</h2>"#,
+                r#"<h2 class="bp-section-title">Active Markets ({})</h2>"#,
                 markets_by_time.len()
             );
 
             if markets_by_time.is_empty() {
-                html.push_str(r#"<p class="text-gray-500">No active markets</p>"#);
+                html.push_str(r#"<p class="bp-text-muted">No active markets</p>"#);
             } else {
-                html.push_str(
-                    r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
-                );
-                html.push_str("<th class=\"text-left py-1\">Market</th>");
-                html.push_str("<th class=\"text-right py-1\">UP</th>");
-                html.push_str("<th class=\"text-right py-1\">DOWN</th>");
-                html.push_str("<th class=\"text-right py-1\">Fee</th>");
-                html.push_str("<th class=\"text-right py-1\">Net</th>");
-                html.push_str("<th class=\"text-right py-1\">Time Left</th>");
+                html.push_str(r#"<table class="bp-table"><thead><tr>"#);
+                html.push_str("<th class=\"text-left\">Market</th>");
+                html.push_str("<th class=\"text-right\">UP</th>");
+                html.push_str("<th class=\"text-right\">DOWN</th>");
+                html.push_str("<th class=\"text-right\">Fee</th>");
+                html.push_str("<th class=\"text-right\">Net</th>");
+                html.push_str("<th class=\"text-right\">Time Left</th>");
                 html.push_str("</tr></thead><tbody>");
 
                 for mwr in &markets_by_time {
@@ -626,7 +614,7 @@ impl TailEndDashboard {
 
                     let _ = write!(
                         html,
-                        r#"<tr class="border-b border-gray-800"><td class="py-1">{coin} Up/Down</td><td class="text-right py-1">{up}</td><td class="text-right py-1">{down}</td><td class="text-right py-1">{fee}</td><td class="text-right py-1">{net}</td><td class="text-right py-1">{time}</td></tr>"#,
+                        r#"<tr><td>{coin} Up/Down</td><td class="text-right">{up}</td><td class="text-right">{down}</td><td class="text-right">{fee}</td><td class="text-right">{net}</td><td class="text-right">{time}</td></tr>"#,
                         coin = escape_html(&mwr.coin),
                         up = up_price,
                         down = down_price,
@@ -650,24 +638,22 @@ impl TailEndDashboard {
             let mut eligible: Vec<_> = active_markets.values().collect();
             eligible.sort_by(|a, b| a.coin.cmp(&b.coin));
 
-            html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
+            html.push_str(r#"<div class="bp-card mb-4">"#);
             let _ = write!(
                 html,
-                r#"<h2 class="text-lg font-bold mb-3">Market Confidence ({})</h2>"#,
+                r#"<h2 class="bp-section-title">Market Confidence ({})</h2>"#,
                 eligible.len()
             );
 
             if eligible.is_empty() {
-                html.push_str(r#"<p class="text-gray-500">No active markets</p>"#);
+                html.push_str(r#"<p class="bp-text-muted">No active markets</p>"#);
             } else {
-                html.push_str(
-                    r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
-                );
-                html.push_str("<th class=\"text-left py-1\">Coin</th>");
-                html.push_str("<th class=\"text-right py-1\">Time Left</th>");
-                html.push_str("<th class=\"text-right py-1\">Ask</th>");
-                html.push_str("<th class=\"text-right py-1\">Confidence</th>");
-                html.push_str("<th class=\"text-right py-1\">Quality</th>");
+                html.push_str(r#"<table class="bp-table"><thead><tr>"#);
+                html.push_str("<th class=\"text-left\">Coin</th>");
+                html.push_str("<th class=\"text-right\">Time Left</th>");
+                html.push_str("<th class=\"text-right\">Ask</th>");
+                html.push_str("<th class=\"text-right\">Confidence</th>");
+                html.push_str("<th class=\"text-right\">Quality</th>");
                 html.push_str("</tr></thead><tbody>");
 
                 for mwr in &eligible {
@@ -676,7 +662,7 @@ impl TailEndDashboard {
                         .get(&mwr.coin)
                         .and_then(|h| h.back().map(|(_, p, _)| *p));
 
-                    let (ask_str, conf_str, conf_class) = match current_price {
+                    let (ask_str, conf_str, conf_style) = match current_price {
                         Some(cp) => {
                             let prediction = mwr.predict_winner(cp);
                             let token_id = match prediction {
@@ -694,19 +680,19 @@ impl TailEndDashboard {
                                     let confidence =
                                         mwr.get_confidence(cp, market_price, time_remaining);
                                     let pct = confidence * Decimal::new(100, 0);
-                                    let cls = if confidence >= Decimal::new(90, 2) {
-                                        "text-green-400"
+                                    let style = if confidence >= Decimal::new(90, 2) {
+                                        "color:var(--color-enabled)"
                                     } else if confidence >= Decimal::new(70, 2) {
-                                        "text-yellow-400"
+                                        "color:var(--color-warning)"
                                     } else {
-                                        "text-gray-400"
+                                        "color:var(--text-secondary)"
                                     };
-                                    (ask_display, format!("{:.1}%", pct), cls)
+                                    (ask_display, format!("{:.1}%", pct), style)
                                 }
-                                None => (ask_display, "-".to_string(), "text-gray-400"),
+                                None => (ask_display, "-".to_string(), "color:var(--text-secondary)"),
                             }
                         }
-                        None => ("-".to_string(), "-".to_string(), "text-gray-400"),
+                        None => ("-".to_string(), "-".to_string(), "color:var(--text-secondary)"),
                     };
 
                     let quality_factor =
@@ -720,11 +706,11 @@ impl TailEndDashboard {
 
                     let _ = write!(
                         html,
-                        r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="text-right py-1">{time}s</td><td class="text-right py-1">{ask}</td><td class="text-right py-1 {conf_class}">{conf}</td><td class="text-right py-1">{qlabel} ({qfactor:.0}%)</td></tr>"#,
+                        r#"<tr><td>{coin}</td><td class="text-right">{time}s</td><td class="text-right">{ask}</td><td class="text-right" style="{conf_style}">{conf}</td><td class="text-right">{qlabel} ({qfactor:.0}%)</td></tr>"#,
                         coin = escape_html(&mwr.coin),
                         time = time_remaining,
                         ask = ask_str,
-                        conf_class = conf_class,
+                        conf_style = conf_style,
                         conf = conf_str,
                         qlabel = quality_label,
                         qfactor = quality_factor,
@@ -781,28 +767,28 @@ impl TwoSidedDashboard {
 
         // Header with back link
         html.push_str(r#"<div class="mb-4">"#);
-        html.push_str(r#"<a href="/strategy/crypto-arb" class="text-blue-400 hover:underline">&larr; Back to Overview</a>"#);
-        html.push_str(r#"<h1 class="text-xl font-bold mt-2">TwoSided Mode</h1>"#);
+        html.push_str(r#"<a href="/strategy/crypto-arb" class="bp-back-link">&larr; Back to Overview</a>"#);
+        html.push_str(r#"<h1 class="bp-page-title mt-2">TwoSided Mode</h1>"#);
 
         let status = if self.base.config.twosided.enabled {
-            r#"<span class="text-green-400">Enabled</span>"#
+            r#"<span style="color:var(--color-enabled)">Enabled</span>"#
         } else {
-            r#"<span class="text-gray-500">Disabled</span>"#
+            r#"<span class="bp-text-muted">Disabled</span>"#
         };
         let _ = write!(
             html,
-            r#"<p class="text-sm text-gray-400">Status: {}</p>"#,
+            r#"<p class="bp-text-secondary" style="font-size:0.95rem">Status: {}</p>"#,
             status
         );
         html.push_str("</div>");
 
         // Config summary
-        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
-        html.push_str(r#"<h2 class="text-lg font-bold mb-3">Configuration</h2>"#);
-        html.push_str(r#"<div class="grid grid-cols-2 gap-2 text-sm">"#);
+        html.push_str(r#"<div class="bp-card mb-4">"#);
+        html.push_str(r#"<h2 class="bp-section-title">Configuration</h2>"#);
+        html.push_str(r#"<div class="grid grid-cols-2 gap-2" style="font-size:0.95rem">"#);
         let _ = write!(
             html,
-            r#"<div class="text-gray-400">Combined threshold:</div><div>&lt; {} (both outcomes)</div>"#,
+            r#"<div class="bp-config-label">Combined threshold:</div><div class="bp-config-value">&lt; {} (both outcomes)</div>"#,
             self.base.config.twosided.combined_threshold
         );
         html.push_str("</div></div>");
@@ -811,8 +797,8 @@ impl TwoSidedDashboard {
         render_reference_prices(&self.base, &mut html).await;
 
         // Two-sided opportunities (markets where both asks sum < threshold)
-        html.push_str(r#"<div class="bg-gray-900 rounded-lg p-4 mb-4">"#);
-        html.push_str(r#"<h2 class="text-lg font-bold mb-3">Current Opportunities</h2>"#);
+        html.push_str(r#"<div class="bp-card mb-4">"#);
+        html.push_str(r#"<h2 class="bp-section-title">Current Opportunities</h2>"#);
 
         let active_markets = self.base.active_markets.read().await;
         let cached_asks = self.base.cached_asks.read().await;
@@ -833,23 +819,21 @@ impl TwoSidedDashboard {
             .collect();
 
         if opportunities.is_empty() {
-            html.push_str(r#"<p class="text-gray-500">No two-sided opportunities found</p>"#);
+            html.push_str(r#"<p class="bp-text-muted">No two-sided opportunities found</p>"#);
         } else {
-            html.push_str(
-                r#"<table class="w-full text-sm"><thead><tr class="text-gray-400 border-b border-gray-800">"#,
-            );
-            html.push_str("<th class=\"text-left py-1\">Market</th>");
-            html.push_str("<th class=\"text-right py-1\">UP Ask</th>");
-            html.push_str("<th class=\"text-right py-1\">DOWN Ask</th>");
-            html.push_str("<th class=\"text-right py-1\">Combined</th>");
-            html.push_str("<th class=\"text-right py-1\">Edge</th>");
+            html.push_str(r#"<table class="bp-table"><thead><tr>"#);
+            html.push_str("<th class=\"text-left\">Market</th>");
+            html.push_str("<th class=\"text-right\">UP Ask</th>");
+            html.push_str("<th class=\"text-right\">DOWN Ask</th>");
+            html.push_str("<th class=\"text-right\">Combined</th>");
+            html.push_str("<th class=\"text-right\">Edge</th>");
             html.push_str("</tr></thead><tbody>");
 
             for (mwr, up_ask, down_ask, combined) in &opportunities {
                 let edge = Decimal::ONE - *combined;
                 let _ = write!(
                     html,
-                    r#"<tr class="border-b border-gray-800"><td class="py-1">{coin}</td><td class="text-right py-1">{up:.2}</td><td class="text-right py-1">{down:.2}</td><td class="text-right py-1">{combined:.2}</td><td class="text-right py-1 pnl-positive">{edge:.2}</td></tr>"#,
+                    r#"<tr><td>{coin}</td><td class="text-right">{up:.2}</td><td class="text-right">{down:.2}</td><td class="text-right">{combined:.2}</td><td class="text-right bp-profit">{edge:.2}</td></tr>"#,
                     coin = escape_html(&mwr.coin),
                     up = up_ask,
                     down = down_ask,

@@ -1,37 +1,37 @@
 {% extends "base.html" %}
 {% block content %}
-<h1 class="text-2xl font-bold mb-6">Overview</h1>
+<h1 class="bp-page-title">Overview</h1>
 
 <div hx-ext="sse" sse-connect="/events/stream">
   <div id="pnl-summary" sse-swap="pnl-update" hx-swap="innerHTML">
     <div class="grid grid-cols-2 gap-4">
-      <div class="bg-gray-900 rounded p-4">
-        <div class="text-gray-400 text-sm">Unrealized PnL</div>
-        <div class="text-xl font-bold {{ pnl_class }}">{{ total_unrealized_pnl }} USDC</div>
+      <div class="bp-card">
+        <div class="bp-metric-label">Unrealized PnL</div>
+        <div class="bp-metric-value {{ pnl_class }}">{{ total_unrealized_pnl }} USDC</div>
       </div>
-      <div class="bg-gray-900 rounded p-4">
-        <div class="text-gray-400 text-sm">Available USDC</div>
-        <div class="text-xl font-bold">{{ available_usdc }}</div>
+      <div class="bp-card">
+        <div class="bp-metric-label">Available USDC</div>
+        <div class="bp-metric-value">{{ available_usdc }}</div>
       </div>
     </div>
   </div>
 
   <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
-    <div class="bg-gray-900 rounded p-4">
-      <div class="text-gray-400 text-sm">Strategies</div>
-      <div class="text-xl font-bold">{{ strategy_count }}</div>
+    <div class="bp-card">
+      <div class="bp-metric-label">Strategies</div>
+      <div class="bp-metric-value">{{ strategy_count }}</div>
     </div>
-    <div class="bg-gray-900 rounded p-4">
-      <div class="text-gray-400 text-sm">Open Positions</div>
-      <div class="text-xl font-bold">{{ position_count }}</div>
+    <div class="bp-card">
+      <div class="bp-metric-label">Open Positions</div>
+      <div class="bp-metric-value">{{ position_count }}</div>
     </div>
-    <div class="bg-gray-900 rounded p-4">
-      <div class="text-gray-400 text-sm">Open Orders</div>
-      <div class="text-xl font-bold">{{ order_count }}</div>
+    <div class="bp-card">
+      <div class="bp-metric-label">Open Orders</div>
+      <div class="bp-metric-value">{{ order_count }}</div>
     </div>
-    <div class="bg-gray-900 rounded p-4">
-      <div class="text-gray-400 text-sm">Locked USDC</div>
-      <div class="text-xl font-bold">{{ locked_usdc }}</div>
+    <div class="bp-card">
+      <div class="bp-metric-label">Locked USDC</div>
+      <div class="bp-metric-value">{{ locked_usdc }}</div>
     </div>
   </div>
 </div>

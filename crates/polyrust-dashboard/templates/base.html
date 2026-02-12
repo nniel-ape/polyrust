@@ -8,23 +8,217 @@
   <script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js" integrity="sha384-fw+eTlCc7suMV/1w/7fr2/PmwElUIt5i82bi+qTiLXvjRXZ2/FkiTNA/w0MhXnGI" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
   <style>
-    body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-    .pnl-positive { color: #16a34a; }
-    .pnl-negative { color: #dc2626; }
+    :root {
+      --bg-body: #080808;
+      --bg-card: #0f0f0f;
+      --bg-nav: #0a0a0a;
+      --border-color: #1a1a1a;
+      --border-width: 1.5px;
+      --font-heading: "Times New Roman", Times, Georgia, serif;
+      --font-data: "Courier New", Courier, ui-monospace, monospace;
+      --text-primary: #e0e0e0;
+      --text-secondary: #808080;
+      --text-muted: #505050;
+      --color-profit: #00c853;
+      --color-loss: #d50000;
+      --color-interactive: #2979ff;
+      --color-warning: #ffd600;
+      --color-enabled: #00c853;
+      --dot-color: #1a1a1a;
+      --dot-spacing: 20px;
+    }
+
+    body {
+      font-family: var(--font-data);
+      background: var(--bg-body);
+      color: var(--text-primary);
+    }
+
+    /* --- Dot-grid background on main content --- */
+    .bp-grid-bg {
+      background-image: radial-gradient(circle, var(--dot-color) 1px, transparent 1px);
+      background-size: var(--dot-spacing) var(--dot-spacing);
+    }
+
+    /* --- Navigation --- */
+    .bp-nav {
+      background: var(--bg-nav);
+      border-bottom: var(--border-width) solid var(--border-color);
+    }
+    .bp-nav-brand {
+      font-family: var(--font-heading);
+      font-size: 1.35rem;
+      letter-spacing: 0.05em;
+      color: var(--text-primary);
+      text-transform: uppercase;
+    }
+    .bp-nav-link {
+      font-family: var(--font-heading);
+      font-size: 0.95rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      text-decoration: none;
+      padding: 0 0.75rem;
+      border-right: var(--border-width) solid var(--border-color);
+      transition: color 0.15s;
+    }
+    .bp-nav-link:last-child { border-right: none; }
+    .bp-nav-link:hover { color: var(--text-primary); }
+    .bp-nav-link--strategy {
+      color: var(--color-interactive);
+    }
+    .bp-nav-link--strategy:hover { color: #64b5f6; }
+
+    /* --- Cards --- */
+    .bp-card {
+      background: var(--bg-card);
+      border: var(--border-width) solid var(--border-color);
+      padding: 1rem;
+    }
+
+    /* --- Section titles --- */
+    .bp-section-title {
+      font-family: var(--font-heading);
+      font-size: 0.9rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      margin-bottom: 1rem;
+    }
+
+    /* --- Metric cards --- */
+    .bp-metric-label {
+      font-family: var(--font-heading);
+      font-size: 0.8rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      margin-bottom: 0.25rem;
+    }
+    .bp-metric-value {
+      font-family: var(--font-data);
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    /* --- Tables --- */
+    .bp-table {
+      width: 100%;
+      font-size: 0.95rem;
+      border-collapse: collapse;
+    }
+    .bp-table thead tr {
+      border-bottom: var(--border-width) solid var(--border-color);
+    }
+    .bp-table thead th {
+      font-family: var(--font-heading);
+      font-size: 0.8rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      padding: 0.5rem 0;
+      font-weight: 400;
+    }
+    .bp-table tbody tr {
+      border-bottom: 1px dashed var(--border-color);
+    }
+    .bp-table tbody tr:last-child { border-bottom: none; }
+    .bp-table tbody td {
+      padding: 0.4rem 0;
+      font-family: var(--font-data);
+    }
+
+    /* --- Accent colors --- */
+    .bp-profit { color: var(--color-profit); }
+    .bp-loss { color: var(--color-loss); }
+
+
+    /* --- Badges --- */
+    .bp-badge {
+      display: inline-block;
+      font-family: var(--font-data);
+      font-size: 0.9rem;
+      padding: 0.15rem 0.5rem;
+      border: var(--border-width) solid var(--border-color);
+      color: var(--text-secondary);
+    }
+
+    /* --- Mode cards (overview dashboard) --- */
+    .bp-mode-card {
+      display: block;
+      background: var(--bg-card);
+      border: var(--border-width) solid var(--border-color);
+      padding: 0.75rem 1rem;
+      text-decoration: none;
+      color: inherit;
+      transition: border-color 0.15s;
+    }
+    .bp-mode-card:hover {
+      border-color: var(--text-secondary);
+    }
+    .bp-mode-card-title {
+      font-family: var(--font-heading);
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    /* --- Back link --- */
+    .bp-back-link {
+      font-family: var(--font-heading);
+      font-size: 0.9rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--color-interactive);
+      text-decoration: none;
+    }
+    .bp-back-link:hover { text-decoration: underline; }
+
+    /* --- Page title --- */
+    .bp-page-title {
+      font-family: var(--font-heading);
+      font-size: 1.75rem;
+      font-weight: 400;
+      letter-spacing: 0.02em;
+      color: var(--text-primary);
+      margin-bottom: 1.5rem;
+    }
+
+    /* --- Config grid labels --- */
+    .bp-config-label {
+      font-family: var(--font-heading);
+      font-size: 0.9rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+    }
+    .bp-config-value {
+      font-family: var(--font-data);
+      font-size: 0.95rem;
+      color: var(--text-primary);
+    }
+
+    /* --- Utility --- */
+    .bp-text-muted { color: var(--text-muted); }
+    .bp-text-secondary { color: var(--text-secondary); }
+    .bp-text-enabled { color: var(--color-enabled); }
+    .bp-text-warning { color: var(--color-warning); }
   </style>
 </head>
-<body class="bg-gray-950 text-gray-200 min-h-screen">
-  <nav class="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center gap-6">
-    <span class="text-lg font-bold text-white">Polyrust</span>
-    <a href="/" class="hover:text-white">Overview</a>
-    <a href="/positions" class="hover:text-white">Positions</a>
-    <a href="/trades" class="hover:text-white">Trades</a>
-    <a href="/health" class="hover:text-white">Health</a>
+<body class="min-h-screen">
+  <nav class="bp-nav px-6 py-3 flex items-center gap-1">
+    <span class="bp-nav-brand mr-4">Polyrust</span>
+    <a href="/" class="bp-nav-link">Overview</a>
+    <a href="/positions" class="bp-nav-link">Positions</a>
+    <a href="/trades" class="bp-nav-link">Trades</a>
+    <a href="/health" class="bp-nav-link">Health</a>
     {% for name in strategy_names %}
-    <a href="/strategy/{{ name }}" class="hover:text-white text-blue-400">{{ name }}</a>
+    <a href="/strategy/{{ name }}" class="bp-nav-link bp-nav-link--strategy">{{ name }}</a>
     {% endfor %}
   </nav>
-  <main class="max-w-6xl mx-auto px-6 py-8">
+  <main class="bp-grid-bg max-w-6xl mx-auto px-6 py-8">
     {% block content %}{% endblock %}
   </main>
 </body>

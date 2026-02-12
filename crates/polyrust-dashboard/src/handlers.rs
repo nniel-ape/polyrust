@@ -42,9 +42,9 @@ impl From<askama::Error> for AppError {
 
 fn pnl_class(d: Decimal) -> &'static str {
     if d.is_sign_negative() {
-        "pnl-negative"
+        "bp-loss"
     } else {
-        "pnl-positive"
+        "bp-profit"
     }
 }
 

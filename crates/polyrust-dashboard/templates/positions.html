@@ -1,39 +1,39 @@
 {% extends "base.html" %}
 {% block content %}
-<h1 class="text-2xl font-bold mb-6">Open Positions</h1>
+<h1 class="bp-page-title">Open Positions</h1>
 
 <div hx-ext="sse" sse-connect="/events/stream">
-  <table class="w-full text-sm">
-    <thead class="text-gray-400 border-b border-gray-800">
+  <table class="bp-table">
+    <thead>
       <tr>
-        <th class="text-left py-2">ID</th>
-        <th class="text-left py-2">Market</th>
-        <th class="text-left py-2">Side</th>
-        <th class="text-right py-2">Entry</th>
-        <th class="text-right py-2">Current</th>
-        <th class="text-right py-2">Size</th>
-        <th class="text-right py-2">PnL</th>
-        <th class="text-left py-2">Strategy</th>
+        <th class="text-left">ID</th>
+        <th class="text-left">Market</th>
+        <th class="text-left">Side</th>
+        <th class="text-right">Entry</th>
+        <th class="text-right">Current</th>
+        <th class="text-right">Size</th>
+        <th class="text-right">PnL</th>
+        <th class="text-left">Strategy</th>
       </tr>
     </thead>
     <tbody id="positions-body">
       {% for pos in positions %}
-      <tr class="border-b border-gray-800/50">
-        <td class="py-2 font-mono text-xs">{{ pos.id_short }}</td>
-        <td class="py-2">{{ pos.market_id_short }}</td>
-        <td class="py-2">{{ pos.side }}</td>
-        <td class="py-2 text-right">{{ pos.entry_price }}</td>
-        <td class="py-2 text-right">{{ pos.current_price }}</td>
-        <td class="py-2 text-right">{{ pos.size }}</td>
-        <td class="py-2 text-right {{ pos.pnl_class }}">{{ pos.unrealized_pnl }}</td>
-        <td class="py-2">{{ pos.strategy_name }}</td>
+      <tr>
+        <td class="text-xs">{{ pos.id_short }}</td>
+        <td>{{ pos.market_id_short }}</td>
+        <td>{{ pos.side }}</td>
+        <td class="text-right">{{ pos.entry_price }}</td>
+        <td class="text-right">{{ pos.current_price }}</td>
+        <td class="text-right">{{ pos.size }}</td>
+        <td class="text-right {{ pos.pnl_class }}">{{ pos.unrealized_pnl }}</td>
+        <td>{{ pos.strategy_name }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
 
   {% if positions.is_empty() %}
-  <p class="text-gray-500 mt-4">No open positions.</p>
+  <p class="bp-text-muted mt-4">No open positions.</p>
   {% endif %}
 </div>
 {% endblock %}
