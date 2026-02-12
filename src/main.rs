@@ -229,6 +229,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mut engine = builder.build().await?;
 
+    // Collect background task handles for clean shutdown
+    let mut bg_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
     // Start auto-claim monitor if enabled
     if config.auto_claim.enabled {
         info!(
@@ -241,11 +244,11 @@ async fn main() -> anyhow::Result<()> {
             engine.execution(),
             engine.context().clone(),
         ));
-        tokio::spawn(async move {
+        bg_handles.push(tokio::spawn(async move {
             if let Err(e) = claim_monitor.run().await {
                 error!("ClaimMonitor task failed: {e}");
             }
-        });
+        }));
     } else {
         info!("Auto-claim disabled");
     }
@@ -264,47 +267,47 @@ async fn main() -> anyhow::Result<()> {
     let price_bus = event_bus.clone();
     let discovery_bus = event_bus.clone();
 
-    tokio::spawn(async move {
+    bg_handles.push(tokio::spawn(async move {
         if let Err(e) = clob_feed.start(clob_bus).await {
             error!("CLOB feed failed to start: {e}");
         }
-    });
+    }));
 
-    tokio::spawn(async move {
+    bg_handles.push(tokio::spawn(async move {
         if let Err(e) = price_feed.start(price_bus).await {
             error!("price feed failed to start: {e}");
         }
-    });
+    }));
 
-    tokio::spawn(async move {
+    bg_handles.push(tokio::spawn(async move {
         if let Err(e) = discovery_feed.start(discovery_bus).await {
             error!("discovery feed failed to start: {e}");
         }
-    });
+    }));
 
     // Start direct Binance feed (spot + futures) alongside RTDS
     let mut binance_feed = BinanceFeed::new(arb_config.coins.clone());
     let binance_bus = event_bus.clone();
-    tokio::spawn(async move {
+    bg_handles.push(tokio::spawn(async move {
         if let Err(e) = binance_feed.start(binance_bus).await {
             error!("Binance feed failed to start: {e}");
         }
-    });
+    }));
 
     // Start Coinbase feed for cross-exchange price diversity
     let mut coinbase_feed = polyrust_market::CoinbaseFeed::new(arb_config.coins.clone());
     let coinbase_bus = event_bus.clone();
-    tokio::spawn(async move {
+    bg_handles.push(tokio::spawn(async move {
         if let Err(e) = coinbase_feed.start(coinbase_bus).await {
             error!("Coinbase feed failed to start: {e}");
         }
-    });
+    }));
 
     // Start trade persistence task
     let persistence_store = Arc::clone(&store);
     let persistence_bus = event_bus.clone();
     let persistence_context = engine.context().clone();
-    tokio::spawn(async move {
+    bg_handles.push(tokio::spawn(async move {
         let mut rx = persistence_bus.subscribe();
 
         loop {
@@ -359,24 +362,37 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-    });
+    }));
 
     // Start dashboard if enabled
     let dashboard_config = engine.config().dashboard.clone();
     if dashboard_config.enabled {
         let dashboard = Dashboard::new(engine.context().clone(), Arc::clone(&store), event_bus);
-        tokio::spawn(async move {
+        bg_handles.push(tokio::spawn(async move {
             if let Err(e) = dashboard
                 .serve(&dashboard_config.host, dashboard_config.port)
                 .await
             {
                 error!("dashboard error: {e}");
             }
-        });
+        }));
     }
 
     // Run engine (blocks until Ctrl+C)
     engine.run().await?;
+
+    // Abort all background tasks for clean shutdown
+    info!(
+        tasks = bg_handles.len(),
+        "Aborting background tasks"
+    );
+    for handle in &bg_handles {
+        handle.abort();
+    }
+    // Give tasks a brief window to finish cleanup
+    for handle in bg_handles {
+        let _ = handle.await;
+    }
 
     info!("polyrust shutdown complete");
     Ok(())
