@@ -387,13 +387,23 @@ impl RelayerClient {
             )));
         }
 
-        let submit_resp: SubmitResponse = resp
-            .json()
+        let body_text = resp
+            .text()
             .await
-            .map_err(|e| PolyError::Execution(format!("Failed to parse submit response: {e}")))?;
+            .map_err(|e| PolyError::Execution(format!("Failed to read submit response body: {e}")))?;
+
+        debug!(body = %body_text, "Relayer /submit raw response");
+
+        let submit_resp: SubmitResponse = serde_json::from_str(&body_text).map_err(|e| {
+            PolyError::Execution(format!(
+                "Failed to parse submit response: {e} — raw body: {body_text}"
+            ))
+        })?;
 
         let tx_id = submit_resp.transaction_id.ok_or_else(|| {
-            PolyError::Execution("Relayer submit response missing transaction_id".into())
+            PolyError::Execution(format!(
+                "Relayer submit response missing transaction_id — raw body: {body_text}"
+            ))
         })?;
 
         let state = submit_resp.state.unwrap_or_else(|| "unknown".to_string());

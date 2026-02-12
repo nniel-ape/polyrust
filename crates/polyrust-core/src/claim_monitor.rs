@@ -327,9 +327,15 @@ impl ClaimMonitor {
         to_remove.clear();
 
         // ── Phase 2: Check flush triggers ──
+        // Only consider claims that have had enough time since resolution for
+        // the settlement transaction to finalize on-chain.
+        let settlement_delay = Duration::seconds(self.config.settlement_delay_secs as i64);
         let resolved_claims: Vec<MarketId> = pending
             .iter()
-            .filter(|(_, c)| c.resolved_at.is_some())
+            .filter(|(_, c)| {
+                c.resolved_at
+                    .is_some_and(|t| now - t >= settlement_delay)
+            })
             .map(|(mid, _)| mid.clone())
             .collect();
 

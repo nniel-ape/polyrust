@@ -239,6 +239,11 @@ pub struct AutoClaimConfig {
     /// Flush early when this many resolved claims are ready (before window elapses).
     #[serde(default = "default_batch_min_count")]
     pub batch_min_count: usize,
+    /// Minimum seconds after on-chain resolution before attempting redemption.
+    /// Prevents racing with the settlement transaction (resolution detected but
+    /// payout not yet finalized). Default 30s.
+    #[serde(default = "default_settlement_delay")]
+    pub settlement_delay_secs: u64,
 }
 
 impl Default for AutoClaimConfig {
@@ -251,6 +256,7 @@ impl Default for AutoClaimConfig {
             gas_pause_duration_secs: default_gas_pause_duration(),
             batch_window_secs: default_batch_window(),
             batch_min_count: default_batch_min_count(),
+            settlement_delay_secs: default_settlement_delay(),
         }
     }
 }
@@ -275,6 +281,9 @@ fn default_batch_window() -> u64 {
 }
 fn default_batch_min_count() -> usize {
     3
+}
+fn default_settlement_delay() -> u64 {
+    30 // 30 seconds
 }
 
 impl Config {

@@ -8,6 +8,7 @@ use alloy::signers::Signer;
 use alloy::sol;
 use alloy::sol_types::SolCall;
 use polyrust_core::error::{PolyError, Result};
+use rust_decimal::Decimal;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -356,6 +357,32 @@ impl CtfRedeemer {
         Ok(resolved)
     }
 
+    /// Get the CTF token balance for a single token ID, in shares.
+    ///
+    /// Queries on-chain `IConditionalTokens::balanceOf(safe, tokenId)` and
+    /// converts from raw 6-decimal integer to share-unit `Decimal`.
+    /// This bypasses the CLOB balance cache entirely.
+    pub async fn balance_of(&self, token_id: &str) -> Result<Decimal> {
+        let token_u256 = token_id
+            .parse::<U256>()
+            .map_err(|e| PolyError::Execution(format!("Invalid token_id '{token_id}': {e}")))?;
+        let safe = self.safe_address;
+        let raw = with_retry("balanceOf", self, || async {
+            let provider = ProviderBuilder::new().connect_http(parse_rpc_url(self.rpc_url())?);
+            let ctf = IConditionalTokens::new(CTF_ADDRESS, &provider);
+            ctf.balanceOf(safe, token_u256)
+                .call()
+                .await
+                .map_err(|e| PolyError::Execution(format!("balanceOf({token_id}) failed: {e}")))
+        })
+        .await?;
+
+        // CTF tokens use 6 decimals (matching USDC collateral precision)
+        let raw_str = raw.to_string();
+        let raw_decimal = Decimal::from_str_exact(&raw_str).unwrap_or(Decimal::MAX);
+        Ok(raw_decimal / Decimal::new(1_000_000, 0))
+    }
+
     /// Check if the Safe holds any CTF balance for the given token IDs.
     ///
     /// Returns `true` if any token has a non-zero balance.
@@ -519,8 +546,49 @@ impl CtfRedeemer {
         sig_bytes.extend_from_slice(&sig.s().to_be_bytes::<32>());
         sig_bytes.push(sig.v() as u8 + 31); // eth_sign: v in {31, 32}
 
-        // 4. Execute through Safe (with retry)
+        // 4. Pre-flight simulation (eth_call) — catch reverts before spending gas
         let sig_bytes_for_retry = Bytes::from(sig_bytes);
+        {
+            let wallet = EthereumWallet::from(self.signer.clone());
+            let provider = ProviderBuilder::new()
+                .wallet(wallet)
+                .connect_http(parse_rpc_url(self.rpc_url())?);
+            let safe = ISafe::new(safe_addr, &provider);
+            match safe
+                .execTransaction(
+                    to,
+                    U256::ZERO,
+                    data.clone(),
+                    operation,
+                    U256::ZERO,
+                    U256::ZERO,
+                    U256::ZERO,
+                    Address::ZERO,
+                    Address::ZERO,
+                    sig_bytes_for_retry.clone(),
+                )
+                .call()
+                .await
+            {
+                Ok(success) => {
+                    if !success {
+                        return Err(PolyError::Execution(
+                            "execTransaction simulation returned false — inner call would revert"
+                                .into(),
+                        ));
+                    }
+                    debug!("execTransaction simulation passed");
+                }
+                Err(e) => {
+                    let reason = extract_revert_reason(&e);
+                    return Err(PolyError::Execution(format!(
+                        "execTransaction simulation reverted: {reason}"
+                    )));
+                }
+            }
+        }
+
+        // 5. Execute through Safe (with retry)
         let receipt = with_retry("execTransaction", self, || async {
             let wallet = EthereumWallet::from(self.signer.clone());
             let provider = ProviderBuilder::new()
@@ -552,8 +620,9 @@ impl CtfRedeemer {
 
         if !receipt.status() {
             return Err(PolyError::Execution(format!(
-                "execTransaction reverted (tx: {:#x})",
-                receipt.transaction_hash
+                "execTransaction reverted (tx: {:#x}, gas_used: {})",
+                receipt.transaction_hash,
+                receipt.gas_used
             )));
         }
 
@@ -686,7 +755,7 @@ impl CtfRedeemer {
                 Ok(results)
             }
             Err(batch_err) => {
-                // Fallback: individual redemptions
+                // Fallback: individual redemptions (try all, don't bail on first failure)
                 warn!(
                     error = %batch_err,
                     count = inner_calls.len(),
@@ -694,6 +763,7 @@ impl CtfRedeemer {
                 );
                 let mut results: Vec<(String, Option<FixedBytes<32>>)> =
                     no_balance.iter().map(|c| (c.clone(), None)).collect();
+                let mut first_error: Option<PolyError> = None;
                 for (cid, target, calldata) in &inner_calls {
                     match self.execute_safe_tx(*target, calldata.clone(), 0).await {
                         Ok(tx_hash) => {
@@ -701,10 +771,15 @@ impl CtfRedeemer {
                             results.push((cid.clone(), Some(tx_hash)));
                         }
                         Err(e) => {
-                            warn!(condition_id = cid, error = %e, "Individual redemption failed");
-                            return Err(e);
+                            warn!(condition_id = cid, error = %e, "Individual redemption failed, continuing");
+                            if first_error.is_none() {
+                                first_error = Some(e);
+                            }
                         }
                     }
+                }
+                if let Some(e) = first_error {
+                    return Err(e);
                 }
                 Ok(results)
             }
@@ -790,6 +865,24 @@ fn parse_condition_id(s: &str) -> Result<FixedBytes<32>> {
 fn parse_rpc_url(s: &str) -> Result<reqwest::Url> {
     s.parse()
         .map_err(|e| PolyError::Config(format!("Invalid RPC URL '{s}': {e}")))
+}
+
+/// Extract a human-readable revert reason from an alloy contract error.
+///
+/// Common Gnosis Safe error codes: GS025 = bad signature, GS026 = nonce mismatch.
+fn extract_revert_reason(err: &alloy::contract::Error) -> String {
+    let msg = err.to_string();
+    // Try to find a Solidity-style reason string (Error(string))
+    if let Some(start) = msg.find("revert: ") {
+        return msg[start..].to_string();
+    }
+    // Try to find a raw revert data hex for known Safe error codes
+    for code in &["GS000", "GS001", "GS013", "GS025", "GS026"] {
+        if msg.contains(code) {
+            return format!("Safe error {code} (see https://github.com/safe-global/safe-smart-account/blob/main/docs/error_codes.md)");
+        }
+    }
+    msg
 }
 
 #[cfg(test)]

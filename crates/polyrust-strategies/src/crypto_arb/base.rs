@@ -15,7 +15,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use polyrust_core::prelude::*;
 use polyrust_market::ChainlinkHistoricalClient;
@@ -223,6 +223,8 @@ pub struct CryptoArbBase {
     pub rejection_cooldowns: RwLock<HashMap<MarketId, DateTime<Utc>>>,
     /// Stop-loss rejection cooldowns per token — prevents retry storms on sell failures.
     pub stop_loss_cooldowns: RwLock<HashMap<TokenId, DateTime<Utc>>>,
+    /// Stop-loss retry counts per token — used for escalating cooldowns.
+    pub stop_loss_retry_counts: RwLock<HashMap<TokenId, u32>>,
     /// Stale market cooldowns — prevents re-entry after a position was removed as stale.
     pub stale_market_cooldowns: RwLock<HashMap<MarketId, DateTime<Utc>>>,
     /// TailEnd skip-reason counters for diagnostics.
@@ -282,6 +284,7 @@ impl CryptoArbBase {
             last_status_log: RwLock::new(None),
             rejection_cooldowns: RwLock::new(HashMap::new()),
             stop_loss_cooldowns: RwLock::new(HashMap::new()),
+            stop_loss_retry_counts: RwLock::new(HashMap::new()),
             stale_market_cooldowns: RwLock::new(HashMap::new()),
             tailend_skip_stats: std::sync::Mutex::new(HashMap::new()),
             coin_nearest_expiry: RwLock::new(HashMap::new()),
@@ -1331,22 +1334,33 @@ impl CryptoArbBase {
     }
 
     /// Remove a position by token_id across all markets, returning it.
+    /// Also clears the stop-loss retry count for this token.
     pub async fn remove_position_by_token(&self, token_id: &str) -> Option<ArbitragePosition> {
-        let mut positions = self.positions.write().await;
-        let mut removed = None;
-        let mut empty_markets = Vec::new();
+        let removed = {
+            let mut positions = self.positions.write().await;
+            let mut removed = None;
+            let mut empty_markets = Vec::new();
 
-        for (market_id, pos_list) in positions.iter_mut() {
-            if let Some(idx) = pos_list.iter().position(|p| p.token_id == token_id) {
-                removed = Some(pos_list.remove(idx));
+            for (market_id, pos_list) in positions.iter_mut() {
+                if let Some(idx) = pos_list.iter().position(|p| p.token_id == token_id) {
+                    removed = Some(pos_list.remove(idx));
+                }
+                if pos_list.is_empty() {
+                    empty_markets.push(market_id.clone());
+                }
             }
-            if pos_list.is_empty() {
-                empty_markets.push(market_id.clone());
-            }
-        }
 
-        for market_id in empty_markets {
-            positions.remove(&market_id);
+            for market_id in empty_markets {
+                positions.remove(&market_id);
+            }
+
+            removed
+        };
+
+        // Clear stop-loss retry count when position is removed
+        if removed.is_some() {
+            let mut counts = self.stop_loss_retry_counts.write().await;
+            counts.remove(token_id);
         }
 
         removed
@@ -1573,43 +1587,67 @@ impl CryptoArbBase {
 
     /// Handle a rejected stop-loss sell order.
     ///
-    /// Balance/allowance failures are treated as retryable: they are often caused by
-    /// short-lived CLOB cache lag right after fills. Keep the position and retry later.
-    /// Other failures are also cooled down as transient.
+    /// Balance/allowance failures are treated as retryable with escalating cooldowns:
+    /// 5s → 15s → 30s → 60s. After 5+ consecutive failures, logs ERROR-level alert.
+    /// Other failures use the same escalation. Keep the position and retry later.
     pub async fn handle_stop_loss_rejection(
         &self,
         token_id: &TokenId,
         reason: &str,
         mode_name: &str,
     ) {
-        const BALANCE_ALLOWANCE_RETRY_COOLDOWN_SECS: u64 = 10;
-        const TRANSIENT_RETRY_COOLDOWN_SECS: u64 = 30;
-
         let mut pending_sl = self.pending_stop_loss.write().await;
         pending_sl.remove(token_id);
+        drop(pending_sl);
+
+        // Increment retry count for escalating cooldowns
+        let retry_count = {
+            let mut counts = self.stop_loss_retry_counts.write().await;
+            let count = counts.entry(token_id.clone()).or_insert(0);
+            *count += 1;
+            *count
+        };
+
+        // Escalating cooldowns: 5s → 15s → 30s → 60s
+        let cooldown_secs: u64 = match retry_count {
+            1 => 5,
+            2 => 15,
+            3 => 30,
+            _ => 60,
+        };
+
+        if retry_count >= 5 {
+            error!(
+                token_id = %token_id,
+                mode = mode_name,
+                retry_count = retry_count,
+                reason = %reason,
+                "Stop-loss sell repeatedly failing — may need manual intervention"
+            );
+        }
 
         if reason.contains("not enough balance") || reason.contains("allowance") {
             warn!(
                 token_id = %token_id,
                 mode = mode_name,
                 reason = %reason,
-                cooldown_secs = BALANCE_ALLOWANCE_RETRY_COOLDOWN_SECS,
-                "Stop-loss sell rejected (balance/allowance), keeping position and scheduling retry"
+                retry_count = retry_count,
+                cooldown_secs = cooldown_secs,
+                "Stop-loss sell rejected (balance/allowance), scheduling retry"
             );
-            drop(pending_sl);
-            self.record_stop_loss_cooldown(token_id, BALANCE_ALLOWANCE_RETRY_COOLDOWN_SECS)
-                .await;
         } else {
             warn!(
                 token_id = %token_id,
                 mode = mode_name,
                 reason = %reason,
+                retry_count = retry_count,
+                cooldown_secs = cooldown_secs,
                 "Stop-loss sell rejected (transient), cooldown applied"
             );
-            drop(pending_sl);
-            self.record_stop_loss_cooldown(token_id, TRANSIENT_RETRY_COOLDOWN_SECS)
-                .await;
         }
+
+        self.record_stop_loss_cooldown(token_id, cooldown_secs)
+            .await;
     }
 
     /// Handle a CancelFailed event for a limit order.

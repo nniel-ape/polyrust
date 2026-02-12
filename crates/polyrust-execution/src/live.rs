@@ -10,7 +10,7 @@ use polymarket_client_sdk::clob::types::{
 use polymarket_client_sdk::clob::{Client, Config as SdkConfig};
 use polymarket_client_sdk::types::{Address as SdkAddress, U256 as SdkU256};
 use rust_decimal::Decimal;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use polyrust_core::config::Config;
 use polyrust_core::error::{PolyError, Result};
@@ -18,7 +18,7 @@ use polyrust_core::types::*;
 
 use crate::ctf_redeemer::CtfRedeemer;
 use crate::relayer::RelayerClient;
-use crate::rounding::build_signable_order;
+use crate::rounding::{build_signable_order, round_down};
 use polyrust_core::execution::{RedeemRequest, RedeemResult};
 
 /// Live execution backend using rs-clob-client for real Polymarket orders.
@@ -110,7 +110,9 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
             .map_err(|e| PolyError::Sdk(format!("Failed to post order: {e}")))
     }
 
-    async fn refresh_conditional_balance_allowance(&self, token_id: SdkU256) {
+    /// Refresh the CLOB's conditional token balance/allowance cache and return
+    /// the reported balance. Returns `None` if the query fails.
+    async fn refresh_conditional_balance_allowance(&self, token_id: SdkU256) -> Option<Decimal> {
         let request = BalanceAllowanceRequest::builder()
             .asset_type(AssetType::Conditional)
             .token_id(token_id)
@@ -127,12 +129,24 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
 
         match self.client.balance_allowance(request).await {
             Ok(resp) => {
-                debug!(
+                let allowance_details: Vec<String> = resp
+                    .allowances
+                    .iter()
+                    .map(|(target, amount)| format!("{target}={amount}"))
+                    .collect();
+                warn!(
                     token_id = %token_id,
                     conditional_balance = %resp.balance,
-                    allowance_targets = resp.allowances.len(),
-                    "Conditional balance/allowance snapshot refreshed"
+                    allowances = %allowance_details.join(", "),
+                    "Conditional balance/allowance snapshot"
                 );
+                if resp.balance.is_zero() {
+                    error!(
+                        token_id = %token_id,
+                        "CLOB reports ZERO conditional token balance — sells will fail"
+                    );
+                }
+                Some(resp.balance)
             }
             Err(e) => {
                 warn!(
@@ -140,6 +154,7 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
                     error = %e,
                     "Failed to read conditional balance/allowance"
                 );
+                None
             }
         }
     }
@@ -442,11 +457,70 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
             .unwrap_or(order.fee_rate_bps);
 
         let price = order.price;
-        let size = order.size;
+        let mut size = order.size;
 
         if order.side == OrderSide::Sell {
-            // Fresh fills may not be reflected in CLOB cache immediately; refresh before sell.
-            self.refresh_conditional_balance_allowance(token_id).await;
+            // 1. Refresh CLOB balance cache and get reported balance
+            let clob_balance = self.refresh_conditional_balance_allowance(token_id).await;
+
+            // 2. On-chain balance check — bypasses CLOB cache entirely
+            let onchain_shares = if let Some(redeemer) = &self.ctf_redeemer {
+                match redeemer.balance_of(&order.token_id).await {
+                    Ok(shares) => Some(shares),
+                    Err(e) => {
+                        warn!(
+                            token_id = %order.token_id,
+                            error = %e,
+                            "On-chain balance check failed (proceeding with CLOB balance only)"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            warn!(
+                token_id = %order.token_id,
+                clob_balance = ?clob_balance,
+                onchain_shares = ?onchain_shares,
+                sell_size = %size,
+                "Pre-sell balance diagnostic"
+            );
+
+            // 3. If on-chain says 0, settlement hasn't happened — skip sell
+            if let Some(onchain) = onchain_shares
+                && onchain.is_zero()
+            {
+                return Err(PolyError::Execution(format!(
+                    "No on-chain CTF balance for token {} — settlement pending",
+                    order.token_id
+                )));
+            }
+
+            // 4. Clamp sell size to actual balance (handles fee deduction from tokens)
+            let actual = onchain_shares.or(clob_balance).unwrap_or(Decimal::ZERO);
+            if actual > Decimal::ZERO && actual < size {
+                warn!(
+                    token_id = %order.token_id,
+                    original_size = %size,
+                    clamped_size = %actual,
+                    "Clamping sell size to actual token balance (fee deduction)"
+                );
+                size = round_down(actual, 2);
+            }
+
+            // 5. If CLOB says 0 but on-chain has tokens, wait for cache sync
+            if clob_balance == Some(Decimal::ZERO)
+                && onchain_shares.is_some_and(|s| s > Decimal::ZERO)
+            {
+                warn!(
+                    token_id = %order.token_id,
+                    "CLOB cache stale: on-chain has tokens but CLOB says 0, waiting 2s"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                self.refresh_conditional_balance_allowance(token_id).await;
+            }
         }
 
         let response = match self
@@ -471,13 +545,49 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
                     side = ?order.side,
                     order_type = ?order.order_type,
                     error = %e,
-                    "Sell rejected with balance/allowance; refreshing and retrying once"
+                    "Sell rejected with balance/allowance; re-querying and retrying once"
                 );
+
+                // Wait for CLOB to settle
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                // Re-query on-chain balance and re-clamp size
+                let mut retry_size = size;
+                if let Some(redeemer) = &self.ctf_redeemer {
+                    match redeemer.balance_of(&order.token_id).await {
+                        Ok(onchain) if onchain > Decimal::ZERO && onchain < retry_size => {
+                            let clamped = round_down(onchain, 2);
+                            warn!(
+                                token_id = %order.token_id,
+                                original_size = %retry_size,
+                                onchain_balance = %onchain,
+                                clamped_size = %clamped,
+                                "Retry: re-clamping sell size to on-chain balance"
+                            );
+                            retry_size = clamped;
+                        }
+                        Ok(onchain) if onchain.is_zero() => {
+                            return Err(PolyError::Execution(format!(
+                                "Retry: no on-chain CTF balance for token {} — settlement pending",
+                                order.token_id
+                            )));
+                        }
+                        Err(e) => {
+                            warn!(
+                                token_id = %order.token_id,
+                                error = %e,
+                                "Retry: on-chain balance check failed, proceeding with original size"
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+
                 self.refresh_conditional_balance_allowance(token_id).await;
                 self.sign_and_post_order(
                     token_id,
                     price,
-                    size,
+                    retry_size,
                     order.side,
                     order.order_type,
                     order.tick_size,

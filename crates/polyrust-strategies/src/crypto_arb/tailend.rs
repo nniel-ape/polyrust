@@ -684,6 +684,24 @@ impl TailEndStrategy {
                 continue;
             }
 
+            // Skip sells too soon after entry — CLOB needs time to settle buy
+            // before conditional tokens are available for selling
+            let seconds_since_entry = self
+                .base
+                .event_time()
+                .await
+                .signed_duration_since(pos.entry_time)
+                .num_seconds();
+            if seconds_since_entry < self.base.config.tailend.min_sell_delay_secs {
+                debug!(
+                    market = %pos.market_id,
+                    seconds_since_entry = seconds_since_entry,
+                    min_sell_delay = self.base.config.tailend.min_sell_delay_secs,
+                    "Skipping sell: settlement delay not elapsed"
+                );
+                continue;
+            }
+
             if let Some((action, exit_price, trigger)) = self
                 .base
                 .check_stop_loss(&pos, snapshot, self.base.event_time().await)

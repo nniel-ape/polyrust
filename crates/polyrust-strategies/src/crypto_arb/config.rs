@@ -110,6 +110,10 @@ pub struct TailEndConfig {
     /// Maximum staleness in seconds for required feed sources.
     /// Entries are gated if any required feed is staler than this. Default: 30.
     pub feed_stale_secs: i64,
+    /// Minimum seconds after entry before any sell (stop-loss, post-entry exit)
+    /// is attempted. The CLOB needs time to settle a buy before conditional
+    /// tokens are available for selling. Default: 15.
+    pub min_sell_delay_secs: i64,
 }
 
 fn default_min_sustained_ticks() -> usize {
@@ -147,6 +151,7 @@ impl Default for TailEndConfig {
             min_sources: 2,
             max_dispersion_bps: Decimal::new(50, 0),
             feed_stale_secs: 30,
+            min_sell_delay_secs: 15,
         }
     }
 }
