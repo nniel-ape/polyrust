@@ -584,6 +584,7 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
                 }
 
                 self.refresh_conditional_balance_allowance(token_id).await;
+                size = retry_size; // propagate clamped size to OrderResult
                 self.sign_and_post_order(
                     token_id,
                     price,

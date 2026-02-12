@@ -491,10 +491,18 @@ impl TailEndStrategy {
                 continue;
             }
 
-            // Get market info for order construction
+            // Get market info for order construction — required for pending tracking
             let market_info = {
                 let markets = self.base.active_markets.read().await;
                 markets.get(&market_id).cloned()
+            };
+            let market_info = match market_info {
+                Some(m) => m,
+                None => {
+                    warn!(market = %market_id, "Skipping order: no market metadata");
+                    self.base.release_reservation(&market_id).await;
+                    continue;
+                }
             };
 
             let opp = match self.evaluate_opportunity(&market_id, effective_price, ctx).await {
@@ -568,16 +576,11 @@ impl TailEndStrategy {
             // TailEnd uses GTC orders with aggressive pricing (above ask).
             // Taker fee at these prices (0.90-0.99) is negligible (0.06-0.57%).
             // Tick-aware pricing: step N ticks above the best ask using the market's tick_size.
-            let tick_size = market_info
-                .as_ref()
-                .map(|m| m.market.tick_size)
-                .unwrap_or(Decimal::new(1, 2));
+            let tick_size = market_info.market.tick_size;
             let tick_steps = Decimal::from(self.base.config.order.tick_steps_above_ask);
             let aggressive_price = (opp.buy_price + tick_size * tick_steps).min(Decimal::new(99, 2));
-            let (neg_risk, fee_rate_bps) = match &market_info {
-                Some(m) => (m.market.neg_risk, Some(m.market.fee_rate_bps)),
-                None => (false, None),
-            };
+            let neg_risk = market_info.market.neg_risk;
+            let fee_rate_bps = market_info.market.fee_rate_bps;
             let mut order = OrderRequest::new(
                 opp.token_id.clone(),
                 aggressive_price,
@@ -587,9 +590,7 @@ impl TailEndStrategy {
                 neg_risk,
             );
             order = order.with_tick_size(tick_size);
-            if let Some(fr) = fee_rate_bps {
-                order = order.with_fee_rate_bps(fr);
-            }
+            order = order.with_fee_rate_bps(fee_rate_bps);
             order = order.with_post_only(self.base.config.tailend.post_only);
 
             info!(
@@ -607,7 +608,7 @@ impl TailEndStrategy {
 
             // Consume reservation and track pending order
             self.base.consume_reservation(&market_id).await;
-            if let Some(market) = market_info {
+            {
                 let mut pending = self.base.pending_orders.write().await;
                 pending.insert(
                     opp.token_id.clone(),
@@ -615,16 +616,16 @@ impl TailEndStrategy {
                         market_id: market_id.clone(),
                         token_id: opp.token_id.clone(),
                         side: opp.outcome_to_buy,
-                        price: opp.buy_price,
+                        price: aggressive_price,
                         size,
-                        reference_price: market.reference_price,
-                        coin: market.coin.clone(),
+                        reference_price: market_info.reference_price,
+                        coin: market_info.coin.clone(),
                         order_type: OrderType::Gtc,
                         mode: ArbitrageMode::TailEnd,
                         kelly_fraction: None,
                         estimated_fee: opp.estimated_fee,
-                        tick_size: market.market.tick_size,
-                        fee_rate_bps: market.market.fee_rate_bps,
+                        tick_size,
+                        fee_rate_bps,
                     },
                 );
             }
@@ -884,6 +885,26 @@ impl Strategy for TailEndStrategy {
             }) => {
                 self.on_order_filled(order_id, token_id, *price, *size)
                     .await
+            }
+
+            Event::OrderUpdate(OrderEvent::PartiallyFilled {
+                order_id,
+                filled_size,
+                remaining_size,
+            }) => {
+                let mut limits = self.base.open_limit_orders.write().await;
+                if let Some(lo) = limits.get_mut(order_id)
+                    && lo.mode == ArbitrageMode::TailEnd
+                {
+                    lo.size = *remaining_size;
+                    info!(
+                        order_id = %order_id,
+                        filled = %filled_size,
+                        remaining = %remaining_size,
+                        "TailEnd GTC order partially filled"
+                    );
+                }
+                vec![]
             }
 
             Event::OrderUpdate(OrderEvent::Rejected {
@@ -1208,5 +1229,97 @@ mod tests {
             .evaluate_opportunity(&"market1".to_string(), dec!(51000), &ctx)
             .await;
         assert!(opp.is_none());
+    }
+
+    #[tokio::test]
+    async fn tailend_pending_order_stores_aggressive_price() {
+        let (strategy, ctx) = make_tailend_strategy(60).await;
+
+        // Set up orderbook: ask=0.94, bid=0.935, depth=100
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![polyrust_core::types::OrderbookLevel {
+                        price: dec!(0.935),
+                        size: dec!(100),
+                    }],
+                    asks: vec![polyrust_core::types::OrderbookLevel {
+                        price: dec!(0.94),
+                        size: dec!(100),
+                    }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        // Trigger entry via external price
+        let actions = strategy
+            .handle_external_price("BTC", dec!(51000), "test", &ctx)
+            .await;
+
+        // Should have produced a PlaceOrder action
+        assert!(
+            actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))),
+            "Expected PlaceOrder action"
+        );
+
+        // Verify pending order stores aggressive_price (ask + 1 tick = 0.95), not buy_price (0.94)
+        let pending = strategy.base.pending_orders.read().await;
+        let po = pending.get("token_up").expect("pending order for token_up");
+        let expected_aggressive = dec!(0.95); // 0.94 + 0.01 * 1 tick step
+        assert_eq!(
+            po.price, expected_aggressive,
+            "PendingOrder.price should be aggressive_price ({expected_aggressive}), got {}",
+            po.price
+        );
+    }
+
+    #[tokio::test]
+    async fn tailend_partially_filled_updates_limit_order_size() {
+        let (strategy, ctx) = make_tailend_strategy(60).await;
+
+        // Seed an open limit order as if a GTC was placed
+        {
+            let mut limits = strategy.base.open_limit_orders.write().await;
+            limits.insert(
+                "order123".to_string(),
+                OpenLimitOrder {
+                    order_id: "order123".to_string(),
+                    market_id: "market1".to_string(),
+                    token_id: "token_up".to_string(),
+                    side: polyrust_core::types::OutcomeSide::Up,
+                    price: dec!(0.95),
+                    size: dec!(10),
+                    reference_price: dec!(50000),
+                    coin: "BTC".to_string(),
+                    placed_at: Utc::now(),
+                    mode: ArbitrageMode::TailEnd,
+                    kelly_fraction: None,
+                    estimated_fee: dec!(0.001),
+                    tick_size: dec!(0.01),
+                    fee_rate_bps: 0,
+                    cancel_pending: false,
+                },
+            );
+        }
+
+        // Simulate a PartiallyFilled event
+        let event = Event::OrderUpdate(polyrust_core::events::OrderEvent::PartiallyFilled {
+            order_id: "order123".to_string(),
+            filled_size: dec!(4),
+            remaining_size: dec!(6),
+        });
+
+        let mut strategy_mut = strategy;
+        let actions = strategy_mut.on_event(&event, &ctx).await.unwrap();
+        assert!(actions.iter().all(|a| !matches!(a, Action::PlaceOrder(_))));
+
+        // Verify size updated to remaining
+        let limits = strategy_mut.base.open_limit_orders.read().await;
+        let lo = limits.get("order123").expect("limit order still present");
+        assert_eq!(lo.size, dec!(6), "size should be updated to remaining_size");
     }
 }

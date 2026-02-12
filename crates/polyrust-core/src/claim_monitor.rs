@@ -139,7 +139,7 @@ impl ClaimMonitor {
                     payload,
                     ..
                 }) = event
-                    && signal_type == "matched-fill"
+                    && (signal_type == "matched-fill" || signal_type == "reconciled-fill")
                     && let Some(market_id) = payload.get("market_id").and_then(|v| v.as_str())
                 {
                     let is_new = self_signals
@@ -150,7 +150,7 @@ impl ClaimMonitor {
                     if is_new {
                         info!(
                             market_id = %market_id,
-                            "Recorded matched fill for claim tracking"
+                            "Recorded {signal_type} for claim tracking"
                         );
                     }
                 }
@@ -483,5 +483,136 @@ impl ClaimMonitor {
     /// Get current pending claims count (for diagnostics/dashboard)
     pub async fn pending_count(&self) -> usize {
         self.pending.read().await.len()
+    }
+
+    /// Check if a market is tracked in traded_markets (for testing)
+    #[cfg(test)]
+    pub async fn has_traded_market(&self, market_id: &str) -> bool {
+        self.traded_markets.read().await.contains(market_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::execution::ExecutionBackend;
+    use crate::types::*;
+    use rust_decimal::Decimal;
+
+    struct MockExecution;
+
+    #[async_trait::async_trait]
+    impl ExecutionBackend for MockExecution {
+        async fn place_order(&self, _order: &OrderRequest) -> Result<OrderResult> {
+            unimplemented!()
+        }
+        async fn cancel_order(&self, _order_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        async fn cancel_all_orders(&self) -> Result<()> {
+            unimplemented!()
+        }
+        async fn get_open_orders(&self) -> Result<Vec<Order>> {
+            unimplemented!()
+        }
+        async fn get_positions(&self) -> Result<Vec<Position>> {
+            unimplemented!()
+        }
+        async fn get_balance(&self) -> Result<Decimal> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn reconciled_fill_signal_tracked_in_traded_markets() {
+        let event_bus = EventBus::new();
+        let execution: Arc<dyn ExecutionBackend> = Arc::new(MockExecution);
+        let ctx = StrategyContext::new();
+        let config = AutoClaimConfig::default();
+
+        let monitor = Arc::new(ClaimMonitor::new(config, event_bus.clone(), execution, ctx));
+
+        // Spawn just the signal listener
+        let monitor_clone = monitor.clone();
+        let mut signal_events = event_bus.subscribe_topics(&["signal"]);
+        tokio::spawn(async move {
+            while let Some(event) = signal_events.recv().await {
+                if let Event::Signal(SignalEvent {
+                    signal_type,
+                    payload,
+                    ..
+                }) = event
+                    && (signal_type == "matched-fill" || signal_type == "reconciled-fill")
+                    && let Some(market_id) = payload.get("market_id").and_then(|v| v.as_str())
+                {
+                    monitor_clone
+                        .traded_markets
+                        .write()
+                        .await
+                        .insert(market_id.to_string());
+                }
+            }
+        });
+
+        // Emit a "reconciled-fill" signal
+        event_bus.publish(Event::Signal(SignalEvent {
+            strategy_name: "crypto-arb-tailend".to_string(),
+            signal_type: "reconciled-fill".to_string(),
+            payload: serde_json::json!({ "market_id": "market_abc", "order_id": "ord1" }),
+            timestamp: Utc::now(),
+        }));
+
+        // Give the async listener time to process
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            monitor.has_traded_market("market_abc").await,
+            "reconciled-fill signal should add market_id to traded_markets"
+        );
+    }
+
+    #[tokio::test]
+    async fn matched_fill_signal_still_tracked() {
+        let event_bus = EventBus::new();
+        let execution: Arc<dyn ExecutionBackend> = Arc::new(MockExecution);
+        let ctx = StrategyContext::new();
+        let config = AutoClaimConfig::default();
+
+        let monitor = Arc::new(ClaimMonitor::new(config, event_bus.clone(), execution, ctx));
+
+        let monitor_clone = monitor.clone();
+        let mut signal_events = event_bus.subscribe_topics(&["signal"]);
+        tokio::spawn(async move {
+            while let Some(event) = signal_events.recv().await {
+                if let Event::Signal(SignalEvent {
+                    signal_type,
+                    payload,
+                    ..
+                }) = event
+                    && (signal_type == "matched-fill" || signal_type == "reconciled-fill")
+                    && let Some(market_id) = payload.get("market_id").and_then(|v| v.as_str())
+                {
+                    monitor_clone
+                        .traded_markets
+                        .write()
+                        .await
+                        .insert(market_id.to_string());
+                }
+            }
+        });
+
+        event_bus.publish(Event::Signal(SignalEvent {
+            strategy_name: "crypto-arb-tailend".to_string(),
+            signal_type: "matched-fill".to_string(),
+            payload: serde_json::json!({ "market_id": "market_xyz", "order_id": "ord2" }),
+            timestamp: Utc::now(),
+        }));
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            monitor.has_traded_market("market_xyz").await,
+            "matched-fill signal should still add market_id to traded_markets"
+        );
     }
 }

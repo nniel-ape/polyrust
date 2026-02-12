@@ -1015,6 +1015,13 @@ impl CryptoArbBase {
             "Market expired, removing from active markets"
         );
 
+        // Clean up cached asks for expired market's token IDs
+        {
+            let mut cached = self.cached_asks.write().await;
+            cached.remove(&market.market.token_ids.outcome_a);
+            cached.remove(&market.market.token_ids.outcome_b);
+        }
+
         // Clean up any stale reservation for this market
         {
             let mut reservations = self.market_reservations.write().await;
