@@ -156,7 +156,7 @@ impl Default for TailEndConfig {
             max_dispersion_bps: Decimal::new(50, 0),
             feed_stale_secs: 30,
             min_sell_delay_secs: 15,
-            min_strike_distance_pct: Decimal::new(8, 4), // 0.0008 = 0.08%
+            min_strike_distance_pct: Decimal::new(12, 4), // 0.0012 = 0.12%
         }
     }
 }

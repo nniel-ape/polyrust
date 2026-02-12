@@ -3337,7 +3337,7 @@ async fn cooldown_schedule_escalates_per_rejection_kind() {
 #[test]
 fn tailend_config_new_fields_default() {
     let config = super::config::TailEndConfig::default();
-    assert_eq!(config.min_strike_distance_pct, dec!(0.0008));
+    assert_eq!(config.min_strike_distance_pct, dec!(0.0012));
 }
 
 #[test]
@@ -3348,7 +3348,7 @@ fn tailend_config_deserialize_missing_strike_distance() {
         ask_threshold = "0.90"
     "#;
     let config: super::config::TailEndConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.min_strike_distance_pct, dec!(0.0008));
+    assert_eq!(config.min_strike_distance_pct, dec!(0.0012));
 }
 
 // ---------------------------------------------------------------------------
