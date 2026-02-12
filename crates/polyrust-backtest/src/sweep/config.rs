@@ -93,6 +93,8 @@ pub struct TailEndSweepParams {
     pub post_entry_exit_drop: Option<ParamRange>,
     /// Post-entry window seconds sweep.
     pub post_entry_window_secs: Option<IntParamRange>,
+    /// Min strike distance (crypto % from strike) sweep.
+    pub min_strike_distance_pct: Option<ParamRange>,
 }
 
 /// Sweep parameters for sizing config fields.

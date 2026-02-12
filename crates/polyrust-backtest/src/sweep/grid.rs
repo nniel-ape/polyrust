@@ -119,6 +119,11 @@ impl ParameterCombination {
                         config.tailend.post_entry_window_secs = *v as i64;
                     }
                 }
+                "tailend.min_strike_distance_pct" => {
+                    if let ParamValue::Decimal(v) = value {
+                        config.tailend.min_strike_distance_pct = *v;
+                    }
+                }
                 // Dynamic threshold params: "tailend.dynamic_thresholds.{secs}"
                 other if other.starts_with("tailend.dynamic_thresholds.") => {
                     has_threshold_params = true;
@@ -225,6 +230,16 @@ impl ParameterGrid {
             axes.push(Axis {
                 name: "tailend.post_entry_window_secs".to_string(),
                 values: range.expand().into_iter().map(ParamValue::U64).collect(),
+            });
+        }
+        if let Some(ref range) = config.tailend.min_strike_distance_pct {
+            axes.push(Axis {
+                name: "tailend.min_strike_distance_pct".to_string(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
             });
         }
 
