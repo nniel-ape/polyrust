@@ -39,14 +39,62 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+/// Writer that buffers bytes and flushes complete lines through a progress bar
+/// (via `pb.println()`) or falls back to stderr when no bar is active.
+struct PbWriter {
+    buf: Vec<u8>,
+}
+
+impl std::io::Write for PbWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(bytes);
+        // Flush each complete line
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let line = String::from_utf8_lossy(&self.buf[..pos]).to_string();
+            self.buf.drain(..=pos);
+            if let Some(pb) = polyrust_backtest::progress::active_progress_bar() {
+                pb.println(&line);
+            } else {
+                eprintln!("{line}");
+            }
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if !self.buf.is_empty() {
+            let line = String::from_utf8_lossy(&self.buf).to_string();
+            self.buf.clear();
+            if let Some(pb) = polyrust_backtest::progress::active_progress_bar() {
+                pb.println(&line);
+            } else {
+                eprint!("{line}");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// MakeWriter that creates PbWriter instances for each tracing event.
+struct PbMakeWriter;
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for PbMakeWriter {
+    type Writer = PbWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        PbWriter { buf: Vec::new() }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
+    // Initialize tracing — route output through PbMakeWriter so log lines
+    // print cleanly above any active indicatif progress bar.
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("info,polyrust=debug")),
         )
+        .with_writer(PbMakeWriter)
         .init();
 
     // Check for CLI flags
@@ -392,6 +440,7 @@ async fn fetch_markets_with_progress(
         .unwrap(),
     );
     pb.set_message("fetching");
+    let _pb_guard = polyrust_backtest::ProgressBarGuard::register(&pb);
 
     let mut tasks = tokio::task::JoinSet::new();
     let mut successful_ids: Vec<String> = Vec::new();

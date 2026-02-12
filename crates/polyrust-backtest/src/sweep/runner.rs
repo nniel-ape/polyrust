@@ -102,6 +102,7 @@ impl SweepRunner {
             .unwrap(),
         );
         pb.set_message("N/A");
+        let _pb_guard = crate::progress::ProgressBarGuard::register(&pb);
 
         let mut results: Vec<SweepResult> = Vec::with_capacity(total);
         let mut join_set: tokio::task::JoinSet<BacktestResult<SweepResult>> =

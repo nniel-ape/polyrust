@@ -310,7 +310,16 @@ impl BacktestEngine {
             self.progress_bar = Some(pb);
         }
 
+        // Route tracing output through the progress bar while it's active
+        let _pb_guard = self
+            .progress_bar
+            .as_ref()
+            .map(crate::progress::ProgressBarGuard::register);
+
         let result = self.run_with_events(&events).await;
+
+        // Drop guard before finishing bar (deregisters from global slot)
+        drop(_pb_guard);
 
         // Finish and clear bar
         if let Some(ref pb) = self.progress_bar {

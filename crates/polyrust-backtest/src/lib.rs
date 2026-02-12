@@ -2,6 +2,7 @@ pub mod config;
 pub mod data;
 pub mod engine;
 pub mod error;
+pub mod progress;
 pub mod report;
 pub mod sweep;
 
@@ -12,5 +13,6 @@ pub use data::{
 };
 pub use engine::{BacktestEngine, BacktestTrade, CloseReason, HistoricalEvent};
 pub use error::{BacktestError, BacktestResult};
+pub use progress::ProgressBarGuard;
 pub use report::BacktestReport;
 pub use sweep::{SweepConfig, SweepReport, SweepResult, SweepRunner};
