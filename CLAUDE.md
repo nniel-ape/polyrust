@@ -98,11 +98,13 @@ Real-time updates use SSE: strategies emit `"dashboard-update"` signals, the SSE
 
 ## Configuration
 
-Copy `config.example.toml` → `config.toml` and customize. Environment variable overrides use `POLY_*` prefix:
+Copy `config.example.toml` → `config.toml` and customize. Polymarket credentials are **env-only** — copy `.env.example` → `.env` and fill in values (never committed to git):
 - `POLY_PRIVATE_KEY`, `POLY_SAFE_ADDRESS` — wallet credentials
 - `POLY_BUILDER_API_KEY`, `POLY_BUILDER_API_SECRET`, `POLY_BUILDER_API_PASSPHRASE` — builder API
-- `POLY_DASHBOARD_HOST`, `POLY_DASHBOARD_PORT`, `POLY_DB_PATH`, `POLY_PAPER_TRADING` — runtime settings
 - `POLY_RPC_URLS` — comma-separated Polygon RPC endpoints for Chainlink oracle queries
+- `POLY_USE_RELAYER`, `POLY_RELAYER_URL` — gasless relayer settings
+
+Other runtime overrides via `POLY_*` env vars: `POLY_DASHBOARD_HOST`, `POLY_DASHBOARD_PORT`, `POLY_DB_PATH`, `POLY_PAPER_TRADING`.
 
 Paper mode: `[paper] enabled = true` or `POLY_PAPER_TRADING=true`
 Docker deployment: Set `POLY_DASHBOARD_HOST=0.0.0.0` in `docker-compose.yml` to allow access from host machine.

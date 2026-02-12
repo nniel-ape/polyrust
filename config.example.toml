@@ -17,26 +17,19 @@ health_check_interval_secs = 30  # Health check frequency
 reconcile_interval_secs = 15     # Order reconciliation interval (0 = disabled)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# POLYMARKET CREDENTIALS
+# POLYMARKET CREDENTIALS — env-only (see .env.example)
 # ─────────────────────────────────────────────────────────────────────────────
-
-[polymarket]
-# Credentials — set via environment variables, never commit secrets
-# private_key = ""              # POLY_PRIVATE_KEY (wallet private key)
-# safe_address = ""             # POLY_SAFE_ADDRESS (Safe multisig address)
-# builder_api_key = ""          # POLY_BUILDER_API_KEY
-# builder_api_secret = ""       # POLY_BUILDER_API_SECRET
-# builder_api_passphrase = ""   # POLY_BUILDER_API_PASSPHRASE
-
-# Polygon RPC endpoints for on-chain Chainlink oracle queries (tried in order).
-# Override via POLY_RPC_URLS environment variable (comma-separated).
-rpc_urls = ["https://polygon-rpc.com"]
-
-# Gasless relayer — routes Safe transactions through Polymarket's gas-sponsored
-# relayer. Falls back to direct RPC (pays gas in POL) on relayer failure.
-# Requires builder credentials above. Override via POLY_USE_RELAYER, POLY_RELAYER_URL.
-use_relayer = true                                        # Enable gasless relayer (default: true when builder creds present)
-# relayer_url = "https://relayer-v2.polymarket.com"       # Custom relayer endpoint (default)
+# All polymarket config is loaded from POLY_* environment variables.
+# Copy .env.example → .env and fill in your values. Available vars:
+#
+#   POLY_PRIVATE_KEY          — wallet private key (required for live trading)
+#   POLY_SAFE_ADDRESS         — Safe multisig address (required for live trading)
+#   POLY_BUILDER_API_KEY      — builder API key (required for live trading)
+#   POLY_BUILDER_API_SECRET   — builder API secret (required for live trading)
+#   POLY_BUILDER_API_PASSPHRASE — builder API passphrase (required for live trading)
+#   POLY_RPC_URLS             — comma-separated Polygon RPC endpoints (default: https://polygon-rpc.com)
+#   POLY_USE_RELAYER          — gasless relayer (default: true when builder creds present)
+#   POLY_RELAYER_URL          — custom relayer endpoint (default: https://relayer-v2.polymarket.com)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DASHBOARD

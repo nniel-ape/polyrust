@@ -301,6 +301,10 @@ impl Config {
 
     /// Apply POLY_* environment variable overrides.
     pub fn with_env_overrides(mut self) -> Self {
+        // Detect if TOML file populated polymarket secrets (deprecated path)
+        let toml_had_secrets = self.polymarket.private_key.is_some()
+            || self.polymarket.builder_api_key.is_some();
+
         if let Ok(v) = std::env::var("POLY_PRIVATE_KEY") {
             self.polymarket.private_key = Some(v);
         }
@@ -347,6 +351,13 @@ impl Config {
         if let Ok(v) = std::env::var("POLY_DASHBOARD_HOST") {
             self.dashboard.host = v;
         }
+
+        if toml_had_secrets {
+            tracing::warn!(
+                "[polymarket] secrets in config.toml are deprecated — use POLY_* env vars in .env instead"
+            );
+        }
+
         self
     }
 }
