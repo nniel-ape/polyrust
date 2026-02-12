@@ -23,9 +23,10 @@ pub struct CachedPrice {
 
 /// RTDS crypto price feed using the Polymarket Real-Time Data Streams API.
 ///
-/// Subscribes to `crypto_prices` (Binance, fast) and `crypto_prices_chainlink`
-/// (Chainlink, used for Polymarket resolution) topics. Publishes
-/// `MarketDataEvent::ExternalPrice` events to the EventBus.
+/// Subscribes to `crypto_prices_chainlink` (Chainlink, used for Polymarket
+/// resolution). Publishes `MarketDataEvent::ExternalPrice` events to the
+/// EventBus. Direct Binance/Coinbase WebSocket feeds provide faster price
+/// data separately.
 pub struct PriceFeed {
     event_bus: Option<EventBus>,
     price_cache: Arc<RwLock<HashMap<String, CachedPrice>>>,
@@ -146,78 +147,7 @@ impl MarketDataFeed for PriceFeed {
             }));
         }
 
-        // Spawn Binance price stream
-        {
-            let client = Arc::clone(&rtds_client);
-            let bus = event_bus;
-            let cache = self.price_cache.clone();
-
-            self.task_handles.push(tokio::spawn(async move {
-                let stream = match client.subscribe_crypto_prices(None) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!(error = %e, "failed to subscribe to binance crypto prices");
-                        return;
-                    }
-                };
-
-                let mut stream = std::pin::pin!(stream);
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok(price_msg) => {
-                            let symbol = normalize_symbol(&price_msg.symbol);
-                            let timestamp =
-                                DateTime::<Utc>::from_timestamp_millis(price_msg.timestamp)
-                                    .unwrap_or_else(Utc::now);
-
-                            debug!(
-                                symbol = %symbol,
-                                price = %price_msg.value,
-                                source = "binance",
-                                "binance price update"
-                            );
-
-                            let should_publish = {
-                                let mut c = cache.write().await;
-                                let should_update = c.get(&symbol).is_none_or(|existing| {
-                                    // Prefer Chainlink but allow Binance to overwrite
-                                    // stale Chainlink data (>30s old)
-                                    existing.source != "chainlink"
-                                        || (timestamp - existing.timestamp)
-                                            > chrono::Duration::seconds(30)
-                                });
-                                if should_update {
-                                    c.insert(
-                                        symbol.clone(),
-                                        CachedPrice {
-                                            price: price_msg.value,
-                                            source: "binance".into(),
-                                            timestamp,
-                                        },
-                                    );
-                                }
-                                should_update
-                            };
-
-                            if should_publish {
-                                bus.publish(Event::MarketData(MarketDataEvent::ExternalPrice {
-                                    symbol,
-                                    price: price_msg.value,
-                                    source: "binance".into(),
-                                    timestamp,
-                                }));
-                            }
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "binance price stream error");
-                        }
-                    }
-                }
-                info!("binance price stream ended");
-            }));
-        }
-
-        info!("RTDS price feeds started (chainlink + binance)");
+        info!("RTDS price feeds started (chainlink)");
         Ok(())
     }
 

@@ -449,6 +449,22 @@ impl TailEndStrategy {
         let (_, promote_actions) = self.base.record_price(symbol, price, source, now).await;
         let mut result = promote_actions;
 
+        // Fast pre-filter: skip coins where no market is near expiration.
+        // This avoids acquiring active_markets lock + iterating for 99%+ of events.
+        // Runs BEFORE composite price check since it's a cheap HashMap lookup that
+        // filters ~98% of events, avoiding expensive composite evaluation.
+        {
+            let nearest = self.base.coin_nearest_expiry.read().await;
+            if let Some(expiry) = nearest.get(symbol) {
+                let now = ctx.now().await;
+                let secs_remaining = (*expiry - now).num_seconds();
+                if secs_remaining > self.base.config.tailend.time_threshold_secs as i64 {
+                    self.base.record_tailend_skip("coin_not_near_expiry").await;
+                    return result;
+                }
+            }
+        }
+
         // Composite price gating: if enabled, use composite fair price for entry evaluation
         let effective_price = if self.base.config.tailend.use_composite_price {
             match self
@@ -481,20 +497,6 @@ impl TailEndStrategy {
         } else {
             price
         };
-
-        // Fast pre-filter: skip coins where no market is near expiration.
-        // This avoids acquiring active_markets lock + iterating for 99%+ of events.
-        {
-            let nearest = self.base.coin_nearest_expiry.read().await;
-            if let Some(expiry) = nearest.get(symbol) {
-                let now = ctx.now().await;
-                let secs_remaining = (*expiry - now).num_seconds();
-                if secs_remaining > self.base.config.tailend.time_threshold_secs as i64 {
-                    self.base.record_tailend_skip("coin_not_near_expiry").await;
-                    return result;
-                }
-            }
-        }
 
         // Find active markets for this coin
         let market_ids: Vec<MarketId> = {
