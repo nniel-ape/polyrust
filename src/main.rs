@@ -701,6 +701,7 @@ async fn run_backtest() -> anyhow::Result<()> {
 
     // Backtest can't produce Historical quality (record_price uses wall clock)
     arb_config.tailend.min_reference_quality = ReferenceQualityLevel::Current;
+    arb_config.use_chainlink = false; // No RPC in backtest
 
     // Instantiate strategy based on strategy_name
     let strategy: Box<dyn Strategy> = match backtest_config.strategy_name.as_str() {
