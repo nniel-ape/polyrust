@@ -21,8 +21,10 @@ cargo run                        # Run bot (paper mode by default)
 cargo run --example simple_strategy  # Run minimal example
 cargo build --release            # Optimized single binary → target/release/polyrust
 
-# Backtesting
+# CLI modes
 cargo run -- --backtest          # Run backtest with config.toml settings
+cargo run -- --backtest-sweep    # Parameter grid search (requires [backtest.sweep] config)
+cargo run -- --verify            # API connectivity smoke tests (Gamma, Chainlink, CLOB auth, approvals)
 cargo run --example run_backtest # Minimal backtest example
 
 # Docker deployment
@@ -54,8 +56,8 @@ src/main.rs → wires all crates into a single binary
 ### Core Traits (Plugin System)
 
 - **`Strategy`** — `on_event(&mut self, event: &Event, ctx: &StrategyContext) -> Result<Vec<Action>>` — receives events, returns actions (place/cancel orders, emit signals)
-- **`ExecutionBackend`** — abstracts order execution: `LiveBackend` (real CLOB API) vs `PaperBackend` (simulated fills)
-- **`MarketDataFeed`** — market data producers: `ClobFeed` (WebSocket orderbooks) and `PriceFeed` (RTDS crypto prices)
+- **`ExecutionBackend`** — abstracts order execution: `LiveBackend` (real CLOB API) vs `PaperBackend` (simulated fills). Also: `CtfRedeemer` (position redemption via Safe MultiSend), gasless `Relayer`
+- **`MarketDataFeed`** — market data producers: `ClobFeed` (WebSocket orderbooks), `PriceFeed` (RTDS crypto prices), `BinanceFeed` (spot + futures), `CoinbaseFeed` (ticker), `DiscoveryFeed` (Gamma market discovery)
 - **`DashboardViewProvider`** — `view_name(&self) -> &str` + `render_view(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>` — optional async trait for strategies to expose custom dashboard pages at `/strategy/<name>`. Dashboard view names must be unique; the engine returns `PolyError::Config` on collision.
 
 ### Event Flow
@@ -188,57 +190,14 @@ Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-min
 
 ### Strategy Configuration
 
-The crypto arbitrage strategy is configured via the `[arbitrage]` section in `config.toml`. It uses a modular directory structure (`crates/polyrust-strategies/src/crypto_arb/`) with per-mode strategy structs sharing state through `Arc<CryptoArbBase>`:
+Configured via `[arbitrage]` in `config.toml`. Modular directory structure (`crates/polyrust-strategies/src/crypto_arb/`) with per-mode strategy structs sharing state through `Arc<CryptoArbBase>`:
 
 - `TailEndStrategy` — high-confidence trades near expiration
 - `TwoSidedStrategy` — risk-free arbitrage
 
-Each mode is conditionally registered with the engine based on its `enabled` flag.
+Each mode is conditionally registered with the engine based on its `enabled` flag. All modes disabled by default.
 
-```rust
-pub struct ArbitrageConfig {
-    // Core settings
-    pub coins: Vec<String>,
-    pub max_positions: usize,
-    pub min_profit_margin: Decimal,
-    pub late_window_margin: Decimal,
-    pub scan_interval_secs: u64,
-    pub use_chainlink: bool,
-
-    // Per-mode configs (each mode disabled by default)
-    pub tailend: TailEndConfig,       // TailEnd mode (enabled, time_threshold_secs, ask_threshold)
-    pub twosided: TwoSidedConfig,     // TwoSided mode (enabled, combined_threshold)
-
-    // Shared configs (all with #[serde(default)])
-    pub fee: FeeConfig,           // Taker fee model (default 3.15% at 50/50)
-    pub spike: SpikeConfig,       // Spike detection (threshold, window, history)
-    pub order: OrderConfig,       // Hybrid GTC/FOK orders (maker vs taker)
-    pub sizing: SizingConfig,     // Kelly criterion position sizing
-    pub stop_loss: StopLossConfig, // Dual-trigger + trailing stops
-    pub performance: PerformanceConfig, // Performance tracking & auto-disable
-}
-```
-
-#### Sub-Config Breakdown
-
-- **TailEndConfig**: Per-mode toggle (`enabled`), `time_threshold_secs` (120), `ask_threshold` (0.90)
-- **TwoSidedConfig**: Per-mode toggle (`enabled`), `combined_threshold` (0.98)
-- **FeeConfig**: Taker fee rate for net profit margin calculation
-- **SpikeConfig**: Price spike detection (threshold_pct, window_secs, history_size)
-- **OrderConfig**: Hybrid order mode (hybrid_mode, limit_offset, max_age_secs)
-  - GTC maker orders for TwoSided mode (0% fee)
-  - FOK taker orders for TailEnd mode (speed matters)
-- **SizingConfig**: Kelly criterion sizing (base_size, kelly_multiplier, min/max_size, use_kelly)
-  - Scales position size with confidence and edge
-  - Falls back to fixed sizing when disabled or for TwoSided mode
-- **StopLossConfig**: Dual-trigger stop-loss + trailing stops
-  - reversal_pct: crypto price reversal threshold
-  - min_drop: minimum market price drop
-  - trailing_enabled, trailing_distance: lock in profits as bid rises
-  - time_decay: tighten stops near expiration
-- **PerformanceConfig**: Per-mode tracking and auto-disable
-  - Tracks win rate, P&L per mode (TailEnd, TwoSided)
-  - Auto-disable modes with low win rate after min_trades
+`ArbitrageConfig` has core settings (coins, max_positions, min_profit_margin) plus per-mode configs (`TailEndConfig`, `TwoSidedConfig`) and shared sub-configs: `FeeConfig` (taker fee model), `SpikeConfig` (price spike detection), `OrderConfig` (hybrid GTC/FOK), `SizingConfig` (Kelly criterion), `StopLossConfig` (dual-trigger + trailing), `PerformanceConfig` (per-mode tracking + auto-disable). See `config.rs` for field details.
 
 ### Key Features
 
@@ -294,7 +253,7 @@ Add `[backtest]` section to `config.toml`:
 
 ```toml
 [backtest]
-strategy_name = "crypto-arb"            # Which strategy to backtest
+strategy_name = "crypto-arb-tailend"    # or "crypto-arb-twosided"
 market_ids = []                         # Empty = auto-discover via Gamma API
 start_date = "2025-01-01T00:00:00Z"     # Backtest window start (RFC3339)
 end_date = "2025-01-31T23:59:59Z"       # Backtest window end (RFC3339)
@@ -302,25 +261,32 @@ initial_balance = 1000.00               # Starting USDC balance
 data_fidelity_secs = 60                 # Price granularity in seconds (60 = 1min, 300 = 5min)
 data_db_path = "backtest_data.db"       # Persistent historical data cache
 fetch_concurrency = 10                  # Markets fetched in parallel (default 10)
+offline = false                         # true = use only cached data, no network
+market_duration_secs = 900              # Filter for 15-min markets
 
 [backtest.fees]
 taker_fee_rate = 0.0315  # 3.15% at 50/50 probability
 ```
 
-Environment variable overrides: `POLY_BACKTEST_START`, `POLY_BACKTEST_END`, `POLY_BACKTEST_INITIAL_BALANCE`, `POLY_BACKTEST_DATA_DB_PATH`, `POLY_BACKTEST_FETCH_CONCURRENCY`, etc.
+Environment variable overrides: `POLY_BACKTEST_START`, `POLY_BACKTEST_END`, `POLY_BACKTEST_INITIAL_BALANCE`, `POLY_BACKTEST_DATA_DB_PATH`, `POLY_BACKTEST_FETCH_CONCURRENCY`, `POLY_BACKTEST_OFFLINE`, etc.
 
 ### Running Backtests
 
 ```fish
-cargo run -- --backtest          # Use config.toml settings
+cargo run -- --backtest          # Single run with config.toml settings
+cargo run -- --backtest-sweep    # Parameter grid search (requires [backtest.sweep])
 cargo run --example run_backtest # Minimal example
 ```
 
 Backtest report includes: total P&L, realized/unrealized P&L, win rate, max drawdown, Sharpe ratio, trade count, start/end balance, duration.
 
+### Parameter Sweep
+
+The sweep system (`crates/polyrust-backtest/src/sweep/`) runs a grid search over strategy parameters. Configure via `[backtest.sweep]` in `config.toml` with `ParamRange` (explicit values or min/max/step). `SweepRunner` orchestrates parallel runs, `SweepReport` provides sorting by metric (sharpe, pnl, win_rate), sensitivity analysis, and CSV/JSON export.
+
 ### Strategy Compatibility
 
-Any `impl Strategy` works in backtest without modification — strategies receive the same `Event` stream and return `Vec<Action>` as in live/paper mode. The engine handles the rest.
+Any `impl Strategy` works in backtest without modification — strategies receive the same `Event` stream and return `Vec<Action>` as in live/paper mode. The engine handles the rest. Note: backtests downgrade `min_reference_quality` to `ReferenceQualityLevel::Current` since historical quality tracking uses wall-clock timestamps.
 
 ## Danger Zones & Approvals
 
@@ -332,9 +298,12 @@ Any `impl Strategy` works in backtest without modification — strategies receiv
 ## Design Documents
 
 - `docs/brainstorms/polyrust-trading-framework.md` — goals, architecture, traits
-- `docs/plans/polyrust-framework-implementation.md` — detailed implementation guide (2400 lines)
-- `docs/plans/polyrust-checklist.md` — 14-milestone task checklist with validation commands
-- `docs/plans/strategy-dashboard-views.md` — strategy dashboard views design and implementation plan
-- `docs/plans/backtesting-framework.md` — backtesting framework design and implementation plan
-- `docs/research/polymarket-price-discovery.md` — how Polymarket discovers reference prices (CLOB midpoint, RTDS feeds, Chainlink/Binance oracles, confidence model)
-- `docs/research/crypto-arb-reference-price.md` — crypto arb strategy reference price mechanics for 15-min markets (capture flow, confidence model, three trading modes, fee impact)
+- `docs/plans/polyrust-framework-implementation.md` — detailed implementation guide
+- `docs/plans/polyrust-checklist.md` — milestone task checklist with validation commands
+- `docs/plans/strategy-dashboard-views.md` — strategy dashboard views design
+- `docs/plans/backtesting-framework.md` — backtesting framework design
+- `docs/plans/arb-strategy-improvements.md` — arbitrage strategy improvement plan
+- `docs/research/polymarket-price-discovery.md` — reference price discovery (CLOB midpoint, RTDS feeds, Chainlink/Binance oracles)
+- `docs/research/crypto-arb-reference-price.md` — crypto arb reference price mechanics for 15-min markets
+- `docs/research/arb-strategy-improvements.md` — arbitrage strategy improvement research
+- `docs/research/polymarket-modern-strategies.md` — modern Polymarket trading strategies research
