@@ -27,12 +27,18 @@ cargo run -- --backtest-sweep    # Parameter grid search (requires [backtest.swe
 cargo run -- --verify            # API connectivity smoke tests (Gamma, Chainlink, CLOB auth, approvals)
 cargo run --example run_backtest # Minimal backtest example
 
-# Docker deployment
+# Docker deployment (local)
 docker-compose up -d             # Build and start bot in background
 docker-compose logs -f polyrust  # View real-time logs
 docker-compose down              # Stop and remove containers
 docker-compose restart           # Restart after config changes
 docker-compose build --no-cache  # Rebuild from scratch
+
+# Spot deployment (VPS at 31.172.70.91)
+spot -p spot.yml -t prod -n deploy         # Full deploy: build → push GHCR → pull on server → restart
+spot -p spot.yml -t prod -n update-config  # Config only: decrypt secrets, copy files, restart
+spot -p spot.yml -t prod -n restart        # Just restart the container
+spot -p spot.yml -t prod --dry             # Dry run (no changes)
 ```
 
 Never run `go build`. Never commit binary artifacts from `target/`.
@@ -289,6 +295,22 @@ The sweep system (`crates/polyrust-backtest/src/sweep/`) runs a grid search over
 ### Strategy Compatibility
 
 Any `impl Strategy` works in backtest without modification — strategies receive the same `Event` stream and return `Vec<Action>` as in live/paper mode. The engine handles the rest. Note: backtests downgrade `min_reference_quality` to `ReferenceQualityLevel::Current` since historical quality tracking uses wall-clock timestamps.
+
+## Deployment
+
+Production runs on an ARM VPS (`31.172.70.91`) via [Spot](https://github.com/umputun/spot). Config: `spot.yml`.
+
+**Pipeline**: build Docker image locally (native arm64) → push to `ghcr.io/nniel-ape/polyrust` → server pulls and restarts via `docker compose`.
+
+**Three tasks**: `deploy` (full pipeline), `update-config` (secrets + config + restart, no rebuild), `restart` (just restart).
+
+**Secrets**: SOPS-encrypted `secrets/prod.yaml` → decrypted to `.env.deploy` (dotenv format, keys uppercased) → copied as `.env` on server. The `docker-compose.yml` reads `.env` via `env_file`.
+
+**Image reference**: `docker-compose.yml` defaults to `ghcr.io/nniel-ape/polyrust:latest` — no `IMAGE_NAME` override needed.
+
+**Prerequisites**: `docker login ghcr.io` on both local machine (push) and server (pull). SSH key: `~/.ssh/id_deploy`, user: `deploy`.
+
+**Spot gotchas**: `copy` paths must be absolute (`/home/deploy/polyrust/...`), not `~/...`. Use `mkdir: true` on the first copy entry to auto-create the directory.
 
 ## Danger Zones & Approvals
 
