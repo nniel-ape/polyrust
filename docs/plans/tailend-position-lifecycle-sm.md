@@ -202,22 +202,22 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 14
 
 ### Task 14: Implement execution ladder (FOK → short-lived GTC refresh)
-- [ ] When ExitExecuting FOK is rejected for liquidity: transition to `ResidualRisk { use_gtc_next: true, retry_count: 1, remaining_size }`
-- [ ] When in `ResidualRisk` and cooldown elapsed: build next exit order — if `use_gtc_next`, place GTC at `bid - short_limit_tick_offset * tick_size`
-- [ ] Implement 2s GTC refresh: on each orderbook update, if GTC exit order age > `short_limit_refresh_secs` (2s), cancel and re-place at current `bid - offset`
-- [ ] Track GTC exit orders in `exit_orders_by_id` for fill/cancel routing
-- [ ] On partial fill: update `remaining_size`, keep in `ResidualRisk` if still above min_size
-- [ ] On full fill: remove position and lifecycle
-- [ ] Geometric clip reduction: after 2+ retries, halve the clip size (remaining * 0.5)
-- [ ] Dust detection: if remaining < min_order_size after partial, remove position and log
-- [ ] After `max_exit_retries` with remaining size > 0: transition to RecoveryProbe (task 15) or resolve with loss
-- [ ] Write test: FOK rejected → ResidualRisk with retry_count=1
-- [ ] Write test: GTC refresh cycle — order cancelled and replaced after 2s
-- [ ] Write test: partial fill reduces remaining_size, stays in ResidualRisk
-- [ ] Write test: geometric clip reduction after retries
-- [ ] Write test: dust detection removes sub-min-size residual
-- [ ] Write test: max retries exhausted → transitions appropriately
-- [ ] Run tests — must pass before task 15
+- [x] When ExitExecuting FOK is rejected for liquidity: transition to `ResidualRisk { use_gtc_next: true, retry_count: 1, remaining_size }`
+- [x] When in `ResidualRisk` and cooldown elapsed: build next exit order — if `use_gtc_next`, place GTC at `bid - short_limit_tick_offset * tick_size`
+- [x] Implement 2s GTC refresh: on each orderbook update, if GTC exit order age > `short_limit_refresh_secs` (2s), cancel and re-place at current `bid - offset`
+- [x] Track GTC exit orders in `exit_orders_by_id` for fill/cancel routing
+- [x] On partial fill: update `remaining_size`, keep in `ResidualRisk` if still above min_size
+- [x] On full fill: remove position and lifecycle
+- [x] Geometric clip reduction: after 2+ retries, halve the clip size (remaining * 0.5)
+- [x] Dust detection: if remaining < min_order_size after partial, remove position and log
+- [x] After `max_exit_retries` with remaining size > 0: transition to RecoveryProbe (task 15) or resolve with loss
+- [x] Write test: FOK rejected → ResidualRisk with retry_count=1
+- [x] Write test: GTC refresh cycle — order cancelled and replaced after 2s
+- [x] Write test: partial fill reduces remaining_size, stays in ResidualRisk
+- [x] Write test: geometric clip reduction after retries
+- [x] Write test: dust detection removes sub-min-size residual
+- [x] Write test: max retries exhausted → transitions appropriately
+- [x] Run tests — must pass before task 15
 
 ### Task 15: Implement recovery logic (opposite-side + re-entry)
 - [ ] When `ResidualRisk` with max retries exhausted OR remaining under budget AND time > 30s: transition to `RecoveryProbe`
