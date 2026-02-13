@@ -88,17 +88,17 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 4
 
 ### Task 4: Define lifecycle types and StopLossTriggerKind
-- [ ] Add `StopLossTriggerKind` enum to `crates/polyrust-strategies/src/crypto_arb/types.rs`: `HardCrash`, `DualTrigger`, `TrailingStop`, `PostEntryExit` — each with relevant fields
-- [ ] Add `PositionLifecycleState` enum: `Healthy`, `DeferredExit { trigger, armed_at }`, `ExitExecuting { order_id, order_type, exit_price, submitted_at }`, `ResidualRisk { remaining_size, retry_count, last_attempt, use_gtc_next }`, `RecoveryProbe { recovery_order_id, probe_side, submitted_at }`, `Cooldown { until }`
-- [ ] Add `PositionLifecycle` struct: `state`, `dual_trigger_ticks: usize`, `trailing_unarmable: bool`, `last_composite: Option<CompositePriceResult>`, `last_composite_at: Option<DateTime<Utc>>`, `pending_exit_order_id: Option<OrderId>`, `transition_log: Vec<(DateTime<Utc>, String)>`
-- [ ] Implement `PositionLifecycle::new()` → initializes in `Healthy` state
-- [ ] Implement `PositionLifecycle::transition(&mut self, new_state, reason)` → validates transition legality, appends to log (capped at 50)
-- [ ] Add `ExitOrderMeta` struct for tracking exit order provenance (token_id, order_type, lifecycle state reference)
-- [ ] Derive `Debug, Clone` on all new types; derive `PartialEq` on StopLossTriggerKind and PositionLifecycleState
-- [ ] Write test: all valid transitions succeed (Healthy→DeferredExit, Healthy→ExitExecuting, DeferredExit→ExitExecuting, DeferredExit→Healthy, ExitExecuting→ResidualRisk, ResidualRisk→ExitExecuting, ResidualRisk→RecoveryProbe, RecoveryProbe→ExitExecuting, RecoveryProbe→Cooldown, Cooldown→Healthy)
-- [ ] Write test: invalid transitions return error (e.g. Healthy→ResidualRisk, Cooldown→ExitExecuting)
-- [ ] Write test: transition log caps at 50 entries
-- [ ] Run tests — must pass before task 5
+- [x] Add `StopLossTriggerKind` enum to `crates/polyrust-strategies/src/crypto_arb/types.rs`: `HardCrash`, `DualTrigger`, `TrailingStop`, `PostEntryExit` — each with relevant fields
+- [x] Add `PositionLifecycleState` enum: `Healthy`, `DeferredExit { trigger, armed_at }`, `ExitExecuting { order_id, order_type, exit_price, submitted_at }`, `ResidualRisk { remaining_size, retry_count, last_attempt, use_gtc_next }`, `RecoveryProbe { recovery_order_id, probe_side, submitted_at }`, `Cooldown { until }`
+- [x] Add `PositionLifecycle` struct: `state`, `dual_trigger_ticks: usize`, `trailing_unarmable: bool`, `last_composite: Option<CompositePriceResult>`, `last_composite_at: Option<DateTime<Utc>>`, `pending_exit_order_id: Option<OrderId>`, `transition_log: Vec<(DateTime<Utc>, String)>`
+- [x] Implement `PositionLifecycle::new()` → initializes in `Healthy` state
+- [x] Implement `PositionLifecycle::transition(&mut self, new_state, reason)` → validates transition legality, appends to log (capped at 50)
+- [x] Add `ExitOrderMeta` struct for tracking exit order provenance (token_id, order_type, lifecycle state reference)
+- [x] Derive `Debug, Clone` on all new types; derive `PartialEq` on StopLossTriggerKind and PositionLifecycleState
+- [x] Write test: all valid transitions succeed (Healthy→DeferredExit, Healthy→ExitExecuting, DeferredExit→ExitExecuting, DeferredExit→Healthy, ExitExecuting→ResidualRisk, ResidualRisk→ExitExecuting, ResidualRisk→RecoveryProbe, RecoveryProbe→ExitExecuting, RecoveryProbe→Cooldown, Cooldown→Healthy)
+- [x] Write test: invalid transitions return error (e.g. Healthy→ResidualRisk, Cooldown→ExitExecuting)
+- [x] Write test: transition log caps at 50 entries
+- [x] Run tests — must pass before task 5
 
 ### Task 5: Extend ArbitragePosition with fee/order metadata
 - [ ] Add `entry_order_type: OrderType` field to `ArbitragePosition` in `types.rs`

@@ -17,8 +17,9 @@ pub use config::{
 pub use dashboard::CryptoArbDashboard;
 pub use tailend::TailEndStrategy;
 pub use types::{
-    ArbitrageOpportunity, ArbitragePosition, BoundarySnapshot, MarketWithReference, ModeStats,
-    OpenLimitOrder, PendingOrder, ReferenceQuality, SpikeEvent,
+    ArbitrageOpportunity, ArbitragePosition, BoundarySnapshot, CompositePriceSnapshot,
+    ExitOrderMeta, MarketWithReference, ModeStats, OpenLimitOrder, PendingOrder,
+    PositionLifecycle, PositionLifecycleState, ReferenceQuality, SpikeEvent, StopLossTriggerKind,
 };
 
 // Re-export fee helpers for use in strategies

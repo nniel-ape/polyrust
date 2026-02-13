@@ -1,6 +1,7 @@
 //! Domain types for the crypto arbitrage strategies.
 
 use std::collections::VecDeque;
+use std::fmt;
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -427,4 +428,264 @@ pub struct OpenLimitOrder {
     /// from the CLOB. A synthetic fill is only created after `>= 2` consecutive
     /// misses, protecting against transient API snapshot gaps.
     pub reconcile_miss_count: u8,
+}
+
+// ---------------------------------------------------------------------------
+// Position Lifecycle State Machine Types
+// ---------------------------------------------------------------------------
+
+/// Classification of stop-loss trigger that caused an exit evaluation.
+///
+/// Priority order (highest first): HardCrash > DualTrigger > TrailingStop > PostEntryExit.
+/// Only the highest-priority trigger that fires is returned.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StopLossTriggerKind {
+    /// Level 1: Catastrophic bid drop or external price reversal.
+    /// Requires only 1 fresh source + fresh orderbook. Bypasses hysteresis.
+    HardCrash {
+        /// Absolute bid drop from entry (e.g. 0.08).
+        bid_drop: Decimal,
+        /// External price reversal percentage (e.g. 0.006).
+        reversal_pct: Decimal,
+    },
+    /// Level 2: Both crypto reversal AND market drop confirmed for N consecutive ticks.
+    DualTrigger {
+        /// Number of consecutive ticks both conditions held.
+        consecutive_ticks: usize,
+    },
+    /// Level 3: Peak bid minus current bid exceeds trailing distance (with time decay).
+    TrailingStop {
+        /// Peak bid observed since entry.
+        peak_bid: Decimal,
+        /// Current bid that triggered the stop.
+        current_bid: Decimal,
+        /// Effective trailing distance used (after headroom cap + time decay).
+        effective_distance: Decimal,
+    },
+    /// Level 4: Adverse move detected during post-entry sell delay window.
+    /// Transition to DeferredExit — actual sell happens when delay expires.
+    PostEntryExit {
+        /// Bid drop from entry that triggered the deferred exit.
+        bid_drop: Decimal,
+    },
+}
+
+impl fmt::Display for StopLossTriggerKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::HardCrash { bid_drop, reversal_pct } => {
+                write!(f, "HardCrash(bid_drop={bid_drop}, reversal={reversal_pct})")
+            }
+            Self::DualTrigger { consecutive_ticks } => {
+                write!(f, "DualTrigger(ticks={consecutive_ticks})")
+            }
+            Self::TrailingStop { peak_bid, current_bid, effective_distance } => {
+                write!(
+                    f,
+                    "TrailingStop(peak={peak_bid}, current={current_bid}, dist={effective_distance})"
+                )
+            }
+            Self::PostEntryExit { bid_drop } => {
+                write!(f, "PostEntryExit(bid_drop={bid_drop})")
+            }
+        }
+    }
+}
+
+/// Per-position lifecycle state in the state machine.
+///
+/// Valid transitions:
+/// - Healthy -> DeferredExit (trigger during sell delay)
+/// - Healthy -> ExitExecuting (trigger when sellable)
+/// - DeferredExit -> ExitExecuting (delay elapsed, trigger persists)
+/// - DeferredExit -> Healthy (trigger cleared)
+/// - ExitExecuting -> ResidualRisk (partial fill or rejection)
+/// - ExitExecuting -> (resolved) (fully filled — position removed)
+/// - ResidualRisk -> ExitExecuting (retry)
+/// - ResidualRisk -> RecoveryProbe (max retries or risk under budget)
+/// - RecoveryProbe -> ExitExecuting (recovery order fails, retry exit)
+/// - RecoveryProbe -> Cooldown (recovery neutralized position)
+/// - Cooldown -> Healthy (cooldown elapsed)
+#[derive(Debug, Clone, PartialEq)]
+pub enum PositionLifecycleState {
+    /// Position is active and being monitored. No exit trigger has fired.
+    Healthy,
+    /// A trigger fired during the sell delay window. Exit is deferred until sellable.
+    DeferredExit {
+        trigger: StopLossTriggerKind,
+        armed_at: DateTime<Utc>,
+    },
+    /// An exit order has been submitted and is in flight.
+    ExitExecuting {
+        order_id: OrderId,
+        order_type: OrderType,
+        exit_price: Decimal,
+        submitted_at: DateTime<Utc>,
+    },
+    /// Partial fill or rejection left residual exposure. Retrying exit.
+    ResidualRisk {
+        remaining_size: Decimal,
+        retry_count: u32,
+        last_attempt: DateTime<Utc>,
+        use_gtc_next: bool,
+    },
+    /// Attempting recovery: opposite-side set completion or re-entry.
+    RecoveryProbe {
+        recovery_order_id: OrderId,
+        probe_side: OutcomeSide,
+        submitted_at: DateTime<Utc>,
+    },
+    /// Post-recovery cooldown before position can be re-evaluated.
+    Cooldown {
+        until: DateTime<Utc>,
+    },
+}
+
+impl fmt::Display for PositionLifecycleState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Healthy => write!(f, "Healthy"),
+            Self::DeferredExit { trigger, .. } => write!(f, "DeferredExit({trigger})"),
+            Self::ExitExecuting { order_type, exit_price, .. } => {
+                write!(f, "ExitExecuting({order_type:?}@{exit_price})")
+            }
+            Self::ResidualRisk { remaining_size, retry_count, .. } => {
+                write!(f, "ResidualRisk(remaining={remaining_size}, retries={retry_count})")
+            }
+            Self::RecoveryProbe { probe_side, .. } => {
+                write!(f, "RecoveryProbe({probe_side:?})")
+            }
+            Self::Cooldown { until } => write!(f, "Cooldown(until={until})"),
+        }
+    }
+}
+
+impl PositionLifecycleState {
+    /// State name for transition validation and logging.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Healthy => "Healthy",
+            Self::DeferredExit { .. } => "DeferredExit",
+            Self::ExitExecuting { .. } => "ExitExecuting",
+            Self::ResidualRisk { .. } => "ResidualRisk",
+            Self::RecoveryProbe { .. } => "RecoveryProbe",
+            Self::Cooldown { .. } => "Cooldown",
+        }
+    }
+
+    /// Check whether transitioning from `self` to `target` is valid.
+    fn can_transition_to(&self, target: &PositionLifecycleState) -> bool {
+        matches!(
+            (self.name(), target.name()),
+            ("Healthy", "DeferredExit")
+                | ("Healthy", "ExitExecuting")
+                | ("DeferredExit", "ExitExecuting")
+                | ("DeferredExit", "Healthy")
+                | ("ExitExecuting", "ResidualRisk")
+                | ("ResidualRisk", "ExitExecuting")
+                | ("ResidualRisk", "RecoveryProbe")
+                | ("RecoveryProbe", "ExitExecuting")
+                | ("RecoveryProbe", "Cooldown")
+                | ("Cooldown", "Healthy")
+        )
+    }
+}
+
+/// Maximum number of entries in the transition log before oldest entries are dropped.
+const TRANSITION_LOG_CAP: usize = 50;
+
+/// Per-position lifecycle tracker.
+///
+/// Wraps `PositionLifecycleState` with auxiliary tracking fields and an
+/// append-only transition log (capped at 50 entries for memory safety).
+#[derive(Debug, Clone)]
+pub struct PositionLifecycle {
+    /// Current state in the lifecycle.
+    pub state: PositionLifecycleState,
+    /// Counter of consecutive ticks where both dual-trigger conditions held.
+    pub dual_trigger_ticks: usize,
+    /// True if trailing stop cannot arm due to insufficient headroom (entry near price cap).
+    pub trailing_unarmable: bool,
+    /// Most recent composite price used for stop-loss evaluation.
+    pub last_composite: Option<CompositePriceSnapshot>,
+    /// Timestamp of the most recent composite price.
+    pub last_composite_at: Option<DateTime<Utc>>,
+    /// Order ID of the pending exit order (for routing fills/rejects).
+    pub pending_exit_order_id: Option<OrderId>,
+    /// Append-only log of state transitions (capped at TRANSITION_LOG_CAP).
+    pub transition_log: Vec<(DateTime<Utc>, String)>,
+}
+
+/// Snapshot of composite price data for stop-loss decisions.
+/// Kept separate from `base::CompositePriceResult` to avoid coupling types.rs to base.rs.
+#[derive(Debug, Clone)]
+pub struct CompositePriceSnapshot {
+    pub price: Decimal,
+    pub sources_used: usize,
+    pub max_lag_ms: i64,
+    pub dispersion_bps: Decimal,
+}
+
+impl Default for PositionLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PositionLifecycle {
+    /// Create a new lifecycle tracker in the Healthy state.
+    pub fn new() -> Self {
+        Self {
+            state: PositionLifecycleState::Healthy,
+            dual_trigger_ticks: 0,
+            trailing_unarmable: false,
+            last_composite: None,
+            last_composite_at: None,
+            pending_exit_order_id: None,
+            transition_log: Vec::new(),
+        }
+    }
+
+    /// Attempt to transition to a new state.
+    ///
+    /// Returns `Ok(())` if the transition is valid, `Err` with a descriptive
+    /// message if not. On success, appends the transition to the log.
+    pub fn transition(
+        &mut self,
+        new_state: PositionLifecycleState,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> std::result::Result<(), String> {
+        if !self.state.can_transition_to(&new_state) {
+            return Err(format!(
+                "Invalid transition: {} -> {} (reason: {})",
+                self.state.name(),
+                new_state.name(),
+                reason
+            ));
+        }
+        let entry = format!("{} -> {}: {}", self.state.name(), new_state.name(), reason);
+        self.state = new_state;
+        self.transition_log.push((now, entry));
+        // Cap the log to prevent unbounded growth
+        if self.transition_log.len() > TRANSITION_LOG_CAP {
+            let excess = self.transition_log.len() - TRANSITION_LOG_CAP;
+            self.transition_log.drain(..excess);
+        }
+        Ok(())
+    }
+}
+
+/// Metadata for tracking an exit or recovery order back to its position.
+///
+/// Stored in `exit_orders_by_id` so that fill/reject events from the execution
+/// backend can be routed to the correct position lifecycle.
+#[derive(Debug, Clone)]
+pub struct ExitOrderMeta {
+    /// Token ID of the position this exit order belongs to.
+    pub token_id: TokenId,
+    /// Order type (GTC or FOK) for fee model selection.
+    pub order_type: OrderType,
+    /// Lifecycle state that spawned this order (for context in logs).
+    pub source_state: String,
 }

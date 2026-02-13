@@ -19,8 +19,9 @@ use super::base::{
 };
 use super::config::{ArbitrageConfig, SizingConfig};
 use super::types::{
-    ArbitragePosition, BoundarySnapshot, MarketWithReference, ModeStats, OpenLimitOrder,
-    PendingStopLoss, ReferenceQuality,
+    ArbitragePosition, BoundarySnapshot, CompositePriceSnapshot, ExitOrderMeta,
+    MarketWithReference, ModeStats, OpenLimitOrder, PendingStopLoss, PositionLifecycle,
+    PositionLifecycleState, ReferenceQuality, StopLossTriggerKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -4045,4 +4046,466 @@ fn arb_config_validate_dead_zone_warning() {
     config.tailend.min_strike_distance_pct = dec!(0.001); // 0.1%
     // Dead zone = 0.009 > 0.003 — triggers warning but not error
     assert!(config.validate().is_ok(), "Dead zone should warn but not error");
+}
+
+// ---------------------------------------------------------------------------
+// Position Lifecycle State Machine Tests
+// ---------------------------------------------------------------------------
+
+fn now() -> DateTime<Utc> {
+    Utc::now()
+}
+
+#[test]
+fn lifecycle_new_starts_healthy() {
+    let lc = PositionLifecycle::new();
+    assert_eq!(lc.state, PositionLifecycleState::Healthy);
+    assert_eq!(lc.dual_trigger_ticks, 0);
+    assert!(!lc.trailing_unarmable);
+    assert!(lc.last_composite.is_none());
+    assert!(lc.last_composite_at.is_none());
+    assert!(lc.pending_exit_order_id.is_none());
+    assert!(lc.transition_log.is_empty());
+}
+
+#[test]
+fn lifecycle_all_valid_transitions_succeed() {
+    let t = now();
+
+    // Healthy -> DeferredExit
+    let mut lc = PositionLifecycle::new();
+    let result = lc.transition(
+        PositionLifecycleState::DeferredExit {
+            trigger: StopLossTriggerKind::PostEntryExit { bid_drop: dec!(0.05) },
+            armed_at: t,
+        },
+        "trigger during sell delay",
+        t,
+    );
+    assert!(result.is_ok());
+
+    // DeferredExit -> ExitExecuting
+    let result = lc.transition(
+        PositionLifecycleState::ExitExecuting {
+            order_id: "order-1".to_string(),
+            order_type: OrderType::Fok,
+            exit_price: dec!(0.90),
+            submitted_at: t,
+        },
+        "delay elapsed",
+        t,
+    );
+    assert!(result.is_ok());
+
+    // ExitExecuting -> ResidualRisk
+    let result = lc.transition(
+        PositionLifecycleState::ResidualRisk {
+            remaining_size: dec!(5.0),
+            retry_count: 1,
+            last_attempt: t,
+            use_gtc_next: true,
+        },
+        "partial fill",
+        t,
+    );
+    assert!(result.is_ok());
+
+    // ResidualRisk -> ExitExecuting (retry)
+    let result = lc.transition(
+        PositionLifecycleState::ExitExecuting {
+            order_id: "order-2".to_string(),
+            order_type: OrderType::Gtc,
+            exit_price: dec!(0.89),
+            submitted_at: t,
+        },
+        "retry exit",
+        t,
+    );
+    assert!(result.is_ok());
+
+    // ExitExecuting -> ResidualRisk again
+    let result = lc.transition(
+        PositionLifecycleState::ResidualRisk {
+            remaining_size: dec!(3.0),
+            retry_count: 2,
+            last_attempt: t,
+            use_gtc_next: false,
+        },
+        "rejected again",
+        t,
+    );
+    assert!(result.is_ok());
+
+    // ResidualRisk -> RecoveryProbe
+    let result = lc.transition(
+        PositionLifecycleState::RecoveryProbe {
+            recovery_order_id: "recovery-1".to_string(),
+            probe_side: OutcomeSide::Down,
+            submitted_at: t,
+        },
+        "max retries, attempt recovery",
+        t,
+    );
+    assert!(result.is_ok());
+
+    // RecoveryProbe -> Cooldown
+    let result = lc.transition(
+        PositionLifecycleState::Cooldown { until: t + Duration::seconds(8) },
+        "recovery filled",
+        t,
+    );
+    assert!(result.is_ok());
+
+    // Cooldown -> Healthy
+    let result = lc.transition(PositionLifecycleState::Healthy, "cooldown elapsed", t);
+    assert!(result.is_ok());
+
+    // Verify transitions are logged
+    assert_eq!(lc.transition_log.len(), 8);
+}
+
+#[test]
+fn lifecycle_healthy_to_exit_executing() {
+    let t = now();
+    let mut lc = PositionLifecycle::new();
+    let result = lc.transition(
+        PositionLifecycleState::ExitExecuting {
+            order_id: "order-1".to_string(),
+            order_type: OrderType::Fok,
+            exit_price: dec!(0.92),
+            submitted_at: t,
+        },
+        "hard crash trigger",
+        t,
+    );
+    assert!(result.is_ok());
+    assert!(matches!(lc.state, PositionLifecycleState::ExitExecuting { .. }));
+}
+
+#[test]
+fn lifecycle_deferred_exit_to_healthy() {
+    let t = now();
+    let mut lc = PositionLifecycle::new();
+    lc.transition(
+        PositionLifecycleState::DeferredExit {
+            trigger: StopLossTriggerKind::DualTrigger { consecutive_ticks: 2 },
+            armed_at: t,
+        },
+        "dual trigger armed",
+        t,
+    )
+    .unwrap();
+
+    // Trigger cleared
+    let result = lc.transition(PositionLifecycleState::Healthy, "trigger cleared", t);
+    assert!(result.is_ok());
+    assert_eq!(lc.state, PositionLifecycleState::Healthy);
+}
+
+#[test]
+fn lifecycle_recovery_probe_to_exit_executing() {
+    let t = now();
+    let mut lc = PositionLifecycle::new();
+    // Walk through: Healthy -> ExitExecuting -> ResidualRisk -> RecoveryProbe -> ExitExecuting
+    lc.transition(
+        PositionLifecycleState::ExitExecuting {
+            order_id: "o1".into(),
+            order_type: OrderType::Fok,
+            exit_price: dec!(0.90),
+            submitted_at: t,
+        },
+        "trigger",
+        t,
+    )
+    .unwrap();
+    lc.transition(
+        PositionLifecycleState::ResidualRisk {
+            remaining_size: dec!(5),
+            retry_count: 5,
+            last_attempt: t,
+            use_gtc_next: false,
+        },
+        "rejected",
+        t,
+    )
+    .unwrap();
+    lc.transition(
+        PositionLifecycleState::RecoveryProbe {
+            recovery_order_id: "r1".into(),
+            probe_side: OutcomeSide::Down,
+            submitted_at: t,
+        },
+        "try recovery",
+        t,
+    )
+    .unwrap();
+
+    // Recovery fails -> back to ExitExecuting
+    let result = lc.transition(
+        PositionLifecycleState::ExitExecuting {
+            order_id: "o2".into(),
+            order_type: OrderType::Fok,
+            exit_price: dec!(0.88),
+            submitted_at: t,
+        },
+        "recovery failed",
+        t,
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
+fn lifecycle_invalid_transitions_return_error() {
+    let t = now();
+
+    // Healthy -> ResidualRisk (invalid: must go through ExitExecuting)
+    let mut lc = PositionLifecycle::new();
+    let result = lc.transition(
+        PositionLifecycleState::ResidualRisk {
+            remaining_size: dec!(5),
+            retry_count: 0,
+            last_attempt: t,
+            use_gtc_next: false,
+        },
+        "skip ExitExecuting",
+        t,
+    );
+    assert!(result.is_err());
+    let msg = result.unwrap_err();
+    assert!(msg.contains("Healthy") && msg.contains("ResidualRisk"));
+
+    // Healthy -> RecoveryProbe (invalid)
+    let mut lc = PositionLifecycle::new();
+    let result = lc.transition(
+        PositionLifecycleState::RecoveryProbe {
+            recovery_order_id: "r1".into(),
+            probe_side: OutcomeSide::Up,
+            submitted_at: t,
+        },
+        "skip to recovery",
+        t,
+    );
+    assert!(result.is_err());
+
+    // Healthy -> Cooldown (invalid)
+    let mut lc = PositionLifecycle::new();
+    let result = lc.transition(
+        PositionLifecycleState::Cooldown { until: t },
+        "skip to cooldown",
+        t,
+    );
+    assert!(result.is_err());
+
+    // Cooldown -> ExitExecuting (invalid: must go through Healthy)
+    let mut lc = PositionLifecycle::new();
+    // Walk to Cooldown state
+    lc.transition(
+        PositionLifecycleState::ExitExecuting {
+            order_id: "o1".into(),
+            order_type: OrderType::Fok,
+            exit_price: dec!(0.9),
+            submitted_at: t,
+        },
+        "trigger",
+        t,
+    )
+    .unwrap();
+    lc.transition(
+        PositionLifecycleState::ResidualRisk {
+            remaining_size: dec!(5),
+            retry_count: 5,
+            last_attempt: t,
+            use_gtc_next: false,
+        },
+        "rejected",
+        t,
+    )
+    .unwrap();
+    lc.transition(
+        PositionLifecycleState::RecoveryProbe {
+            recovery_order_id: "r1".into(),
+            probe_side: OutcomeSide::Down,
+            submitted_at: t,
+        },
+        "try recovery",
+        t,
+    )
+    .unwrap();
+    lc.transition(
+        PositionLifecycleState::Cooldown { until: t },
+        "recovered",
+        t,
+    )
+    .unwrap();
+
+    let result = lc.transition(
+        PositionLifecycleState::ExitExecuting {
+            order_id: "o2".into(),
+            order_type: OrderType::Fok,
+            exit_price: dec!(0.85),
+            submitted_at: t,
+        },
+        "try exit from cooldown",
+        t,
+    );
+    assert!(result.is_err());
+    let msg = result.unwrap_err();
+    assert!(msg.contains("Cooldown") && msg.contains("ExitExecuting"));
+
+    // DeferredExit -> ResidualRisk (invalid: must go through ExitExecuting)
+    let mut lc = PositionLifecycle::new();
+    lc.transition(
+        PositionLifecycleState::DeferredExit {
+            trigger: StopLossTriggerKind::PostEntryExit { bid_drop: dec!(0.05) },
+            armed_at: t,
+        },
+        "deferred",
+        t,
+    )
+    .unwrap();
+    let result = lc.transition(
+        PositionLifecycleState::ResidualRisk {
+            remaining_size: dec!(5),
+            retry_count: 0,
+            last_attempt: t,
+            use_gtc_next: false,
+        },
+        "skip ExitExecuting",
+        t,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn lifecycle_transition_log_caps_at_50() {
+    let t = now();
+    let mut lc = PositionLifecycle::new();
+
+    // Generate 60 transitions by cycling Healthy -> ExitExecuting -> ResidualRisk -> ExitExecuting...
+    for i in 0..60 {
+        if matches!(lc.state, PositionLifecycleState::Healthy) {
+            lc.transition(
+                PositionLifecycleState::ExitExecuting {
+                    order_id: format!("o-{i}"),
+                    order_type: OrderType::Fok,
+                    exit_price: dec!(0.90),
+                    submitted_at: t,
+                },
+                &format!("transition {i}"),
+                t,
+            )
+            .unwrap();
+        } else if matches!(lc.state, PositionLifecycleState::ExitExecuting { .. }) {
+            lc.transition(
+                PositionLifecycleState::ResidualRisk {
+                    remaining_size: dec!(5),
+                    retry_count: i as u32,
+                    last_attempt: t,
+                    use_gtc_next: false,
+                },
+                &format!("transition {i}"),
+                t,
+            )
+            .unwrap();
+        } else if matches!(lc.state, PositionLifecycleState::ResidualRisk { .. }) {
+            lc.transition(
+                PositionLifecycleState::ExitExecuting {
+                    order_id: format!("o-{i}"),
+                    order_type: OrderType::Gtc,
+                    exit_price: dec!(0.89),
+                    submitted_at: t,
+                },
+                &format!("transition {i}"),
+                t,
+            )
+            .unwrap();
+        }
+    }
+
+    assert!(
+        lc.transition_log.len() <= 50,
+        "Transition log should be capped at 50, got {}",
+        lc.transition_log.len()
+    );
+}
+
+#[test]
+fn lifecycle_invalid_transition_preserves_state() {
+    let t = now();
+    let mut lc = PositionLifecycle::new();
+
+    // Try invalid transition — state should remain Healthy
+    let _ = lc.transition(
+        PositionLifecycleState::ResidualRisk {
+            remaining_size: dec!(5),
+            retry_count: 0,
+            last_attempt: t,
+            use_gtc_next: false,
+        },
+        "should fail",
+        t,
+    );
+    assert_eq!(lc.state, PositionLifecycleState::Healthy);
+    assert!(lc.transition_log.is_empty(), "Failed transition should not log");
+}
+
+#[test]
+fn stop_loss_trigger_kind_display() {
+    let trigger = StopLossTriggerKind::HardCrash {
+        bid_drop: dec!(0.08),
+        reversal_pct: dec!(0.006),
+    };
+    let s = format!("{trigger}");
+    assert!(s.contains("HardCrash"));
+    assert!(s.contains("0.08"));
+
+    let trigger = StopLossTriggerKind::TrailingStop {
+        peak_bid: dec!(0.97),
+        current_bid: dec!(0.92),
+        effective_distance: dec!(0.03),
+    };
+    let s = format!("{trigger}");
+    assert!(s.contains("TrailingStop"));
+    assert!(s.contains("0.97"));
+}
+
+#[test]
+fn lifecycle_state_display() {
+    assert_eq!(format!("{}", PositionLifecycleState::Healthy), "Healthy");
+
+    let state = PositionLifecycleState::ExitExecuting {
+        order_id: "o1".into(),
+        order_type: OrderType::Fok,
+        exit_price: dec!(0.92),
+        submitted_at: now(),
+    };
+    let s = format!("{state}");
+    assert!(s.contains("ExitExecuting"));
+    assert!(s.contains("Fok"));
+    assert!(s.contains("0.92"));
+}
+
+#[test]
+fn exit_order_meta_fields() {
+    let meta = ExitOrderMeta {
+        token_id: "token-123".to_string(),
+        order_type: OrderType::Fok,
+        source_state: "ExitExecuting".to_string(),
+    };
+    assert_eq!(meta.token_id, "token-123");
+    assert_eq!(meta.order_type, OrderType::Fok);
+    assert_eq!(meta.source_state, "ExitExecuting");
+}
+
+#[test]
+fn composite_price_snapshot_clone() {
+    let snap = CompositePriceSnapshot {
+        price: dec!(50000.50),
+        sources_used: 3,
+        max_lag_ms: 800,
+        dispersion_bps: dec!(12.5),
+    };
+    let cloned = snap.clone();
+    assert_eq!(cloned.price, dec!(50000.50));
+    assert_eq!(cloned.sources_used, 3);
 }
