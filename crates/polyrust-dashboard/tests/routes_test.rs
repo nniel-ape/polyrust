@@ -7,6 +7,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::routing::get;
+use chrono::Utc;
 use http_body_util::BodyStream;
 use polyrust_core::prelude::*;
 use polyrust_dashboard::handlers;
@@ -25,13 +26,13 @@ async fn test_app() -> (Router, AppState) {
         context,
         store: Arc::new(store),
         event_bus,
+        engine_started_at: Utc::now(),
     };
 
     let app = Router::new()
         .route("/", get(handlers::index))
         .route("/positions", get(handlers::positions))
         .route("/trades", get(handlers::trades))
-        .route("/health", get(handlers::health))
         .route("/strategy/{name}", get(handlers::strategy_view))
         .route("/events/stream", get(handlers::sse_events))
         .with_state(state.clone());
@@ -108,21 +109,6 @@ async fn trades_returns_200() {
         .oneshot(
             Request::builder()
                 .uri("/trades")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn health_returns_200() {
-    let (app, _) = test_app().await;
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/health")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -405,6 +391,7 @@ async fn sse_receives_published_events() {
         context,
         store: Arc::new(store),
         event_bus: event_bus.clone(),
+        engine_started_at: Utc::now(),
     };
 
     let app = Router::new()
@@ -459,6 +446,7 @@ async fn sse_dashboard_update_signal_renders_strategy_view() {
         context,
         store: Arc::new(store),
         event_bus: event_bus.clone(),
+        engine_started_at: Utc::now(),
     };
 
     let app = Router::new()
@@ -514,6 +502,7 @@ async fn sse_non_dashboard_signal_passes_through_as_json() {
         context,
         store: Arc::new(store),
         event_bus: event_bus.clone(),
+        engine_started_at: Utc::now(),
     };
 
     let app = Router::new()

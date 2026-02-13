@@ -6,11 +6,13 @@ use askama::filters::{Html as HtmlEscaper, escape};
 use axum::extract::{Path, State};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
+use chrono::Utc;
 use polyrust_core::prelude::*;
 use rust_decimal::Decimal;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
+use crate::fmt;
 use crate::server::AppState;
 
 // ---------------------------------------------------------------------------
@@ -21,7 +23,6 @@ pub struct AppError(String);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        // Use askama's battle-tested HTML escaping function
         let escaped = match escape(&self.0, HtmlEscaper) {
             Ok(s) => s.to_string(),
             Err(_) => "Error message could not be displayed".to_string(),
@@ -40,14 +41,6 @@ impl From<askama::Error> for AppError {
     }
 }
 
-fn pnl_class(d: Decimal) -> &'static str {
-    if d.is_sign_negative() {
-        "bp-loss"
-    } else {
-        "bp-profit"
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Templates
 // ---------------------------------------------------------------------------
@@ -55,13 +48,24 @@ fn pnl_class(d: Decimal) -> &'static str {
 #[derive(Template)]
 #[template(path = "index.html")]
 struct IndexTemplate {
-    strategy_count: usize,
+    // SSE-updated row
+    total_unrealized_pnl: String,
+    unrealized_pnl_class: String,
+    available_usdc: String,
+    // Static P&L row
+    total_pnl: String,
+    total_pnl_class: String,
+    realized_pnl: String,
+    realized_pnl_class: String,
+    total_fees: String,
+    // Status line
+    trade_count: i64,
     position_count: usize,
     order_count: usize,
-    total_unrealized_pnl: String,
-    pnl_class: String,
-    available_usdc: String,
     locked_usdc: String,
+    uptime: String,
+    subscriber_count: usize,
+    // Nav
     strategy_names: Vec<String>,
 }
 
@@ -69,6 +73,9 @@ struct IndexTemplate {
 #[template(path = "positions.html")]
 struct PositionsTemplate {
     positions: Vec<PositionRow>,
+    total_unrealized_pnl: String,
+    total_unrealized_pnl_class: String,
+    position_count: usize,
     strategy_names: Vec<String>,
 }
 
@@ -82,39 +89,35 @@ struct PositionRow {
     unrealized_pnl: String,
     pnl_class: String,
     strategy_name: String,
+    entry_time: String,
+    age: String,
 }
 
 #[derive(Template)]
 #[template(path = "trades.html")]
 struct TradesTemplate {
     trades: Vec<TradeRow>,
+    trade_count: i64,
+    total_realized_pnl: String,
+    total_realized_pnl_class: String,
+    total_fees: String,
     strategy_names: Vec<String>,
 }
 
-#[allow(dead_code)]
 struct TradeRow {
     id_short: String,
     market_id_short: String,
     side: String,
+    order_type: String,
     price: String,
+    entry_price: String,
     size: String,
+    fee: String,
     realized_pnl: String,
+    pnl_class: String,
+    close_reason: String,
     strategy_name: String,
     timestamp: String,
-    fee: String,
-    order_type: String,
-    entry_price: String,
-    close_reason: String,
-}
-
-#[derive(Template)]
-#[template(path = "health.html")]
-struct HealthTemplate {
-    subscriber_count: usize,
-    position_count: usize,
-    order_count: usize,
-    available_usdc: String,
-    strategy_names: Vec<String>,
 }
 
 #[derive(Template)]
@@ -149,7 +152,7 @@ fn short_id(s: &str, len: usize) -> String {
 
 /// GET / — overview page
 pub async fn index(State(state): State<AppState>) -> std::result::Result<Html<String>, AppError> {
-    let (position_count, order_count, pnl) = {
+    let (position_count, order_count, unrealized_pnl) = {
         let pos_state = state.context.positions.read().await;
         (
             pos_state.position_count(),
@@ -159,24 +162,37 @@ pub async fn index(State(state): State<AppState>) -> std::result::Result<Html<St
     };
     let (available_usdc, locked_usdc) = {
         let bal_state = state.context.balance.read().await;
-        (
-            bal_state.available_usdc.to_string(),
-            bal_state.locked_usdc.to_string(),
-        )
+        (bal_state.available_usdc, bal_state.locked_usdc)
     };
+
+    let realized_pnl = state.store.sum_realized_pnl(None).await.unwrap_or(Decimal::ZERO);
+    let total_fees = state.store.sum_fees(None).await.unwrap_or(Decimal::ZERO);
+    let trade_count = state.store.count_trades(None).await.unwrap_or(0);
+
+    let total_pnl = realized_pnl + unrealized_pnl;
+    let uptime = fmt::fmt_duration(Utc::now() - state.engine_started_at);
+
+    let (unrealized_str, unrealized_class) = fmt::fmt_pnl(unrealized_pnl);
+    let (total_pnl_str, total_pnl_class) = fmt::fmt_pnl(total_pnl);
+    let (realized_str, realized_class) = fmt::fmt_pnl(realized_pnl);
+
     let strategy_names = state.context.strategy_names().await;
 
     let tmpl = IndexTemplate {
-        strategy_count: state
-            .context
-            .strategy_count
-            .load(std::sync::atomic::Ordering::Relaxed),
+        total_unrealized_pnl: unrealized_str,
+        unrealized_pnl_class: unrealized_class.to_string(),
+        available_usdc: fmt::fmt_usdc(available_usdc),
+        total_pnl: total_pnl_str,
+        total_pnl_class: total_pnl_class.to_string(),
+        realized_pnl: realized_str,
+        realized_pnl_class: realized_class.to_string(),
+        total_fees: fmt::fmt_usdc(total_fees),
+        trade_count,
         position_count,
         order_count,
-        total_unrealized_pnl: pnl.to_string(),
-        pnl_class: pnl_class(pnl).to_string(),
-        available_usdc,
-        locked_usdc,
+        locked_usdc: fmt::fmt_usdc(locked_usdc),
+        uptime,
+        subscriber_count: state.event_bus.subscriber_count(),
         strategy_names,
     };
     Ok(Html(tmpl.render()?))
@@ -186,31 +202,45 @@ pub async fn index(State(state): State<AppState>) -> std::result::Result<Html<St
 pub async fn positions(
     State(state): State<AppState>,
 ) -> std::result::Result<Html<String>, AppError> {
-    let rows: Vec<PositionRow> = {
+    let (rows, total_unrealized_pnl) = {
         let pos_state = state.context.positions.read().await;
-        pos_state
+        let total_pnl = pos_state.total_unrealized_pnl();
+        let now = Utc::now();
+        let mut positions: Vec<PositionRow> = pos_state
             .open_positions
             .values()
             .map(|p| {
                 let pnl = p.unrealized_pnl();
+                let (pnl_str, pnl_cls) = fmt::fmt_pnl(pnl);
                 PositionRow {
                     id_short: short_id(&p.id.to_string(), 8),
                     market_id_short: short_id(&p.market_id, 12),
                     side: format!("{:?}", p.side),
-                    entry_price: p.entry_price.to_string(),
-                    current_price: p.current_price.to_string(),
-                    size: p.size.to_string(),
-                    unrealized_pnl: pnl.to_string(),
-                    pnl_class: pnl_class(pnl).to_string(),
+                    entry_price: fmt::fmt_price(p.entry_price),
+                    current_price: fmt::fmt_price(p.current_price),
+                    size: fmt::fmt_size(p.size),
+                    unrealized_pnl: pnl_str,
+                    pnl_class: pnl_cls.to_string(),
                     strategy_name: p.strategy_name.clone(),
+                    entry_time: p.entry_time.format("%H:%M:%S").to_string(),
+                    age: fmt::fmt_duration(now - p.entry_time),
                 }
             })
-            .collect()
+            .collect();
+        // Sort by entry_time descending (newest first) — use the raw entry_time string
+        positions.sort_by(|a, b| b.entry_time.cmp(&a.entry_time));
+        (positions, total_pnl)
     };
+
+    let position_count = rows.len();
+    let (total_pnl_str, total_pnl_class) = fmt::fmt_pnl(total_unrealized_pnl);
     let strategy_names = state.context.strategy_names().await;
 
     let tmpl = PositionsTemplate {
         positions: rows,
+        total_unrealized_pnl: total_pnl_str,
+        total_unrealized_pnl_class: total_pnl_class.to_string(),
+        position_count,
         strategy_names,
     };
     Ok(Html(tmpl.render()?))
@@ -219,59 +249,51 @@ pub async fn positions(
 /// GET /trades — recent trade history
 pub async fn trades(State(state): State<AppState>) -> std::result::Result<Html<String>, AppError> {
     let trade_list = state.store.list_trades(None, 50).await.unwrap_or_default();
+
+    let trade_count = state.store.count_trades(None).await.unwrap_or(0);
+    let realized_pnl = state.store.sum_realized_pnl(None).await.unwrap_or(Decimal::ZERO);
+    let total_fees = state.store.sum_fees(None).await.unwrap_or(Decimal::ZERO);
+
+    let (realized_str, realized_class) = fmt::fmt_pnl(realized_pnl);
     let strategy_names = state.context.strategy_names().await;
 
     let rows: Vec<TradeRow> = trade_list
         .iter()
-        .map(|t| TradeRow {
-            id_short: short_id(&t.id.to_string(), 8),
-            market_id_short: short_id(&t.market_id, 12),
-            side: format!("{:?}", t.side),
-            price: t.price.to_string(),
-            size: t.size.to_string(),
-            realized_pnl: t
+        .map(|t| {
+            let (pnl_str, pnl_cls) = t
                 .realized_pnl
-                .map(|d| d.to_string())
-                .unwrap_or_else(|| "\u{2014}".into()),
-            strategy_name: t.strategy_name.clone(),
-            timestamp: t.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
-            fee: t
-                .fee
-                .map(|d| d.to_string())
-                .unwrap_or_else(|| "\u{2014}".into()),
-            order_type: t.order_type.clone().unwrap_or_else(|| "\u{2014}".into()),
-            entry_price: t
-                .entry_price
-                .map(|d| d.to_string())
-                .unwrap_or_else(|| "\u{2014}".into()),
-            close_reason: t.close_reason.clone().unwrap_or_else(|| "\u{2014}".into()),
+                .map(fmt::fmt_pnl)
+                .unwrap_or_else(|| ("\u{2014}".into(), ""));
+            TradeRow {
+                id_short: short_id(&t.id.to_string(), 8),
+                market_id_short: short_id(&t.market_id, 12),
+                side: format!("{:?}", t.side),
+                order_type: t.order_type.clone().unwrap_or_else(|| "\u{2014}".into()),
+                price: fmt::fmt_price(t.price),
+                entry_price: t
+                    .entry_price
+                    .map(fmt::fmt_price)
+                    .unwrap_or_else(|| "\u{2014}".into()),
+                size: fmt::fmt_size(t.size),
+                fee: t
+                    .fee
+                    .map(fmt::fmt_usdc)
+                    .unwrap_or_else(|| "\u{2014}".into()),
+                realized_pnl: pnl_str,
+                pnl_class: pnl_cls.to_string(),
+                close_reason: t.close_reason.clone().unwrap_or_else(|| "\u{2014}".into()),
+                strategy_name: t.strategy_name.clone(),
+                timestamp: t.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
+            }
         })
         .collect();
 
     let tmpl = TradesTemplate {
         trades: rows,
-        strategy_names,
-    };
-    Ok(Html(tmpl.render()?))
-}
-
-/// GET /health — system health
-pub async fn health(State(state): State<AppState>) -> std::result::Result<Html<String>, AppError> {
-    let (position_count, order_count) = {
-        let pos_state = state.context.positions.read().await;
-        (pos_state.position_count(), pos_state.open_orders.len())
-    };
-    let available_usdc = {
-        let bal_state = state.context.balance.read().await;
-        bal_state.available_usdc.to_string()
-    };
-    let strategy_names = state.context.strategy_names().await;
-
-    let tmpl = HealthTemplate {
-        subscriber_count: state.event_bus.subscriber_count(),
-        position_count,
-        order_count,
-        available_usdc,
+        trade_count,
+        total_realized_pnl: realized_str,
+        total_realized_pnl_class: realized_class.to_string(),
+        total_fees: fmt::fmt_usdc(total_fees),
         strategy_names,
     };
     Ok(Html(tmpl.render()?))
@@ -305,7 +327,6 @@ pub async fn strategy_view(
         .render_view()
         .await
         .map_err(|e| AppError(e.to_string()))?;
-    // Drop the read lock before acquiring another for strategy_names
     drop(strategy);
     drop(views);
     let strategy_names = state.context.strategy_names().await;
@@ -338,10 +359,11 @@ pub async fn sse_events(
         {
             let pnl = pos_state.total_unrealized_pnl();
             if let Ok(bal_state) = ctx.balance.try_read() {
+                let (pnl_str, pnl_cls) = fmt::fmt_pnl(pnl);
                 let partial = PnlSummaryPartial {
-                    total_unrealized_pnl: pnl.to_string(),
-                    pnl_class: pnl_class(pnl).to_string(),
-                    available_usdc: bal_state.available_usdc.to_string(),
+                    total_unrealized_pnl: pnl_str,
+                    pnl_class: pnl_cls.to_string(),
+                    available_usdc: fmt::fmt_usdc(bal_state.available_usdc),
                 };
                 if let Ok(html) = partial.render() {
                     return Some(Ok(SseEvent::default().event("pnl-update").data(html)));
@@ -350,9 +372,6 @@ pub async fn sse_events(
         }
 
         // For dashboard-update signals, use pre-rendered HTML from the payload.
-        // The strategy renders its view during on_event (while holding the write
-        // lock) and includes the HTML in the signal payload, avoiding the need to
-        // re-acquire the strategy lock here (which would deadlock/fail with try_read).
         if let Event::Signal(signal) = &event
             && signal.signal_type == "dashboard-update"
         {

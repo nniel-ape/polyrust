@@ -99,6 +99,94 @@ impl Store {
         }
         Ok(trades)
     }
+
+    /// Count total trades, optionally filtered by strategy.
+    pub async fn count_trades(&self, strategy: Option<&str>) -> StoreResult<i64> {
+        let conn = self.conn();
+        let mut rows = match strategy {
+            Some(s) => {
+                conn.query(
+                    "SELECT COUNT(*) FROM trades WHERE strategy_name = ?1",
+                    params![s],
+                )
+                .await
+            }
+            None => conn.query("SELECT COUNT(*) FROM trades", ()).await,
+        }
+        .map_err(|e| StoreError::Query(e.to_string()))?;
+
+        match rows
+            .next()
+            .await
+            .map_err(|e| StoreError::Query(e.to_string()))?
+        {
+            Some(row) => {
+                let count: i64 = row.get(0).map_err(|e| StoreError::Query(e.to_string()))?;
+                Ok(count)
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// Sum realized P&L across all trades with non-null realized_pnl.
+    pub async fn sum_realized_pnl(&self, strategy: Option<&str>) -> StoreResult<Decimal> {
+        let conn = self.conn();
+        let query = match strategy {
+            Some(_) => {
+                "SELECT realized_pnl FROM trades WHERE realized_pnl IS NOT NULL AND strategy_name = ?1"
+            }
+            None => "SELECT realized_pnl FROM trades WHERE realized_pnl IS NOT NULL",
+        };
+
+        let mut rows = match strategy {
+            Some(s) => conn.query(query, params![s]).await,
+            None => conn.query(query, ()).await,
+        }
+        .map_err(|e| StoreError::Query(e.to_string()))?;
+
+        let mut total = Decimal::ZERO;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| StoreError::Query(e.to_string()))?
+        {
+            let pnl_str: String = row.get(0).map_err(|e| StoreError::Query(e.to_string()))?;
+            let pnl =
+                Decimal::from_str(&pnl_str).map_err(|e| StoreError::Query(e.to_string()))?;
+            total += pnl;
+        }
+        Ok(total)
+    }
+
+    /// Sum fees across all trades with non-null fee.
+    pub async fn sum_fees(&self, strategy: Option<&str>) -> StoreResult<Decimal> {
+        let conn = self.conn();
+        let query = match strategy {
+            Some(_) => {
+                "SELECT fee FROM trades WHERE fee IS NOT NULL AND strategy_name = ?1"
+            }
+            None => "SELECT fee FROM trades WHERE fee IS NOT NULL",
+        };
+
+        let mut rows = match strategy {
+            Some(s) => conn.query(query, params![s]).await,
+            None => conn.query(query, ()).await,
+        }
+        .map_err(|e| StoreError::Query(e.to_string()))?;
+
+        let mut total = Decimal::ZERO;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| StoreError::Query(e.to_string()))?
+        {
+            let fee_str: String = row.get(0).map_err(|e| StoreError::Query(e.to_string()))?;
+            let fee =
+                Decimal::from_str(&fee_str).map_err(|e| StoreError::Query(e.to_string()))?;
+            total += fee;
+        }
+        Ok(total)
+    }
 }
 
 fn parse_trade_row(row: &libsql::Row) -> StoreResult<Trade> {

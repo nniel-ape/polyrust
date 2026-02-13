@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::get;
+use chrono::{DateTime, Utc};
 use polyrust_core::prelude::*;
 use polyrust_store::Store;
 use tracing::{info, warn};
@@ -14,6 +15,7 @@ pub struct AppState {
     pub context: StrategyContext,
     pub store: Arc<Store>,
     pub event_bus: EventBus,
+    pub engine_started_at: DateTime<Utc>,
 }
 
 /// Axum + HTMX monitoring dashboard.
@@ -21,14 +23,21 @@ pub struct Dashboard {
     context: StrategyContext,
     store: Arc<Store>,
     event_bus: EventBus,
+    engine_started_at: DateTime<Utc>,
 }
 
 impl Dashboard {
-    pub fn new(context: StrategyContext, store: Arc<Store>, event_bus: EventBus) -> Self {
+    pub fn new(
+        context: StrategyContext,
+        store: Arc<Store>,
+        event_bus: EventBus,
+        engine_started_at: DateTime<Utc>,
+    ) -> Self {
         Self {
             context,
             store,
             event_bus,
+            engine_started_at,
         }
     }
 
@@ -38,13 +47,13 @@ impl Dashboard {
             context: self.context,
             store: self.store,
             event_bus: self.event_bus,
+            engine_started_at: self.engine_started_at,
         };
 
         let app = Router::new()
             .route("/", get(handlers::index))
             .route("/positions", get(handlers::positions))
             .route("/trades", get(handlers::trades))
-            .route("/health", get(handlers::health))
             .route("/strategy/{name}", get(handlers::strategy_view))
             .route("/events/stream", get(handlers::sse_events))
             .with_state(state);

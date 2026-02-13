@@ -397,7 +397,12 @@ async fn main() -> anyhow::Result<()> {
     // Start dashboard if enabled
     let dashboard_config = engine.config().dashboard.clone();
     if dashboard_config.enabled {
-        let dashboard = Dashboard::new(engine.context().clone(), Arc::clone(&store), event_bus);
+        let dashboard = Dashboard::new(
+            engine.context().clone(),
+            Arc::clone(&store),
+            event_bus,
+            Utc::now(),
+        );
         bg_handles.push(tokio::spawn(async move {
             if let Err(e) = dashboard
                 .serve(&dashboard_config.host, dashboard_config.port)

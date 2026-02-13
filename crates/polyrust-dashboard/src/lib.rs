@@ -1,3 +1,4 @@
+pub mod fmt;
 pub mod handlers;
 pub mod server;
 

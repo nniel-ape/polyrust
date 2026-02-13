@@ -2,6 +2,10 @@
 {% block content %}
 <h1 class="bp-page-title">Open Positions</h1>
 
+<div class="mb-4 bp-text-secondary" style="font-size: 0.85rem;">
+  Positions: {{ position_count }} · Unrealized P&amp;L: <span class="{{ total_unrealized_pnl_class }}">{{ total_unrealized_pnl }}</span>
+</div>
+
 <div hx-ext="sse" sse-connect="/events/stream">
   <table class="bp-table">
     <thead>
@@ -12,8 +16,10 @@
         <th class="text-right">Entry</th>
         <th class="text-right">Current</th>
         <th class="text-right">Size</th>
-        <th class="text-right">PnL</th>
+        <th class="text-right">P&amp;L</th>
         <th class="text-left">Strategy</th>
+        <th class="text-left">Entry Time</th>
+        <th class="text-left">Age</th>
       </tr>
     </thead>
     <tbody id="positions-body">
@@ -27,6 +33,8 @@
         <td class="text-right">{{ pos.size }}</td>
         <td class="text-right {{ pos.pnl_class }}">{{ pos.unrealized_pnl }}</td>
         <td>{{ pos.strategy_name }}</td>
+        <td class="bp-text-secondary">{{ pos.entry_time }}</td>
+        <td class="bp-text-secondary">{{ pos.age }}</td>
       </tr>
       {% endfor %}
     </tbody>

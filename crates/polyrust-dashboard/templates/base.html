@@ -208,12 +208,15 @@
   </style>
 </head>
 <body class="min-h-screen">
+  <div id="sse-banner" style="display:none;background:#1a1a1a;border-bottom:1.5px solid #333;color:#808080;"
+       class="fixed top-0 inset-x-0 z-50 text-center py-1 text-xs">
+    Connection lost — reconnecting…
+  </div>
   <nav class="bp-nav px-6 py-3 flex items-center gap-1">
     <span class="bp-nav-brand mr-4">Polyrust</span>
     <a href="/" class="bp-nav-link">Overview</a>
     <a href="/positions" class="bp-nav-link">Positions</a>
     <a href="/trades" class="bp-nav-link">Trades</a>
-    <a href="/health" class="bp-nav-link">Health</a>
     {% for name in strategy_names %}
     <a href="/strategy/{{ name }}" class="bp-nav-link bp-nav-link--strategy">{{ name }}</a>
     {% endfor %}
@@ -221,5 +224,13 @@
   <main class="bp-grid-bg max-w-6xl mx-auto px-6 py-8">
     {% block content %}{% endblock %}
   </main>
+  <script>
+    document.body.addEventListener('htmx:sseError', function() {
+      document.getElementById('sse-banner').style.display = '';
+    });
+    document.body.addEventListener('htmx:sseOpen', function() {
+      document.getElementById('sse-banner').style.display = 'none';
+    });
+  </script>
 </body>
 </html>
