@@ -925,3 +925,25 @@ pub struct ExitOrderMeta {
     /// Lifecycle state that spawned this order (for context in logs).
     pub source_state: String,
 }
+
+/// Compute the exit clip size for a single exit order, capped by available
+/// bid depth in the orderbook.
+///
+/// Returns the number of shares to sell in this clip, or `Decimal::ZERO` if the
+/// result would be below `min_size` (dust).
+///
+/// Formula: `clip = min(remaining, bid_depth * cap_factor)`
+/// If `clip < min_size`, returns zero (treat as dust — not worth an order).
+pub fn compute_exit_clip(
+    remaining: Decimal,
+    bid_depth: Decimal,
+    cap_factor: Decimal,
+    min_size: Decimal,
+) -> Decimal {
+    let capped = remaining.min(bid_depth * cap_factor);
+    if capped < min_size {
+        Decimal::ZERO
+    } else {
+        capped
+    }
+}

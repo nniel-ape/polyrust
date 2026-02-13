@@ -19,9 +19,10 @@ use super::base::{
 };
 use super::config::{ArbitrageConfig, SizingConfig};
 use super::types::{
-    ArbitragePosition, BoundarySnapshot, CompositePriceSnapshot, ExitOrderMeta,
-    MarketWithReference, ModeStats, OpenLimitOrder, PendingStopLoss, PositionLifecycle,
-    PositionLifecycleState, ReferenceQuality, StopLossTriggerKind, TriggerEvalContext,
+    compute_exit_clip, ArbitragePosition, BoundarySnapshot, CompositePriceSnapshot,
+    ExitOrderMeta, MarketWithReference, ModeStats, OpenLimitOrder, PendingStopLoss,
+    PositionLifecycle, PositionLifecycleState, ReferenceQuality, StopLossTriggerKind,
+    TriggerEvalContext,
 };
 
 // ---------------------------------------------------------------------------
@@ -5313,4 +5314,36 @@ fn evaluate_triggers_no_external_price_suppresses_hard_and_dual() {
     let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
     assert!(trigger.is_some(), "Trailing should work without external price");
     assert!(matches!(trigger.unwrap(), StopLossTriggerKind::TrailingStop { .. }));
+}
+
+// ---------------------------------------------------------------------------
+// compute_exit_clip tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn exit_clip_remaining_is_limit() {
+    // remaining=10, bid_depth=20, cap=0.8 → depth_capped=16, clip=min(10,16)=10
+    let clip = compute_exit_clip(dec!(10), dec!(20), dec!(0.8), dec!(1));
+    assert_eq!(clip, dec!(10), "Remaining should be the limiting factor");
+}
+
+#[test]
+fn exit_clip_depth_is_limit() {
+    // remaining=10, bid_depth=5, cap=0.8 → depth_capped=4, clip=min(10,4)=4
+    let clip = compute_exit_clip(dec!(10), dec!(5), dec!(0.8), dec!(1));
+    assert_eq!(clip, dec!(4), "Depth * cap_factor should be the limiting factor");
+}
+
+#[test]
+fn exit_clip_below_min_size_returns_zero() {
+    // remaining=10, bid_depth=0.5, cap=0.8 → depth_capped=0.4, below min_size=1 → 0
+    let clip = compute_exit_clip(dec!(10), dec!(0.5), dec!(0.8), dec!(1));
+    assert_eq!(clip, Decimal::ZERO, "Below min_size should return zero (dust)");
+}
+
+#[test]
+fn exit_clip_dust_remaining_returns_zero() {
+    // remaining=0.001, bid_depth=100, cap=0.8 → capped=0.001, below min_size=1 → 0
+    let clip = compute_exit_clip(dec!(0.001), dec!(100), dec!(0.8), dec!(1));
+    assert_eq!(clip, Decimal::ZERO, "Dust remaining should return zero");
 }

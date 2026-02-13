@@ -178,13 +178,13 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 12
 
 ### Task 12: Implement depth-capped exit clip sizing
-- [ ] Add `compute_exit_clip(remaining: Decimal, bid_depth: Decimal, cap_factor: Decimal, min_size: Decimal) -> Decimal` as helper function
-- [ ] Logic: `capped = min(bid_depth * cap_factor, remaining)`; if `capped < min_size` return `Decimal::ZERO` (dust)
-- [ ] Write test: remaining=10, bid_depth=20, cap=0.8 → clip=10 (remaining is limit)
-- [ ] Write test: remaining=10, bid_depth=5, cap=0.8 → clip=4 (depth is limit)
-- [ ] Write test: remaining=10, bid_depth=0.5, cap=0.8 → clip=0 (below min_size)
-- [ ] Write test: remaining=0.001 → clip=0 (dust)
-- [ ] Run tests — must pass before task 13
+- [x] Add `compute_exit_clip(remaining: Decimal, bid_depth: Decimal, cap_factor: Decimal, min_size: Decimal) -> Decimal` as helper function
+- [x] Logic: `capped = min(bid_depth * cap_factor, remaining)`; if `capped < min_size` return `Decimal::ZERO` (dust)
+- [x] Write test: remaining=10, bid_depth=20, cap=0.8 → clip=10 (remaining is limit)
+- [x] Write test: remaining=10, bid_depth=5, cap=0.8 → clip=4 (depth is limit)
+- [x] Write test: remaining=10, bid_depth=0.5, cap=0.8 → clip=0 (below min_size)
+- [x] Write test: remaining=0.001 → clip=0 (dust)
+- [x] Run tests — must pass before task 13
 
 ### Task 13: Replace check_stop_loss with lifecycle-driven evaluation in tailend.rs
 - [ ] In `handle_orderbook_update` (tailend.rs), for each open position: get/create lifecycle, get cached composite, call `evaluate_triggers()`

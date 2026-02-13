@@ -17,9 +17,9 @@ pub use config::{
 pub use dashboard::CryptoArbDashboard;
 pub use tailend::TailEndStrategy;
 pub use types::{
-    ArbitrageOpportunity, ArbitragePosition, BoundarySnapshot, CompositePriceSnapshot,
-    ExitOrderMeta, MarketWithReference, ModeStats, OpenLimitOrder, PendingOrder,
-    PositionLifecycle, PositionLifecycleState, ReferenceQuality, SpikeEvent,
+    compute_exit_clip, ArbitrageOpportunity, ArbitragePosition, BoundarySnapshot,
+    CompositePriceSnapshot, ExitOrderMeta, MarketWithReference, ModeStats, OpenLimitOrder,
+    PendingOrder, PositionLifecycle, PositionLifecycleState, ReferenceQuality, SpikeEvent,
     StopLossTriggerKind, TriggerEvalContext,
 };
 
