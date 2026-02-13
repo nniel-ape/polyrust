@@ -140,9 +140,10 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # use_kelly = true        # false = fixed base_size for all trades
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stop-Loss (Dual-Trigger + Trailing)
+# Stop-Loss (Dual-Trigger + Trailing + Lifecycle)
 # ─────────────────────────────────────────────────────────────────────────────
 # Dual-trigger: crypto reversal AND market drop required to exit
+# Lifecycle state machine: Healthy → DeferredExit → ExitExecuting → ResidualRisk → RecoveryProbe → Cooldown
 
 # [arbitrage.stop_loss]
 # reversal_pct = 0.005        # 0.5% crypto price reversal threshold
@@ -156,6 +157,38 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # gtc_fallback = true         # Fall back to GTC after FOK liquidity rejection
 # gtc_fallback_tick_offset = 1 # Ticks below bid for GTC stop-loss (e.g. bid=0.91 → 0.90)
 # gtc_stop_loss_max_age_secs = 10  # Cancel stale GTC stop-loss orders after this (seconds)
+#
+# Hard crash detection — bypasses hysteresis, requires 1 fresh source + fresh book
+# hard_drop_abs = 0.08        # Absolute bid drop from entry to trigger (e.g. 0.95 → 0.87)
+# hard_reversal_pct = 0.006   # External price reversal % for hard crash (0.6%)
+# hard_window_ms = 2000       # Time window for hard crash detection (ms)
+#
+# Freshness gating — stale data suppresses all triggers except hard-crash
+# sl_max_book_age_ms = 1200   # Max orderbook age for stop-loss decisions (ms)
+# sl_max_external_age_ms = 1500 # Max external price age for stop-loss decisions (ms)
+# sl_min_sources = 2          # Min fresh sources for composite stop-loss price
+# sl_max_dispersion_bps = 50  # Max source disagreement for stop-loss composite (bps)
+#
+# Hysteresis — dual trigger must hold for N consecutive ticks
+# dual_trigger_consecutive_ticks = 2
+#
+# Short-lived limit orders — 2s cancel/replace cadence for GTC exits
+# short_limit_refresh_secs = 2  # Refresh GTC exit orders every N seconds
+# short_limit_tick_offset = 1   # Ticks below bid for short-lived GTC exits
+#
+# Trailing arming — distance from entry to arm trailing stop
+# trailing_arm_distance = 0.015  # Capped by headroom: min(this, price_cap - entry)
+#
+# Execution ladder — depth-capped clip sizing + retry budget
+# exit_depth_cap_factor = 0.80  # Cap exit clip to N% of bid depth
+# max_exit_retries = 5          # Max retries before escalating to recovery
+#
+# Recovery — opposite-side set completion + re-entry after failed exits
+# recovery_enabled = true       # Enable recovery logic
+# recovery_max_set_cost = 1.01  # Max combined cost for set completion (entry + other ask)
+# recovery_max_extra_frac = 0.15 # Max extra risk fraction for alpha trades (15%)
+# reentry_confirm_ticks = 2    # Consecutive confirming ticks before re-entry
+# reentry_cooldown_secs = 8    # Cooldown after recovery before re-entry allowed
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Performance Tracking & Auto-Disable

@@ -49,18 +49,18 @@ Refactor TailEnd position management into a per-position state machine that is r
 ## Implementation Steps
 
 ### Task 1: Add new StopLossConfig lifecycle fields
-- [ ] Add hard crash fields to `StopLossConfig` in `crates/polyrust-strategies/src/crypto_arb/config.rs`: `hard_drop_abs: Decimal` (0.08), `hard_reversal_pct: Decimal` (0.006), `hard_window_ms: i64` (2000)
-- [ ] Add freshness gating fields: `sl_max_book_age_ms: i64` (1200), `sl_max_external_age_ms: i64` (1500), `sl_min_sources: usize` (2), `sl_max_dispersion_bps: Decimal` (50)
-- [ ] Add hysteresis field: `dual_trigger_consecutive_ticks: usize` (2)
-- [ ] Add short-lived limit fields: `short_limit_refresh_secs: u64` (2), `short_limit_tick_offset: u32` (1)
-- [ ] Add trailing arming field: `trailing_arm_distance: Decimal` (0.015)
-- [ ] Add execution ladder fields: `exit_depth_cap_factor: Decimal` (0.80), `max_exit_retries: u32` (5)
-- [ ] Add recovery fields: `recovery_enabled: bool` (true), `recovery_max_set_cost: Decimal` (1.01), `recovery_max_extra_frac: Decimal` (0.15), `reentry_confirm_ticks: usize` (2), `reentry_cooldown_secs: i64` (8)
-- [ ] Update `Default` impl for `StopLossConfig` with all new fields
-- [ ] Update `config.example.toml` with new fields and comments
-- [ ] Write test: deserialize config with new fields from TOML
-- [ ] Write test: default values are sane (non-zero, positive where required)
-- [ ] Run tests — must pass before task 2
+- [x] Add hard crash fields to `StopLossConfig` in `crates/polyrust-strategies/src/crypto_arb/config.rs`: `hard_drop_abs: Decimal` (0.08), `hard_reversal_pct: Decimal` (0.006), `hard_window_ms: i64` (2000)
+- [x] Add freshness gating fields: `sl_max_book_age_ms: i64` (1200), `sl_max_external_age_ms: i64` (1500), `sl_min_sources: usize` (2), `sl_max_dispersion_bps: Decimal` (50)
+- [x] Add hysteresis field: `dual_trigger_consecutive_ticks: usize` (2)
+- [x] Add short-lived limit fields: `short_limit_refresh_secs: u64` (2), `short_limit_tick_offset: u32` (1)
+- [x] Add trailing arming field: `trailing_arm_distance: Decimal` (0.015)
+- [x] Add execution ladder fields: `exit_depth_cap_factor: Decimal` (0.80), `max_exit_retries: u32` (5)
+- [x] Add recovery fields: `recovery_enabled: bool` (true), `recovery_max_set_cost: Decimal` (1.01), `recovery_max_extra_frac: Decimal` (0.15), `reentry_confirm_ticks: usize` (2), `reentry_cooldown_secs: i64` (8)
+- [x] Update `Default` impl for `StopLossConfig` with all new fields
+- [x] Update `config.example.toml` with new fields and comments
+- [x] Write test: deserialize config with new fields from TOML
+- [x] Write test: default values are sane (non-zero, positive where required)
+- [x] Run tests — must pass before task 2
 
 ### Task 2: Fix contradictory defaults
 - [ ] Change `trailing_distance` default: 0.03 → 0.05 in `config.rs` StopLossConfig Default

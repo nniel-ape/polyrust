@@ -3768,3 +3768,149 @@ async fn reduce_or_remove_partial_close() {
         "Retry count preserved on partial close"
     );
 }
+
+// ---------------------------------------------------------------------------
+// StopLossConfig lifecycle field tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stop_loss_config_lifecycle_field_defaults() {
+    let config = super::config::StopLossConfig::default();
+
+    // Hard crash
+    assert_eq!(config.hard_drop_abs, dec!(0.08));
+    assert_eq!(config.hard_reversal_pct, dec!(0.006));
+    assert_eq!(config.hard_window_ms, 2000);
+
+    // Freshness gating
+    assert_eq!(config.sl_max_book_age_ms, 1200);
+    assert_eq!(config.sl_max_external_age_ms, 1500);
+    assert_eq!(config.sl_min_sources, 2);
+    assert_eq!(config.sl_max_dispersion_bps, dec!(50));
+
+    // Hysteresis
+    assert_eq!(config.dual_trigger_consecutive_ticks, 2);
+
+    // Short-lived limit
+    assert_eq!(config.short_limit_refresh_secs, 2);
+    assert_eq!(config.short_limit_tick_offset, 1);
+
+    // Trailing arming
+    assert_eq!(config.trailing_arm_distance, dec!(0.015));
+
+    // Execution ladder
+    assert_eq!(config.exit_depth_cap_factor, dec!(0.80));
+    assert_eq!(config.max_exit_retries, 5);
+
+    // Recovery
+    assert!(config.recovery_enabled);
+    assert_eq!(config.recovery_max_set_cost, dec!(1.01));
+    assert_eq!(config.recovery_max_extra_frac, dec!(0.15));
+    assert_eq!(config.reentry_confirm_ticks, 2);
+    assert_eq!(config.reentry_cooldown_secs, 8);
+}
+
+#[test]
+fn stop_loss_config_lifecycle_defaults_are_sane() {
+    let config = super::config::StopLossConfig::default();
+
+    // All numeric values should be positive where required
+    assert!(config.hard_drop_abs > Decimal::ZERO, "hard_drop_abs must be positive");
+    assert!(config.hard_reversal_pct > Decimal::ZERO, "hard_reversal_pct must be positive");
+    assert!(config.hard_window_ms > 0, "hard_window_ms must be positive");
+    assert!(config.sl_max_book_age_ms > 0, "sl_max_book_age_ms must be positive");
+    assert!(config.sl_max_external_age_ms > 0, "sl_max_external_age_ms must be positive");
+    assert!(config.sl_min_sources > 0, "sl_min_sources must be positive");
+    assert!(config.sl_max_dispersion_bps > Decimal::ZERO, "sl_max_dispersion_bps must be positive");
+    assert!(config.dual_trigger_consecutive_ticks > 0, "dual_trigger_consecutive_ticks must be positive");
+    assert!(config.short_limit_refresh_secs >= 1, "short_limit_refresh_secs must be >= 1");
+    assert!(config.trailing_arm_distance > Decimal::ZERO, "trailing_arm_distance must be positive");
+    assert!(config.exit_depth_cap_factor > Decimal::ZERO && config.exit_depth_cap_factor <= Decimal::ONE,
+        "exit_depth_cap_factor must be in (0, 1]");
+    assert!(config.max_exit_retries > 0, "max_exit_retries must be positive");
+    assert!(config.recovery_max_set_cost > Decimal::ZERO, "recovery_max_set_cost must be positive");
+    assert!(config.recovery_max_extra_frac > Decimal::ZERO && config.recovery_max_extra_frac < Decimal::ONE,
+        "recovery_max_extra_frac must be in (0, 1)");
+    assert!(config.reentry_confirm_ticks > 0, "reentry_confirm_ticks must be positive");
+    assert!(config.reentry_cooldown_secs > 0, "reentry_cooldown_secs must be positive");
+}
+
+#[test]
+fn stop_loss_config_deserialize_with_lifecycle_fields() {
+    let toml_str = r#"
+        reversal_pct = "0.005"
+        min_drop = "0.05"
+        trailing_enabled = true
+        trailing_distance = "0.03"
+        time_decay = true
+        hard_drop_abs = "0.10"
+        hard_reversal_pct = "0.008"
+        hard_window_ms = 3000
+        sl_max_book_age_ms = 1000
+        sl_max_external_age_ms = 2000
+        sl_min_sources = 3
+        sl_max_dispersion_bps = "75"
+        dual_trigger_consecutive_ticks = 3
+        short_limit_refresh_secs = 3
+        short_limit_tick_offset = 2
+        trailing_arm_distance = "0.020"
+        exit_depth_cap_factor = "0.70"
+        max_exit_retries = 8
+        recovery_enabled = false
+        recovery_max_set_cost = "1.02"
+        recovery_max_extra_frac = "0.20"
+        reentry_confirm_ticks = 3
+        reentry_cooldown_secs = 12
+    "#;
+    let config: super::config::StopLossConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.hard_drop_abs, dec!(0.10));
+    assert_eq!(config.hard_reversal_pct, dec!(0.008));
+    assert_eq!(config.hard_window_ms, 3000);
+    assert_eq!(config.sl_max_book_age_ms, 1000);
+    assert_eq!(config.sl_max_external_age_ms, 2000);
+    assert_eq!(config.sl_min_sources, 3);
+    assert_eq!(config.sl_max_dispersion_bps, dec!(75));
+    assert_eq!(config.dual_trigger_consecutive_ticks, 3);
+    assert_eq!(config.short_limit_refresh_secs, 3);
+    assert_eq!(config.short_limit_tick_offset, 2);
+    assert_eq!(config.trailing_arm_distance, dec!(0.020));
+    assert_eq!(config.exit_depth_cap_factor, dec!(0.70));
+    assert_eq!(config.max_exit_retries, 8);
+    assert!(!config.recovery_enabled);
+    assert_eq!(config.recovery_max_set_cost, dec!(1.02));
+    assert_eq!(config.recovery_max_extra_frac, dec!(0.20));
+    assert_eq!(config.reentry_confirm_ticks, 3);
+    assert_eq!(config.reentry_cooldown_secs, 12);
+}
+
+#[test]
+fn stop_loss_config_deserialize_missing_lifecycle_fields_uses_defaults() {
+    // Old config without any lifecycle fields should still parse with defaults
+    let toml_str = r#"
+        reversal_pct = "0.005"
+        min_drop = "0.05"
+        trailing_enabled = true
+        trailing_distance = "0.03"
+        time_decay = true
+    "#;
+    let config: super::config::StopLossConfig = toml::from_str(toml_str).unwrap();
+    // All new lifecycle fields should have their defaults
+    assert_eq!(config.hard_drop_abs, dec!(0.08));
+    assert_eq!(config.hard_reversal_pct, dec!(0.006));
+    assert_eq!(config.hard_window_ms, 2000);
+    assert_eq!(config.sl_max_book_age_ms, 1200);
+    assert_eq!(config.sl_max_external_age_ms, 1500);
+    assert_eq!(config.sl_min_sources, 2);
+    assert_eq!(config.sl_max_dispersion_bps, dec!(50));
+    assert_eq!(config.dual_trigger_consecutive_ticks, 2);
+    assert_eq!(config.short_limit_refresh_secs, 2);
+    assert_eq!(config.short_limit_tick_offset, 1);
+    assert_eq!(config.trailing_arm_distance, dec!(0.015));
+    assert_eq!(config.exit_depth_cap_factor, dec!(0.80));
+    assert_eq!(config.max_exit_retries, 5);
+    assert!(config.recovery_enabled);
+    assert_eq!(config.recovery_max_set_cost, dec!(1.01));
+    assert_eq!(config.recovery_max_extra_frac, dec!(0.15));
+    assert_eq!(config.reentry_confirm_ticks, 2);
+    assert_eq!(config.reentry_cooldown_secs, 8);
+}

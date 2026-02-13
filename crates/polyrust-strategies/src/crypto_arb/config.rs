@@ -277,7 +277,7 @@ impl SizingConfig {
     }
 }
 
-/// Stop-loss configuration (dual-trigger + trailing).
+/// Stop-loss configuration (dual-trigger + trailing + lifecycle).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StopLossConfig {
@@ -322,6 +322,59 @@ pub struct StopLossConfig {
     /// Maximum age in seconds for a GTC stop-loss order before cancellation.
     /// Stale GTC orders are cancelled and re-evaluated fresh. Default: 10.
     pub gtc_stop_loss_max_age_secs: u64,
+
+    // ── Hard crash detection ────────────────────────────────────────────
+    /// Absolute bid drop from entry price to trigger hard crash (default 0.08).
+    /// E.g. entry at 0.95, bid drops to 0.87 → trigger.
+    pub hard_drop_abs: Decimal,
+    /// External price reversal percentage for hard crash (default 0.006 = 0.6%).
+    pub hard_reversal_pct: Decimal,
+    /// Window in milliseconds for hard crash detection (default 2000ms).
+    pub hard_window_ms: i64,
+
+    // ── Freshness gating for stop-loss data ─────────────────────────────
+    /// Maximum orderbook age in ms for stop-loss decisions (default 1200ms).
+    pub sl_max_book_age_ms: i64,
+    /// Maximum external price age in ms for stop-loss decisions (default 1500ms).
+    pub sl_max_external_age_ms: i64,
+    /// Minimum fresh sources required for composite stop-loss price (default 2).
+    pub sl_min_sources: usize,
+    /// Maximum dispersion in bps across sources for stop-loss (default 50).
+    pub sl_max_dispersion_bps: Decimal,
+
+    // ── Hysteresis ──────────────────────────────────────────────────────
+    /// Number of consecutive ticks both dual-trigger conditions must hold (default 2).
+    pub dual_trigger_consecutive_ticks: usize,
+
+    // ── Short-lived limit order refresh ─────────────────────────────────
+    /// Refresh interval in seconds for short-lived GTC stop-loss orders (default 2).
+    pub short_limit_refresh_secs: u64,
+    /// Tick offset below bid for short-lived GTC orders (default 1).
+    pub short_limit_tick_offset: u32,
+
+    // ── Trailing arming ─────────────────────────────────────────────────
+    /// Distance from entry at which trailing stop arms (default 0.015).
+    /// Capped by available headroom: `min(trailing_arm_distance, price_cap - entry)`.
+    pub trailing_arm_distance: Decimal,
+
+    // ── Execution ladder ────────────────────────────────────────────────
+    /// Fraction of bid depth to cap exit clip size (default 0.80).
+    /// Exit clip = min(remaining, bid_depth * exit_depth_cap_factor).
+    pub exit_depth_cap_factor: Decimal,
+    /// Maximum exit order retries before escalating to recovery (default 5).
+    pub max_exit_retries: u32,
+
+    // ── Recovery ────────────────────────────────────────────────────────
+    /// Enable recovery logic (opposite-side set completion + re-entry). Default: true.
+    pub recovery_enabled: bool,
+    /// Maximum combined cost for set completion (entry + other side ask). Default: 1.01.
+    pub recovery_max_set_cost: Decimal,
+    /// Maximum extra risk fraction for recovery alpha trades. Default: 0.15 (15%).
+    pub recovery_max_extra_frac: Decimal,
+    /// Number of consecutive confirming ticks before re-entry. Default: 2.
+    pub reentry_confirm_ticks: usize,
+    /// Cooldown in seconds after recovery before re-entry is allowed. Default: 8.
+    pub reentry_cooldown_secs: i64,
 }
 
 fn default_liquidity_cooldowns() -> Vec<u64> {
@@ -348,6 +401,31 @@ impl Default for StopLossConfig {
             gtc_fallback: true,
             gtc_fallback_tick_offset: 1,
             gtc_stop_loss_max_age_secs: 10,
+            // Hard crash
+            hard_drop_abs: Decimal::new(8, 2),      // 0.08
+            hard_reversal_pct: Decimal::new(6, 3),   // 0.006
+            hard_window_ms: 2000,
+            // Freshness gating
+            sl_max_book_age_ms: 1200,
+            sl_max_external_age_ms: 1500,
+            sl_min_sources: 2,
+            sl_max_dispersion_bps: Decimal::new(50, 0), // 50 bps
+            // Hysteresis
+            dual_trigger_consecutive_ticks: 2,
+            // Short-lived limit
+            short_limit_refresh_secs: 2,
+            short_limit_tick_offset: 1,
+            // Trailing arming
+            trailing_arm_distance: Decimal::new(15, 3), // 0.015
+            // Execution ladder
+            exit_depth_cap_factor: Decimal::new(80, 2), // 0.80
+            max_exit_retries: 5,
+            // Recovery
+            recovery_enabled: true,
+            recovery_max_set_cost: Decimal::new(101, 2), // 1.01
+            recovery_max_extra_frac: Decimal::new(15, 2), // 0.15
+            reentry_confirm_ticks: 2,
+            reentry_cooldown_secs: 8,
         }
     }
 }
