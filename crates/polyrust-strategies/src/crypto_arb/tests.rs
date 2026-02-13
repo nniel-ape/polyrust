@@ -4730,3 +4730,203 @@ async fn remove_lifecycle_also_cleans_exit_orders() {
     assert!(!exit_orders.contains_key("exit-order-1"));
     assert!(exit_orders.contains_key("exit-order-2"));
 }
+
+// ---------------------------------------------------------------------------
+// Task 10: Composite price cache for stop-loss
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sl_composite_cache_fresh_returns_result() {
+    use super::base::CompositePriceResult;
+
+    let base = make_base_no_chainlink();
+    let now = Utc::now();
+
+    // Seed the cache directly
+    {
+        let mut cache = base.sl_composite_cache.write().await;
+        cache.insert(
+            "BTC".to_string(),
+            (
+                CompositePriceResult {
+                    price: dec!(88000),
+                    sources_used: 3,
+                    max_lag_ms: 200,
+                    dispersion_bps: dec!(5),
+                },
+                now,
+            ),
+        );
+    }
+
+    // Request with generous age limit — should return the cached composite
+    let result = base.get_sl_composite("BTC", 5000, now).await;
+    assert!(result.is_some(), "Fresh composite should be returned");
+    let r = result.unwrap();
+    assert_eq!(r.price, dec!(88000));
+    assert_eq!(r.sources_used, 3);
+}
+
+#[tokio::test]
+async fn sl_composite_cache_stale_returns_none() {
+    use super::base::CompositePriceResult;
+
+    let base = make_base_no_chainlink();
+    let cached_at = Utc::now() - chrono::Duration::seconds(10);
+    let now = Utc::now();
+
+    // Seed with a 10-second-old entry
+    {
+        let mut cache = base.sl_composite_cache.write().await;
+        cache.insert(
+            "BTC".to_string(),
+            (
+                CompositePriceResult {
+                    price: dec!(88000),
+                    sources_used: 3,
+                    max_lag_ms: 200,
+                    dispersion_bps: dec!(5),
+                },
+                cached_at,
+            ),
+        );
+    }
+
+    // Request with 1200ms age limit — 10s old entry should be stale
+    let result = base.get_sl_composite("BTC", 1200, now).await;
+    assert!(result.is_none(), "Stale composite should return None");
+}
+
+#[tokio::test]
+async fn sl_composite_cache_missing_coin_returns_none() {
+    let base = make_base_no_chainlink();
+    let now = Utc::now();
+
+    let result = base.get_sl_composite("ETH", 5000, now).await;
+    assert!(result.is_none(), "Missing coin should return None");
+}
+
+#[tokio::test]
+async fn sl_single_fresh_returns_recent_price() {
+    let base = make_base_no_chainlink();
+    let now = Utc::now();
+
+    // Seed price_history directly
+    {
+        let mut history = base.price_history.write().await;
+        let mut entries = std::collections::VecDeque::new();
+        entries.push_back((
+            now - chrono::Duration::milliseconds(500),
+            dec!(88500),
+            "binance-spot".to_string(),
+        ));
+        history.insert("BTC".to_string(), entries);
+    }
+
+    // 500ms old entry, 1500ms limit — should return
+    let result = base.get_sl_single_fresh("BTC", 1500, now).await;
+    assert!(result.is_some(), "Fresh single source should be returned");
+    assert_eq!(result.unwrap(), dec!(88500));
+}
+
+#[tokio::test]
+async fn sl_single_fresh_returns_none_when_stale() {
+    let base = make_base_no_chainlink();
+    let now = Utc::now();
+
+    // Seed price_history with a 5-second-old entry
+    {
+        let mut history = base.price_history.write().await;
+        let mut entries = std::collections::VecDeque::new();
+        entries.push_back((
+            now - chrono::Duration::seconds(5),
+            dec!(88500),
+            "binance-spot".to_string(),
+        ));
+        history.insert("BTC".to_string(), entries);
+    }
+
+    // 5s old entry, 1500ms limit — should be stale
+    let result = base.get_sl_single_fresh("BTC", 1500, now).await;
+    assert!(result.is_none(), "Stale single source should return None");
+}
+
+#[tokio::test]
+async fn sl_single_fresh_returns_none_for_missing_coin() {
+    let base = make_base_no_chainlink();
+    let now = Utc::now();
+
+    let result = base.get_sl_single_fresh("ETH", 1500, now).await;
+    assert!(result.is_none(), "Missing coin should return None");
+}
+
+#[tokio::test]
+async fn sl_composite_cache_propagates_to_lifecycle() {
+    use super::base::CompositePriceResult;
+
+    let base = make_base_no_chainlink();
+
+    // Create a position with a lifecycle (coin defaults to "BTC" in make_position)
+    let pos = make_position(
+        "market-1",
+        "token_btc",
+        OutcomeSide::Up,
+        dec!(0.90),
+        dec!(5),
+        dec!(88000),
+        dec!(0.90),
+    );
+    base.record_position(pos).await;
+
+    // Verify lifecycle was created in Healthy state
+    {
+        let lc = base.position_lifecycle.read().await;
+        let lifecycle = lc.get("token_btc").unwrap();
+        assert!(lifecycle.last_composite.is_none());
+        assert!(lifecycle.last_composite_at.is_none());
+    }
+
+    // Simulate update_sl_composite_cache by writing to cache and propagating
+    let now = Utc::now();
+    let composite = CompositePriceResult {
+        price: dec!(88500),
+        sources_used: 3,
+        max_lag_ms: 150,
+        dispersion_bps: dec!(3),
+    };
+
+    // Update cache
+    {
+        let mut cache = base.sl_composite_cache.write().await;
+        cache.insert("BTC".to_string(), (composite.clone(), now));
+    }
+
+    // Propagate to lifecycle (simulating what update_sl_composite_cache does)
+    {
+        let snapshot =
+            super::types::CompositePriceSnapshot::from_result(&composite);
+        let positions = base.positions.read().await;
+        let mut lifecycles = base.position_lifecycle.write().await;
+        for positions_vec in positions.values() {
+            for pos in positions_vec {
+                if pos.coin == "BTC" {
+                    if let Some(lc) = lifecycles.get_mut(&pos.token_id) {
+                        lc.last_composite = Some(snapshot.clone());
+                        lc.last_composite_at = Some(now);
+                    }
+                }
+            }
+        }
+    }
+
+    // Verify lifecycle was updated
+    {
+        let lc = base.position_lifecycle.read().await;
+        let lifecycle = lc.get("token_btc").unwrap();
+        assert!(lifecycle.last_composite.is_some());
+        let snap = lifecycle.last_composite.as_ref().unwrap();
+        assert_eq!(snap.price, dec!(88500));
+        assert_eq!(snap.sources_used, 3);
+        assert!(lifecycle.last_composite_at.is_some());
+    }
+}

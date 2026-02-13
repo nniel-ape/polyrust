@@ -636,6 +636,18 @@ pub struct CompositePriceSnapshot {
     pub dispersion_bps: Decimal,
 }
 
+impl CompositePriceSnapshot {
+    /// Create a snapshot from a `CompositePriceResult`.
+    pub fn from_result(r: &super::base::CompositePriceResult) -> Self {
+        Self {
+            price: r.price,
+            sources_used: r.sources_used,
+            max_lag_ms: r.max_lag_ms,
+            dispersion_bps: r.dispersion_bps,
+        }
+    }
+}
+
 impl Default for PositionLifecycle {
     fn default() -> Self {
         Self::new()

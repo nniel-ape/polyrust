@@ -147,15 +147,15 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 10
 
 ### Task 10: Implement composite price caching for stop-loss
-- [ ] Add `sl_composite_cache: RwLock<HashMap<String, (CompositePriceResult, DateTime<Utc>)>>` to `CryptoArbBase` (keyed by coin)
-- [ ] On every `ExternalPrice` event in `handle_external_price` (or wherever it's processed), recompute composite for that coin and update cache
-- [ ] Also update `PositionLifecycle.last_composite` and `last_composite_at` for positions with matching coin
-- [ ] Add helper: `get_sl_composite(&self, coin: &str, max_age_ms: i64) -> Option<CompositePriceResult>` — returns cached composite if fresh enough
-- [ ] Add helper: `get_sl_single_fresh(&self, coin: &str, max_age_ms: i64) -> Option<Decimal>` — fallback: freshest single source within age limit
-- [ ] Write test: fresh composite returned when within age limit
-- [ ] Write test: stale composite returns None
-- [ ] Write test: single fresh source returned when composite unavailable
-- [ ] Run tests — must pass before task 11
+- [x] Add `sl_composite_cache: RwLock<HashMap<String, (CompositePriceResult, DateTime<Utc>)>>` to `CryptoArbBase` (keyed by coin)
+- [x] On every `ExternalPrice` event in `handle_external_price` (or wherever it's processed), recompute composite for that coin and update cache
+- [x] Also update `PositionLifecycle.last_composite` and `last_composite_at` for positions with matching coin
+- [x] Add helper: `get_sl_composite(&self, coin: &str, max_age_ms: i64) -> Option<CompositePriceResult>` — returns cached composite if fresh enough
+- [x] Add helper: `get_sl_single_fresh(&self, coin: &str, max_age_ms: i64) -> Option<Decimal>` — fallback: freshest single source within age limit
+- [x] Write test: fresh composite returned when within age limit
+- [x] Write test: stale composite returns None
+- [x] Write test: single fresh source returned when composite unavailable
+- [x] Run tests — must pass before task 11
 
 ### Task 11: Implement trigger hierarchy (evaluate_triggers)
 - [ ] Add `evaluate_triggers()` method on `PositionLifecycle` (or as free function) accepting: position, orderbook snapshot, composite price, config, now timestamp

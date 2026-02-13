@@ -454,6 +454,11 @@ impl TailEndStrategy {
         let (_, promote_actions) = self.base.record_price(symbol, price, source, now).await;
         let mut result = promote_actions;
 
+        // Update the stop-loss composite cache for this coin.
+        // Runs on every ExternalPrice so the SL evaluation (on orderbook updates)
+        // always has a recent composite without needing StrategyContext.
+        self.base.update_sl_composite_cache(symbol, ctx).await;
+
         // Fast pre-filter: skip coins where no market is near expiration.
         // This avoids acquiring active_markets lock + iterating for 99%+ of events.
         // Runs BEFORE composite price check since it's a cheap HashMap lookup that

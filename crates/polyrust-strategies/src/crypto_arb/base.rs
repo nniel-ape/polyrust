@@ -308,6 +308,10 @@ pub struct CryptoArbBase {
     pub stop_loss_use_gtc: RwLock<HashSet<TokenId>>,
     /// Outstanding GTC stop-loss sell orders, keyed by order_id.
     pub gtc_stop_loss_orders: RwLock<HashMap<OrderId, GtcStopLossOrder>>,
+    /// Cached composite prices for stop-loss decisions, keyed by coin.
+    /// Updated on every ExternalPrice event in `record_price`.
+    /// Tuple: (composite result, timestamp when computed).
+    pub sl_composite_cache: RwLock<HashMap<String, (CompositePriceResult, DateTime<Utc>)>>,
     /// Per-position lifecycle state machines, keyed by token_id.
     /// Tracks each position through Healthy → DeferredExit → ExitExecuting → etc.
     pub position_lifecycle: RwLock<HashMap<TokenId, PositionLifecycle>>,
@@ -362,6 +366,7 @@ impl CryptoArbBase {
             signal_veto_stats: std::sync::Mutex::new(HashMap::new()),
             stop_loss_use_gtc: RwLock::new(HashSet::new()),
             gtc_stop_loss_orders: RwLock::new(HashMap::new()),
+            sl_composite_cache: RwLock::new(HashMap::new()),
             position_lifecycle: RwLock::new(HashMap::new()),
             exit_orders_by_id: RwLock::new(HashMap::new()),
             coins,
@@ -790,6 +795,102 @@ impl CryptoArbBase {
             max_lag_ms,
             dispersion_bps,
         })
+    }
+
+    // -------------------------------------------------------------------------
+    // Stop-loss composite cache
+    // -------------------------------------------------------------------------
+
+    /// Recompute the composite fair price for a coin and update the SL cache.
+    ///
+    /// Called from `handle_external_price` after `record_price`. Uses the
+    /// stop-loss freshness config (`sl_max_external_age_ms`, `sl_min_sources`,
+    /// `sl_max_dispersion_bps`). Also propagates the result to any open
+    /// `PositionLifecycle` entries for positions on this coin.
+    pub async fn update_sl_composite_cache(&self, coin: &str, ctx: &StrategyContext) {
+        let now = ctx.now().await;
+        let sl = &self.config.stop_loss;
+
+        // Use SL-specific freshness parameters (seconds, converted from ms)
+        let max_stale_secs = sl.sl_max_external_age_ms / 1000 + 1; // +1 for rounding
+        let composite = self
+            .composite_fair_price(
+                coin,
+                ctx,
+                max_stale_secs,
+                sl.sl_min_sources,
+                sl.sl_max_dispersion_bps,
+            )
+            .await;
+
+        if let Some(ref result) = composite {
+            // Update the per-coin cache
+            {
+                let mut cache = self.sl_composite_cache.write().await;
+                cache.insert(coin.to_string(), (result.clone(), now));
+            }
+
+            // Propagate to per-position lifecycle entries
+            let snapshot =
+                crate::crypto_arb::types::CompositePriceSnapshot::from_result(result);
+            let positions = self.positions.read().await;
+            let mut lifecycles = self.position_lifecycle.write().await;
+            for positions_vec in positions.values() {
+                for pos in positions_vec {
+                    if pos.coin == coin
+                        && let Some(lc) = lifecycles.get_mut(&pos.token_id)
+                    {
+                        lc.last_composite = Some(snapshot.clone());
+                        lc.last_composite_at = Some(now);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get a cached composite price for stop-loss decisions if fresh enough.
+    ///
+    /// Returns `None` if no cached entry exists or if the cached entry is
+    /// older than `max_age_ms` milliseconds.
+    pub async fn get_sl_composite(
+        &self,
+        coin: &str,
+        max_age_ms: i64,
+        now: DateTime<Utc>,
+    ) -> Option<CompositePriceResult> {
+        let cache = self.sl_composite_cache.read().await;
+        let (result, cached_at) = cache.get(coin)?;
+        let age_ms = (now - *cached_at).num_milliseconds();
+        if age_ms <= max_age_ms {
+            Some(result.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Get the freshest single external price source for a coin within the age limit.
+    ///
+    /// Fallback when the composite is unavailable (too few sources or stale).
+    /// Returns the price from the source with the most recent timestamp,
+    /// provided it is within `max_age_ms`.
+    pub async fn get_sl_single_fresh(
+        &self,
+        coin: &str,
+        max_age_ms: i64,
+        now: DateTime<Utc>,
+    ) -> Option<Decimal> {
+        let history = self.price_history.read().await;
+        let entries = history.get(coin)?;
+
+        // price_history is a VecDeque of (timestamp, price, source).
+        // Check only the most recent entry — if it's too old, all earlier ones are too.
+        if let Some((ts, price, _source)) = entries.back() {
+            let age_ms = (now - *ts).num_milliseconds();
+            if age_ms <= max_age_ms {
+                return Some(*price);
+            }
+        }
+        None
     }
 
     // -------------------------------------------------------------------------
