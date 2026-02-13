@@ -141,15 +141,15 @@ impl Default for TailEndConfig {
             rejection_cooldown_secs: 15,
             stale_ob_secs: 15,
             post_entry_exit_drop: Decimal::new(5, 2), // 0.05 (5 cents below entry)
-            post_entry_window_secs: 10,
+            post_entry_window_secs: 20,
             post_only: false,
             use_composite_price: false,
             max_source_stale_secs: 10,
             min_sources: 2,
             max_dispersion_bps: Decimal::new(50, 0),
             feed_stale_secs: 30,
-            min_sell_delay_secs: 15,
-            min_strike_distance_pct: Decimal::new(12, 4), // 0.0012 = 0.12%
+            min_sell_delay_secs: 10,
+            min_strike_distance_pct: Decimal::new(5, 3), // 0.005 = 0.5%
         }
     }
 }
@@ -299,8 +299,7 @@ pub struct StopLossConfig {
     pub stale_market_cooldown_secs: u64,
     /// Minimum seconds remaining for stop-loss to be active.
     /// Below this threshold, stop-losses are suppressed to avoid exiting
-    /// positions that are about to settle. Default: 0 (always active).
-    /// Previously hardcoded to 60, which suppressed ALL tailend stop-losses.
+    /// positions that are about to settle. Default: 45.
     pub min_remaining_secs: i64,
     /// Cooldown schedule for liquidity rejections ("couldn't be fully filled").
     /// Fast retry since the issue is transient market depth.
@@ -388,19 +387,19 @@ fn default_balance_cooldowns() -> Vec<u64> {
 impl Default for StopLossConfig {
     fn default() -> Self {
         Self {
-            reversal_pct: Decimal::new(5, 3), // 0.005
+            reversal_pct: Decimal::new(3, 3), // 0.003
             min_drop: Decimal::new(5, 2),     // 0.05
             trailing_enabled: true,
-            trailing_distance: Decimal::new(3, 2), // 0.03
+            trailing_distance: Decimal::new(5, 2), // 0.05
             time_decay: true,
-            trailing_min_distance: Decimal::new(5, 2), // 0.05 (widened from 0.01)
+            trailing_min_distance: Decimal::new(15, 3), // 0.015
             stale_market_cooldown_secs: 120,
-            min_remaining_secs: 0, // Always active (was hardcoded 60)
+            min_remaining_secs: 45, // Suppress near-expiry exit (was 0)
             liquidity_cooldowns: default_liquidity_cooldowns(),
             balance_cooldowns: default_balance_cooldowns(),
             gtc_fallback: true,
             gtc_fallback_tick_offset: 1,
-            gtc_stop_loss_max_age_secs: 10,
+            gtc_stop_loss_max_age_secs: 2,
             // Hard crash
             hard_drop_abs: Decimal::new(8, 2),      // 0.08
             hard_reversal_pct: Decimal::new(6, 3),   // 0.006

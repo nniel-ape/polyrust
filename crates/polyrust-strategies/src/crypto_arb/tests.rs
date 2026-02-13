@@ -317,10 +317,10 @@ fn config_default_sub_configs() {
     assert!(config.sizing.use_kelly);
 
     // StopLoss defaults
-    assert_eq!(config.stop_loss.reversal_pct, dec!(0.005));
+    assert_eq!(config.stop_loss.reversal_pct, dec!(0.003));
     assert_eq!(config.stop_loss.min_drop, dec!(0.05));
     assert!(config.stop_loss.trailing_enabled);
-    assert_eq!(config.stop_loss.trailing_distance, dec!(0.03));
+    assert_eq!(config.stop_loss.trailing_distance, dec!(0.05));
     assert!(config.stop_loss.time_decay);
 
     // Performance defaults
@@ -1211,7 +1211,7 @@ async fn stop_loss_no_trigger_drop_only() {
 
 #[tokio::test]
 async fn stop_loss_active_at_55s_with_default_config() {
-    // Default min_remaining_secs=0 means stop-loss is always active
+    // Default min_remaining_secs=45 means stop-loss is active at 55s (55 > 45)
     let base = make_base_with_market("m1", 55).await;
 
     {
@@ -1235,7 +1235,7 @@ async fn stop_loss_active_at_55s_with_default_config() {
     let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(
         result.is_some(),
-        "Stop-loss should trigger at 55s with default min_remaining_secs=0"
+        "Stop-loss should trigger at 55s with default min_remaining_secs=45"
     );
 }
 
@@ -1510,8 +1510,8 @@ async fn trailing_stop_triggers_on_drop_from_peak() {
 
     // Position profitable: entry=0.90, peak=0.96
     // At 450s: decay_factor = 450/900 = 0.5, raw = 0.03 * 0.5 = 0.015
-    // Floor = 0.05, so effective_distance = max(0.015, 0.05) = 0.05
-    // Current bid = 0.90, drop_from_peak = 0.96 - 0.90 = 0.06 >= 0.05 ✓
+    // Floor = 0.015, so effective_distance = max(0.015, 0.015) = 0.015
+    // Current bid = 0.90, drop_from_peak = 0.96 - 0.90 = 0.06 >= 0.015 ✓
     let pos = make_position(
         "m1",
         "token_up",
@@ -1573,8 +1573,8 @@ async fn trailing_stop_time_decay_at_900s() {
     }
 
     // At 900s: decay_factor = 900/900 = 1.0, raw = 0.03 * 1.0 = 0.03
-    // Floor = 0.05, so effective_distance = max(0.03, 0.05) = 0.05
-    // peak=0.96, bid=0.91: drop = 0.05 >= 0.05 ✓ (exactly at threshold)
+    // Floor = 0.015, so effective_distance = max(0.03, 0.015) = 0.03
+    // peak=0.96, bid=0.91: drop = 0.05 >= 0.03 ✓
     let pos = make_position(
         "m1",
         "token_up",
@@ -1605,8 +1605,8 @@ async fn trailing_stop_time_decay_at_450s() {
     }
 
     // At 450s: decay_factor = 450/900 = 0.5, raw = 0.03 * 0.5 = 0.015
-    // Floor = 0.05, so effective_distance = max(0.015, 0.05) = 0.05
-    // peak=0.96, bid=0.91: drop = 0.05 >= 0.05 ✓ (exactly at threshold)
+    // Floor = 0.015, so effective_distance = max(0.015, 0.015) = 0.015
+    // peak=0.96, bid=0.91: drop = 0.05 >= 0.015 ✓
     let pos = make_position(
         "m1",
         "token_up",
@@ -1637,8 +1637,8 @@ async fn trailing_stop_time_decay_at_90s_floored() {
     }
 
     // At 90s: decay_factor = 90/900 = 0.1, raw = 0.03 * 0.1 = 0.003
-    // But trailing_min_distance floor = 0.05, so effective_distance = 0.05
-    // peak=0.96, bid=0.93: drop = 0.03 < 0.05 → does NOT trigger (floor prevents noise)
+    // But trailing_min_distance floor = 0.015, so effective_distance = 0.015
+    // peak=0.96, bid=0.95: drop = 0.01 < 0.015 → does NOT trigger (floor prevents noise)
     let pos = make_position(
         "m1",
         "token_up",
@@ -1648,16 +1648,16 @@ async fn trailing_stop_time_decay_at_90s_floored() {
         dec!(50000),
         dec!(0.96),
     );
-    let snapshot = make_snapshot("token_up", dec!(0.93), dec!(0.96));
+    let snapshot = make_snapshot("token_up", dec!(0.95), dec!(0.96));
 
     let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(
         result.is_none(),
-        "Trailing stop should NOT trigger: drop (0.03) < floor (0.05)"
+        "Trailing stop should NOT trigger: drop (0.01) < floor (0.015)"
     );
 
-    // With a bigger drop: peak=0.96, bid=0.909 → drop = 0.051 >= 0.05 ✓
-    let snapshot_bigger = make_snapshot("token_up", dec!(0.909), dec!(0.96));
+    // With a bigger drop: peak=0.96, bid=0.944 → drop = 0.016 >= 0.015 ✓
+    let snapshot_bigger = make_snapshot("token_up", dec!(0.944), dec!(0.96));
     let result2 = base
         .check_stop_loss(&pos, &snapshot_bigger, Utc::now())
         .await;
@@ -1667,7 +1667,7 @@ async fn trailing_stop_time_decay_at_90s_floored() {
     );
     let (_, _, _, trigger) = result2.unwrap();
     assert_eq!(trigger.reason, "trailing_stop");
-    assert_eq!(trigger.effective_distance, dec!(0.05));
+    assert_eq!(trigger.effective_distance, dec!(0.015));
 }
 
 #[tokio::test]
@@ -2295,14 +2295,14 @@ async fn stale_order_cancel_pending_prevents_double() {
 
 #[tokio::test]
 async fn trailing_stop_floor_prevents_noise_trigger() {
-    // With the new wider floor (0.05), trailing stop requires peak >= entry + 0.05
-    // and a drop of at least 0.05 from peak. This prevents noise triggers.
+    // With floor=0.015, trailing stop requires peak >= entry + 0.015
+    // and a drop of at least floor from peak. This prevents noise triggers.
     let mut config = super::config::ArbitrageConfig::default();
     config.use_chainlink = false;
     config.stop_loss.trailing_enabled = true;
     config.stop_loss.trailing_distance = dec!(0.03);
     config.stop_loss.time_decay = true;
-    // Uses default trailing_min_distance = 0.05
+    // Uses default trailing_min_distance = 0.015
     let base = Arc::new(CryptoArbBase::new(config, vec![]));
 
     {
@@ -2326,7 +2326,7 @@ async fn trailing_stop_floor_prevents_noise_trigger() {
         history.insert("BTC".to_string(), entries);
     }
 
-    // entry=0.90, peak=0.93 → peak < entry + 0.05 (0.93 < 0.95)
+    // entry=0.90, peak=0.91 → peak < entry + 0.015 (0.91 < 0.915)
     // So the trailing stop should NOT arm at all
     let pos = make_position(
         "m1",
@@ -2335,14 +2335,14 @@ async fn trailing_stop_floor_prevents_noise_trigger() {
         dec!(0.90),
         dec!(10),
         dec!(50000),
-        dec!(0.93),
+        dec!(0.91),
     );
     let snapshot = make_snapshot("token_up", dec!(0.88), dec!(0.99));
 
     let result = base.check_stop_loss(&pos, &snapshot, Utc::now()).await;
     assert!(
         result.is_none(),
-        "Trailing stop should NOT arm when peak_bid < entry + min_distance (0.05)"
+        "Trailing stop should NOT arm when peak_bid < entry + min_distance (0.015)"
     );
 }
 
@@ -2357,10 +2357,10 @@ async fn trailing_stop_arms_at_min_distance_above_entry() {
         history.insert("BTC".to_string(), entries);
     }
 
-    // entry=0.90, peak=0.96 → peak >= entry + 0.05 ✓ (0.96 >= 0.95)
+    // entry=0.90, peak=0.96 → peak >= entry + 0.015 ✓ (0.96 >= 0.915)
     // At 300s: decay_factor = 300/900 = 0.333, raw = 0.03 * 0.333 = 0.01
-    // Floored to max(0.01, 0.05) = 0.05
-    // bid=0.909, drop = 0.96 - 0.909 = 0.051 >= 0.05 ✓
+    // Floored to max(0.01, 0.015) = 0.015
+    // bid=0.909, drop = 0.96 - 0.909 = 0.051 >= 0.015 ✓
     let pos = make_position(
         "m1",
         "token_up",
@@ -2392,7 +2392,7 @@ async fn trailing_stop_does_not_arm_below_min_distance() {
         history.insert("BTC".to_string(), entries);
     }
 
-    // entry=0.90, peak=0.94 → peak < entry + 0.05 (0.94 < 0.95)
+    // entry=0.90, peak=0.91 → peak < entry + 0.015 (0.91 < 0.915)
     // Trailing stop should NOT arm
     let pos = make_position(
         "m1",
@@ -2401,7 +2401,7 @@ async fn trailing_stop_does_not_arm_below_min_distance() {
         dec!(0.90),
         dec!(10),
         dec!(50000),
-        dec!(0.94),
+        dec!(0.91),
     );
     let snapshot = make_snapshot("token_up", dec!(0.85), dec!(0.87));
 
@@ -2508,14 +2508,14 @@ async fn handle_stop_loss_rejection_balance_allowance_does_not_mark_stale() {
 #[test]
 fn stop_loss_config_new_field_defaults() {
     let config = super::config::StopLossConfig::default();
-    assert_eq!(config.trailing_min_distance, dec!(0.05));
+    assert_eq!(config.trailing_min_distance, dec!(0.015));
     assert_eq!(config.stale_market_cooldown_secs, 120);
-    assert_eq!(config.min_remaining_secs, 0);
+    assert_eq!(config.min_remaining_secs, 45);
     assert_eq!(config.liquidity_cooldowns, vec![1, 5, 15, 30]);
     assert_eq!(config.balance_cooldowns, vec![5, 15, 30, 60]);
     assert!(config.gtc_fallback);
     assert_eq!(config.gtc_fallback_tick_offset, 1);
-    assert_eq!(config.gtc_stop_loss_max_age_secs, 10);
+    assert_eq!(config.gtc_stop_loss_max_age_secs, 2);
 }
 
 #[test]
@@ -2529,12 +2529,40 @@ fn stop_loss_config_deserialize_missing_new_fields() {
         time_decay = true
     "#;
     let config: super::config::StopLossConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.trailing_min_distance, dec!(0.05));
+    assert_eq!(config.trailing_min_distance, dec!(0.015));
     assert_eq!(config.stale_market_cooldown_secs, 120);
-    assert_eq!(config.min_remaining_secs, 0);
+    assert_eq!(config.min_remaining_secs, 45);
     assert_eq!(config.liquidity_cooldowns, vec![1, 5, 15, 30]);
     assert_eq!(config.balance_cooldowns, vec![5, 15, 30, 60]);
     assert!(config.gtc_fallback);
+}
+
+// ---------------------------------------------------------------------------
+// Default consistency invariant tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn trailing_floor_less_than_base_distance() {
+    let config = super::config::StopLossConfig::default();
+    assert!(
+        config.trailing_min_distance < config.trailing_distance,
+        "trailing_min_distance ({}) must be less than trailing_distance ({}) \
+         so time decay has room to operate",
+        config.trailing_min_distance,
+        config.trailing_distance,
+    );
+}
+
+#[test]
+fn post_entry_window_greater_than_sell_delay() {
+    let config = super::config::ArbitrageConfig::default();
+    assert!(
+        config.tailend.post_entry_window_secs > config.tailend.min_sell_delay_secs,
+        "post_entry_window_secs ({}) must be greater than min_sell_delay_secs ({}) \
+         so the post-entry exit window is reachable",
+        config.tailend.post_entry_window_secs,
+        config.tailend.min_sell_delay_secs,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2553,8 +2581,8 @@ async fn stop_loss_trigger_returns_trailing_metadata() {
     }
 
     // Trailing stop: entry=0.90, peak=0.96
-    // At 450s: decay_factor=0.5, raw=0.015, floored to max(0.015, 0.05)=0.05
-    // bid=0.909, drop=0.051 >= 0.05 ✓
+    // At 450s: decay_factor=0.5, raw=0.015, floored to max(0.015, 0.015)=0.015
+    // bid=0.909, drop=0.051 >= 0.015 ✓
     let pos = make_position(
         "m1",
         "token_up",
@@ -2571,11 +2599,11 @@ async fn stop_loss_trigger_returns_trailing_metadata() {
     let (_, _, _, trigger) = result.unwrap();
     assert_eq!(trigger.reason, "trailing_stop");
     assert_eq!(trigger.peak_bid, dec!(0.96));
-    // effective_distance is base * (time/900), floored to min_distance=0.05
+    // effective_distance is base * (time/900), floored to min_distance=0.015
     assert_eq!(
         trigger.effective_distance,
-        dec!(0.05),
-        "effective_distance should be 0.05 (floor)"
+        dec!(0.015),
+        "effective_distance should be 0.015 (floor)"
     );
     // time_remaining is approximate (±1s) so just check it's reasonable
     assert!(trigger.time_remaining >= 448 && trigger.time_remaining <= 451);
@@ -3497,7 +3525,7 @@ async fn cooldown_schedule_escalates_per_rejection_kind() {
 #[test]
 fn tailend_config_new_fields_default() {
     let config = super::config::TailEndConfig::default();
-    assert_eq!(config.min_strike_distance_pct, dec!(0.0012));
+    assert_eq!(config.min_strike_distance_pct, dec!(0.005));
 }
 
 #[test]
@@ -3508,7 +3536,7 @@ fn tailend_config_deserialize_missing_strike_distance() {
         ask_threshold = "0.90"
     "#;
     let config: super::config::TailEndConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.min_strike_distance_pct, dec!(0.0012));
+    assert_eq!(config.min_strike_distance_pct, dec!(0.005));
 }
 
 // ---------------------------------------------------------------------------

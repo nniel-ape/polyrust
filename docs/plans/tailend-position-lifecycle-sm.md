@@ -63,18 +63,18 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 2
 
 ### Task 2: Fix contradictory defaults
-- [ ] Change `trailing_distance` default: 0.03 → 0.05 in `config.rs` StopLossConfig Default
-- [ ] Change `trailing_min_distance` default: 0.05 → 0.015
-- [ ] Change `min_sell_delay_secs` default: 15 → 10 in TailEndConfig Default
-- [ ] Change `post_entry_window_secs` default: 10 → 20
-- [ ] Change `min_strike_distance_pct` default: 0.0012 → 0.005
-- [ ] Change `reversal_pct` default: 0.005 → 0.003
-- [ ] Change `min_remaining_secs` default: 0 → 45
-- [ ] Change `gtc_stop_loss_max_age_secs` default: 10 → 2
-- [ ] Update any hardcoded test values that relied on old defaults
-- [ ] Write test: verify floor < base for trailing (`trailing_min_distance < trailing_distance`)
-- [ ] Write test: verify post-entry window > sell delay
-- [ ] Run tests — must pass before task 3
+- [x] Change `trailing_distance` default: 0.03 → 0.05 in `config.rs` StopLossConfig Default
+- [x] Change `trailing_min_distance` default: 0.05 → 0.015
+- [x] Change `min_sell_delay_secs` default: 15 → 10 in TailEndConfig Default
+- [x] Change `post_entry_window_secs` default: 10 → 20
+- [x] Change `min_strike_distance_pct` default: 0.0012 → 0.005
+- [x] Change `reversal_pct` default: 0.005 → 0.003
+- [x] Change `min_remaining_secs` default: 0 → 45
+- [x] Change `gtc_stop_loss_max_age_secs` default: 10 → 2
+- [x] Update any hardcoded test values that relied on old defaults
+- [x] Write test: verify floor < base for trailing (`trailing_min_distance < trailing_distance`)
+- [x] Write test: verify post-entry window > sell delay
+- [x] Run tests — must pass before task 3
 
 ### Task 3: Add config validation methods
 - [ ] Add `StopLossConfig::validate() -> Result<(), String>` — check: `trailing_min_distance <= trailing_distance`, `short_limit_refresh_secs >= 1`, cooldown schedules non-empty, `exit_depth_cap_factor` in (0, 1]
