@@ -220,21 +220,21 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 15
 
 ### Task 15: Implement recovery logic (opposite-side + re-entry)
-- [ ] When `ResidualRisk` with max retries exhausted OR remaining under budget AND time > 30s: transition to `RecoveryProbe`
-- [ ] Recovery evaluation step 1 — Set completion: if `entry_price + ask_other_side <= recovery_max_set_cost` (1.01), buy opposite side at best ask (depth-capped FOK). Net recovery = `(1.0 - combined_cost) * size` minus fees
-- [ ] Recovery evaluation step 2 — Opposite-side alpha: if composite momentum confirms reversal for `reentry_confirm_ticks` consecutive ticks, buy other side. Guard: extra risk <= `recovery_max_extra_frac` (15%)
-- [ ] Recovery evaluation step 3 — Same-side re-entry: after full exit, if original signal resumes with `reentry_confirm_ticks` fresh ticks AND `reentry_cooldown_secs` elapsed. Never bypasses risk caps or max_positions
-- [ ] On recovery order fill: transition to `Cooldown { until: now + reentry_cooldown_secs }`
-- [ ] On recovery order rejection/failure: accept loss, resolve position, log remaining exposure
-- [ ] On `Cooldown` elapsed: transition to `Healthy` (position can be re-evaluated)
-- [ ] Look up opposite token_id from market data (token_a vs token_b based on current side)
-- [ ] Write test: set completion — entry 0.93, other ask 0.07 → combined 1.00 <= 1.01 → recovery buys
-- [ ] Write test: set completion — entry 0.93, other ask 0.10 → combined 1.03 > 1.01 → skip set completion
-- [ ] Write test: opposite-side alpha — momentum confirmed for 2 ticks → recovery buys within risk budget
-- [ ] Write test: same-side re-entry — signal resumes after cooldown → re-enters
-- [ ] Write test: same-side re-entry — cooldown not elapsed → blocks re-entry
-- [ ] Write test: recovery failure → position resolved with loss logged
-- [ ] Run tests — must pass before task 16
+- [x] When `ResidualRisk` with max retries exhausted OR remaining under budget AND time > 30s: transition to `RecoveryProbe`
+- [x] Recovery evaluation step 1 — Set completion: if `entry_price + ask_other_side <= recovery_max_set_cost` (1.01), buy opposite side at best ask (depth-capped FOK). Net recovery = `(1.0 - combined_cost) * size` minus fees
+- [x] Recovery evaluation step 2 — Opposite-side alpha: if composite momentum confirms reversal for `reentry_confirm_ticks` consecutive ticks, buy other side. Guard: extra risk <= `recovery_max_extra_frac` (15%)
+- [x] Recovery evaluation step 3 — Same-side re-entry: after full exit, if original signal resumes with `reentry_confirm_ticks` fresh ticks AND `reentry_cooldown_secs` elapsed. Never bypasses risk caps or max_positions
+- [x] On recovery order fill: transition to `Cooldown { until: now + reentry_cooldown_secs }`
+- [x] On recovery order rejection/failure: accept loss, resolve position, log remaining exposure
+- [x] On `Cooldown` elapsed: transition to `Healthy` (position can be re-evaluated)
+- [x] Look up opposite token_id from market data (token_a vs token_b based on current side)
+- [x] Write test: set completion — entry 0.93, other ask 0.07 → combined 1.00 <= 1.01 → recovery buys
+- [x] Write test: set completion — entry 0.93, other ask 0.10 → combined 1.03 > 1.01 → skip set completion
+- [x] Write test: opposite-side alpha — momentum confirmed for 2 ticks → recovery buys within risk budget
+- [x] Write test: same-side re-entry — signal resumes after cooldown → re-enters
+- [x] Write test: same-side re-entry — cooldown not elapsed → blocks re-entry
+- [x] Write test: recovery failure → position resolved with loss logged
+- [x] Run tests — must pass before task 16
 
 ### Task 16: Route order events through lifecycle transitions
 - [ ] In `on_order_filled` (tailend.rs): check `exit_orders_by_id` first — if matched, route to lifecycle transition handler

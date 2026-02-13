@@ -318,6 +318,10 @@ pub struct CryptoArbBase {
     /// Exit/recovery orders in flight, keyed by order_id.
     /// Used to route fill/reject events back to the correct position lifecycle.
     pub exit_orders_by_id: RwLock<HashMap<OrderId, ExitOrderMeta>>,
+    /// Re-entry cooldowns per market_id after recovery exit.
+    /// Prevents re-entering the same market too quickly after a stop-loss cycle.
+    /// Keyed by market_id, value is (expires_at, confirm_ticks_remaining).
+    pub recovery_exit_cooldowns: RwLock<HashMap<MarketId, DateTime<Utc>>>,
     /// Coins configured for this strategy.
     coins: HashSet<String>,
     /// Last event timestamp from the strategy context (simulated or real).
@@ -369,6 +373,7 @@ impl CryptoArbBase {
             sl_composite_cache: RwLock::new(HashMap::new()),
             position_lifecycle: RwLock::new(HashMap::new()),
             exit_orders_by_id: RwLock::new(HashMap::new()),
+            recovery_exit_cooldowns: RwLock::new(HashMap::new()),
             coins,
             last_event_time: RwLock::new(Utc::now()),
         }
@@ -1700,6 +1705,24 @@ impl CryptoArbBase {
         exit_orders.retain(|_, meta| meta.token_id != token_id);
     }
 
+    /// Look up the opposite token_id for a given token in its market.
+    ///
+    /// In Polymarket, each market has two outcome tokens (outcome_a / outcome_b).
+    /// Given one token, this returns the other. Returns `None` if the market
+    /// isn't found or the token doesn't match either outcome.
+    pub async fn get_opposite_token(&self, market_id: &str, token_id: &str) -> Option<TokenId> {
+        let markets = self.active_markets.read().await;
+        let mwr = markets.get(market_id)?;
+        let ids = &mwr.market.token_ids;
+        if token_id == ids.outcome_a {
+            Some(ids.outcome_b.clone())
+        } else if token_id == ids.outcome_b {
+            Some(ids.outcome_a.clone())
+        } else {
+            None
+        }
+    }
+
     /// Remove a position by token_id across all markets, returning it.
     /// Also clears the stop-loss retry count for this token.
     pub async fn remove_position_by_token(&self, token_id: &str) -> Option<ArbitragePosition> {
@@ -2038,6 +2061,26 @@ impl CryptoArbBase {
     pub async fn is_stale_market_cooled_down(&self, market_id: &MarketId) -> bool {
         let now = self.event_time().await;
         let cooldowns = self.stale_market_cooldowns.read().await;
+        if let Some(expires_at) = cooldowns.get(market_id) {
+            now < *expires_at
+        } else {
+            false
+        }
+    }
+
+    /// Record a recovery exit cooldown to prevent same-side re-entry too quickly.
+    pub async fn record_recovery_exit_cooldown(&self, market_id: &MarketId) {
+        let now = self.event_time().await;
+        let expires_at =
+            now + chrono::Duration::seconds(self.config.stop_loss.reentry_cooldown_secs);
+        let mut cooldowns = self.recovery_exit_cooldowns.write().await;
+        cooldowns.insert(market_id.clone(), expires_at);
+    }
+
+    /// Check if a market is still in recovery exit cooldown (preventing re-entry).
+    pub async fn is_recovery_exit_cooled_down(&self, market_id: &MarketId) -> bool {
+        let now = self.event_time().await;
+        let cooldowns = self.recovery_exit_cooldowns.read().await;
         if let Some(expires_at) = cooldowns.get(market_id) {
             now < *expires_at
         } else {

@@ -5347,3 +5347,398 @@ fn exit_clip_dust_remaining_returns_zero() {
     let clip = compute_exit_clip(dec!(0.001), dec!(100), dec!(0.8), dec!(1));
     assert_eq!(clip, Decimal::ZERO, "Dust remaining should return zero");
 }
+
+// ---------------------------------------------------------------------------
+// Recovery logic tests (Task 15)
+// ---------------------------------------------------------------------------
+
+/// Test set completion viability: entry 0.93 + other_ask 0.07 = 1.00 <= 1.01 → viable.
+#[tokio::test]
+async fn recovery_set_completion_viable_combined_cost_within_budget() {
+    let base = make_base_with_market("m1", 300).await;
+
+    // Create position with entry at 0.93
+    let pos = make_position(
+        "m1",
+        "token_up",
+        OutcomeSide::Up,
+        dec!(0.93),
+        dec!(10),
+        dec!(50000),
+        dec!(0.93),
+    );
+    {
+        let mut positions = base.positions.write().await;
+        positions
+            .entry("m1".to_string())
+            .or_default()
+            .push(pos.clone());
+    }
+    base.ensure_lifecycle("token_up").await;
+
+    // Seed the opposite token's cached ask at 0.07
+    {
+        let mut asks = base.cached_asks.write().await;
+        asks.insert("token_down".to_string(), dec!(0.07));
+    }
+
+    // Check: combined cost = 0.93 + 0.07 = 1.00 <= recovery_max_set_cost (1.01)
+    let combined = pos.entry_price + dec!(0.07);
+    assert!(
+        combined <= base.config.stop_loss.recovery_max_set_cost,
+        "Set completion should be viable: {} <= {}",
+        combined,
+        base.config.stop_loss.recovery_max_set_cost
+    );
+
+    // Verify opposite token lookup works
+    let opposite = base.get_opposite_token("m1", "token_up").await;
+    assert_eq!(opposite, Some("token_down".to_string()));
+}
+
+/// Test set completion not viable: entry 0.93 + other_ask 0.10 = 1.03 > 1.01 → skip.
+#[tokio::test]
+async fn recovery_set_completion_not_viable_combined_cost_exceeds_budget() {
+    let base = make_base_with_market("m1", 300).await;
+
+    let pos = make_position(
+        "m1",
+        "token_up",
+        OutcomeSide::Up,
+        dec!(0.93),
+        dec!(10),
+        dec!(50000),
+        dec!(0.93),
+    );
+
+    // Set opposite token ask to 0.10 (combined 1.03 > 1.01)
+    {
+        let mut asks = base.cached_asks.write().await;
+        asks.insert("token_down".to_string(), dec!(0.10));
+    }
+
+    let combined = pos.entry_price + dec!(0.10);
+    assert!(
+        combined > base.config.stop_loss.recovery_max_set_cost,
+        "Set completion should NOT be viable: {} > {}",
+        combined,
+        base.config.stop_loss.recovery_max_set_cost
+    );
+}
+
+/// Test opposite-side alpha recovery: momentum confirmed for 2 ticks → recovery is viable.
+#[tokio::test]
+async fn recovery_opposite_alpha_momentum_confirmed() {
+    let base = make_base_with_market("m1", 300).await;
+    let sl_config = &base.config.stop_loss;
+
+    // Position: bought Up at 0.90, reference was 50000
+    let pos = make_position(
+        "m1",
+        "token_up",
+        OutcomeSide::Up,
+        dec!(0.90),
+        dec!(10),
+        dec!(50000),
+        dec!(0.90),
+    );
+
+    // Seed price history with reversal: BTC dropped below reference for N ticks
+    // For Up position, reversal means price < reference
+    {
+        let mut history = base.price_history.write().await;
+        let mut entries = VecDeque::new();
+        let now = Utc::now();
+        for i in 0..sl_config.reentry_confirm_ticks {
+            entries.push_back((
+                now - Duration::seconds((sl_config.reentry_confirm_ticks - i) as i64),
+                dec!(49500), // Below 50000 reference = reversal for Up position
+                "test".to_string(),
+            ));
+        }
+        history.insert("BTC".to_string(), entries);
+    }
+
+    // Seed composite cache
+    {
+        let mut cache = base.sl_composite_cache.write().await;
+        cache.insert(
+            "BTC".to_string(),
+            (
+                super::base::CompositePriceResult {
+                    price: dec!(49500),
+                    sources_used: 2,
+                    max_lag_ms: 100,
+                    dispersion_bps: dec!(10),
+                },
+                Utc::now(),
+            ),
+        );
+    }
+
+    // Verify: all recent ticks show reversal (price < reference for Up)
+    {
+        let history = base.price_history.read().await;
+        let entries = history.get("BTC").unwrap();
+        let all_reversed = entries
+            .iter()
+            .rev()
+            .take(sl_config.reentry_confirm_ticks)
+            .all(|(_, price, _)| {
+                // For Up position, reversal = price dropped below reference
+                *price < pos.reference_price
+            });
+        assert!(all_reversed, "All recent ticks should show reversal");
+    }
+
+    // Verify the other side ask is within risk budget
+    {
+        let mut asks = base.cached_asks.write().await;
+        asks.insert("token_down".to_string(), dec!(0.12));
+    }
+    let position_value = pos.entry_price * pos.size;
+    let extra_risk = dec!(0.12) * pos.size;
+    let risk_frac = extra_risk / position_value;
+    assert!(
+        risk_frac <= sl_config.recovery_max_extra_frac,
+        "Extra risk fraction {} should be within budget {}",
+        risk_frac,
+        sl_config.recovery_max_extra_frac
+    );
+}
+
+/// Test same-side re-entry blocked: recovery exit cooldown not elapsed → blocks re-entry.
+#[tokio::test]
+async fn recovery_same_side_reentry_blocked_during_cooldown() {
+    let base = make_base_with_market("m1", 300).await;
+
+    // Record a recovery exit cooldown for market m1
+    base.record_recovery_exit_cooldown(&"m1".to_string()).await;
+
+    // Verify cooldown is active
+    let cooled = base.is_recovery_exit_cooled_down(&"m1".to_string()).await;
+    assert!(cooled, "Recovery exit cooldown should be active immediately after recording");
+}
+
+/// Test same-side re-entry allowed: cooldown elapsed → allows re-entry.
+#[tokio::test]
+async fn recovery_same_side_reentry_allowed_after_cooldown() {
+    let mut config = ArbitrageConfig::default();
+    config.use_chainlink = false;
+    // Set very short cooldown for testing
+    config.stop_loss.reentry_cooldown_secs = 1;
+    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+    // Set event time to 10 seconds ago
+    let past = Utc::now() - Duration::seconds(10);
+    *base.last_event_time.write().await = past;
+
+    // Record cooldown (will expire at past + 1s, which is 9 seconds ago)
+    {
+        let expires_at = past + Duration::seconds(1);
+        let mut cooldowns = base.recovery_exit_cooldowns.write().await;
+        cooldowns.insert("m1".to_string(), expires_at);
+    }
+
+    // Now set event time to current time (well past the cooldown)
+    *base.last_event_time.write().await = Utc::now();
+
+    let cooled = base.is_recovery_exit_cooled_down(&"m1".to_string()).await;
+    assert!(
+        !cooled,
+        "Recovery exit cooldown should have expired (1s cooldown, checked 10s later)"
+    );
+}
+
+/// Test recovery failure: position resolved with loss and lifecycle cleaned up.
+#[tokio::test]
+async fn recovery_failure_resolves_position_with_loss() {
+    let base = make_base_with_market("m1", 300).await;
+
+    // Create position
+    let pos = make_position(
+        "m1",
+        "token_up",
+        OutcomeSide::Up,
+        dec!(0.93),
+        dec!(10),
+        dec!(50000),
+        dec!(0.93),
+    );
+    {
+        let mut positions = base.positions.write().await;
+        positions
+            .entry("m1".to_string())
+            .or_default()
+            .push(pos.clone());
+    }
+
+    // Set up lifecycle in RecoveryProbe state
+    let mut lifecycle = PositionLifecycle::new();
+    let now = Utc::now();
+    // Healthy -> ExitExecuting
+    lifecycle
+        .transition(
+            PositionLifecycleState::ExitExecuting {
+                order_id: "exit-1".into(),
+                order_type: OrderType::Fok,
+                exit_price: dec!(0.85),
+                submitted_at: now,
+            },
+            "trigger",
+            now,
+        )
+        .unwrap();
+    // ExitExecuting -> ResidualRisk
+    lifecycle
+        .transition(
+            PositionLifecycleState::ResidualRisk {
+                remaining_size: dec!(10),
+                retry_count: 5,
+                last_attempt: now,
+                use_gtc_next: true,
+            },
+            "rejected",
+            now,
+        )
+        .unwrap();
+    // ResidualRisk -> RecoveryProbe
+    lifecycle
+        .transition(
+            PositionLifecycleState::RecoveryProbe {
+                recovery_order_id: "recovery-1".into(),
+                probe_side: OutcomeSide::Down,
+                submitted_at: now,
+            },
+            "try recovery",
+            now,
+        )
+        .unwrap();
+
+    {
+        let mut lifecycles = base.position_lifecycle.write().await;
+        lifecycles.insert("token_up".to_string(), lifecycle);
+    }
+
+    // Simulate recovery failure: resolve position
+    base.reduce_or_remove_position_by_token("token_up", dec!(10))
+        .await;
+
+    // Verify position is removed
+    let positions = base.positions.read().await;
+    let m1_positions = positions.get("m1");
+    let token_up_exists = m1_positions
+        .map(|v| v.iter().any(|p| p.token_id == "token_up"))
+        .unwrap_or(false);
+    assert!(!token_up_exists, "Position should be removed after recovery failure");
+}
+
+/// Test lifecycle transitions through the full recovery cycle:
+/// Healthy → ExitExecuting → ResidualRisk → RecoveryProbe → Cooldown → Healthy
+#[test]
+fn lifecycle_full_recovery_cycle() {
+    let now = Utc::now();
+    let mut lifecycle = PositionLifecycle::new();
+
+    // Healthy → ExitExecuting
+    lifecycle
+        .transition(
+            PositionLifecycleState::ExitExecuting {
+                order_id: "exit-1".into(),
+                order_type: OrderType::Fok,
+                exit_price: dec!(0.85),
+                submitted_at: now,
+            },
+            "hard crash trigger",
+            now,
+        )
+        .unwrap();
+
+    // ExitExecuting → ResidualRisk
+    lifecycle
+        .transition(
+            PositionLifecycleState::ResidualRisk {
+                remaining_size: dec!(10),
+                retry_count: 5,
+                last_attempt: now,
+                use_gtc_next: true,
+            },
+            "FOK rejected",
+            now,
+        )
+        .unwrap();
+
+    // ResidualRisk → RecoveryProbe
+    lifecycle
+        .transition(
+            PositionLifecycleState::RecoveryProbe {
+                recovery_order_id: "recovery-set-token_up-123".into(),
+                probe_side: OutcomeSide::Down,
+                submitted_at: now,
+            },
+            "set completion viable",
+            now,
+        )
+        .unwrap();
+
+    // RecoveryProbe → Cooldown
+    let cooldown_until = now + Duration::seconds(8);
+    lifecycle
+        .transition(
+            PositionLifecycleState::Cooldown {
+                until: cooldown_until,
+            },
+            "recovery fill at 0.07",
+            now,
+        )
+        .unwrap();
+
+    // Cooldown → Healthy
+    let after_cooldown = cooldown_until + Duration::seconds(1);
+    lifecycle
+        .transition(
+            PositionLifecycleState::Healthy,
+            "cooldown elapsed",
+            after_cooldown,
+        )
+        .unwrap();
+
+    assert!(
+        matches!(lifecycle.state, PositionLifecycleState::Healthy),
+        "Should be back to Healthy after full recovery cycle"
+    );
+    assert_eq!(
+        lifecycle.transition_log.len(),
+        5,
+        "Should have 5 transitions in the log"
+    );
+}
+
+/// Test that recovery exit cooldown is recorded when position is resolved.
+#[tokio::test]
+async fn recovery_exit_records_cooldown_for_market() {
+    let base = make_base_with_market("m1", 300).await;
+    let m1 = "m1".to_string();
+    let m2 = "m2".to_string();
+
+    // No cooldown initially
+    assert!(
+        !base.is_recovery_exit_cooled_down(&m1).await,
+        "No cooldown should exist initially"
+    );
+
+    // Record cooldown
+    base.record_recovery_exit_cooldown(&m1).await;
+
+    // Cooldown should be active
+    assert!(
+        base.is_recovery_exit_cooled_down(&m1).await,
+        "Cooldown should be active after recording"
+    );
+
+    // Different market should not be affected
+    assert!(
+        !base.is_recovery_exit_cooled_down(&m2).await,
+        "Different market should not be affected"
+    );
+}

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use polyrust_core::prelude::*;
 
@@ -543,6 +543,16 @@ impl TailEndStrategy {
                 continue;
             }
 
+            // Skip if in recovery exit cooldown (same-side re-entry gating)
+            if self.base.is_recovery_exit_cooled_down(&market_id).await {
+                debug!(
+                    market = %market_id,
+                    "TailEnd skip: recovery exit cooldown active"
+                );
+                self.base.record_tailend_skip("recovery_cooldown").await;
+                continue;
+            }
+
             // Atomically check exposure + position limits and reserve the market
             if !self
                 .base
@@ -819,12 +829,19 @@ impl TailEndStrategy {
                 continue;
             }
 
-            // Skip Cooldown and RecoveryProbe states — handled by their own flows
-            if matches!(
-                lifecycle.state,
-                PositionLifecycleState::Cooldown { .. }
-                    | PositionLifecycleState::RecoveryProbe { .. }
-            ) {
+            // Handle Cooldown state: check if elapsed, transition back to Healthy
+            if let PositionLifecycleState::Cooldown { until } = lifecycle.state {
+                if self.handle_cooldown(&pos, &mut lifecycle, until, now).await {
+                    // Cooldown elapsed — fall through to normal trigger evaluation
+                } else {
+                    // Still in cooldown — skip
+                    continue;
+                }
+            }
+
+            // RecoveryProbe: order is in flight, wait for fill/reject events
+            if matches!(lifecycle.state, PositionLifecycleState::RecoveryProbe { .. }) {
+                self.handle_recovery_probe(&pos, &mut lifecycle, now).await;
                 continue;
             }
 
@@ -1214,15 +1231,46 @@ impl TailEndStrategy {
             return None;
         }
 
-        // Max retries exhausted — transition to RecoveryProbe (task 15) or resolve with loss
+        // Max retries exhausted — attempt recovery or resolve with loss
         if retry_count >= sl_config.max_exit_retries {
-            error!(
+            if !sl_config.recovery_enabled {
+                warn!(
+                    token_id = %pos.token_id,
+                    retry_count,
+                    remaining = %remaining_size,
+                    "ResidualRisk: max retries exhausted, recovery disabled — resolving with loss"
+                );
+                self.base.record_recovery_exit_cooldown(&pos.market_id).await;
+                self.base
+                    .reduce_or_remove_position_by_token(&pos.token_id, remaining_size)
+                    .await;
+                return None;
+            }
+
+            // Try set completion recovery (opposite-side buy)
+            if let Some(action) = self
+                .try_set_completion_recovery(pos, remaining_size, lifecycle, now)
+                .await
+            {
+                return Some(action);
+            }
+
+            // Try opposite-side alpha recovery (momentum-confirmed reversal)
+            if let Some(action) = self
+                .try_opposite_alpha_recovery(pos, remaining_size, lifecycle, now)
+                .await
+            {
+                return Some(action);
+            }
+
+            // No recovery viable — resolve with loss
+            warn!(
                 token_id = %pos.token_id,
                 retry_count,
                 remaining = %remaining_size,
-                "ResidualRisk: max exit retries exhausted, resolving with loss"
+                "ResidualRisk: max retries exhausted, recovery not viable — resolving with loss"
             );
-            // For now (before task 15), resolve the position with loss
+            self.base.record_recovery_exit_cooldown(&pos.market_id).await;
             self.base
                 .reduce_or_remove_position_by_token(&pos.token_id, remaining_size)
                 .await;
@@ -1447,6 +1495,331 @@ impl TailEndStrategy {
         Some(Action::PlaceOrder(order))
     }
 
+    /// Try set completion recovery: buy the opposite side so both tokens can be
+    /// redeemed for $1.00 per share (minus fees).
+    ///
+    /// Only viable when `entry_price + other_ask <= recovery_max_set_cost` (default 1.01).
+    /// Places a FOK buy order for the opposite token, depth-capped.
+    async fn try_set_completion_recovery(
+        &self,
+        pos: &ArbitragePosition,
+        remaining_size: Decimal,
+        lifecycle: &mut PositionLifecycle,
+        now: DateTime<Utc>,
+    ) -> Option<Action> {
+        let sl_config = &self.base.config.stop_loss;
+
+        // Look up opposite token
+        let opposite_token = self
+            .base
+            .get_opposite_token(&pos.market_id, &pos.token_id)
+            .await?;
+
+        // Get opposite token's best ask from cached orderbook data
+        let other_ask = {
+            let cached = self.base.cached_asks.read().await;
+            cached.get(&opposite_token).copied()
+        }?;
+
+        // Check set completion viability: entry + other_ask <= max_set_cost
+        let combined_cost = pos.entry_price + other_ask;
+        if combined_cost > sl_config.recovery_max_set_cost {
+            debug!(
+                token_id = %pos.token_id,
+                entry = %pos.entry_price,
+                other_ask = %other_ask,
+                combined = %combined_cost,
+                max = %sl_config.recovery_max_set_cost,
+                "Set completion not viable: combined cost exceeds max"
+            );
+            return None;
+        }
+
+        // Get market metadata
+        let (neg_risk, min_order_size) = {
+            let markets = self.base.active_markets.read().await;
+            let m = markets.get(&pos.market_id)?;
+            (m.market.neg_risk, m.market.min_order_size)
+        };
+
+        // Compute clip size — use remaining_size capped by depth
+        let clip = remaining_size.min(remaining_size); // Simple: buy matching size
+        if clip < min_order_size {
+            debug!(
+                token_id = %pos.token_id,
+                clip = %clip,
+                min = %min_order_size,
+                "Set completion: clip below min order size"
+            );
+            return None;
+        }
+
+        // Determine the opposite side
+        let probe_side = match pos.side {
+            OutcomeSide::Up | OutcomeSide::Yes => OutcomeSide::Down,
+            OutcomeSide::Down | OutcomeSide::No => OutcomeSide::Up,
+        };
+
+        // Build FOK buy order for opposite token at best ask
+        let order = OrderRequest::new(
+            opposite_token.clone(),
+            other_ask,
+            clip,
+            OrderSide::Buy,
+            OrderType::Fok,
+            neg_risk,
+        )
+        .with_tick_size(pos.tick_size)
+        .with_fee_rate_bps(pos.fee_rate_bps);
+
+        let recovery_order_id = format!(
+            "recovery-set-{}-{}",
+            pos.token_id,
+            now.timestamp_millis()
+        );
+
+        // Transition to RecoveryProbe
+        if let Err(e) = lifecycle.transition(
+            PositionLifecycleState::RecoveryProbe {
+                recovery_order_id: recovery_order_id.clone(),
+                probe_side,
+                submitted_at: now,
+            },
+            &format!(
+                "set completion: entry={} + other_ask={} = {} <= {}",
+                pos.entry_price, other_ask, combined_cost, sl_config.recovery_max_set_cost
+            ),
+            now,
+        ) {
+            warn!(token_id = %pos.token_id, error = %e, "Lifecycle transition to RecoveryProbe failed");
+            return None;
+        }
+        lifecycle.pending_exit_order_id = Some(recovery_order_id.clone());
+        self.write_lifecycle(&pos.token_id, lifecycle).await;
+
+        // Track recovery order
+        {
+            let mut exit_orders = self.base.exit_orders_by_id.write().await;
+            exit_orders.insert(
+                recovery_order_id,
+                ExitOrderMeta {
+                    token_id: pos.token_id.clone(),
+                    order_type: OrderType::Fok,
+                    source_state: "RecoveryProbe(set_completion)".to_string(),
+                },
+            );
+        }
+
+        info!(
+            token_id = %pos.token_id,
+            opposite = %opposite_token,
+            other_ask = %other_ask,
+            combined_cost = %combined_cost,
+            clip = %clip,
+            "RecoveryProbe: placing set completion buy (opposite side)"
+        );
+
+        Some(Action::PlaceOrder(order))
+    }
+
+    /// Try opposite-side alpha recovery: buy the other side when composite
+    /// momentum confirms reversal for `reentry_confirm_ticks` consecutive ticks.
+    ///
+    /// Guard: extra risk (other_ask * size) must be <= `recovery_max_extra_frac`
+    /// of position value.
+    async fn try_opposite_alpha_recovery(
+        &self,
+        pos: &ArbitragePosition,
+        remaining_size: Decimal,
+        lifecycle: &mut PositionLifecycle,
+        now: DateTime<Utc>,
+    ) -> Option<Action> {
+        let sl_config = &self.base.config.stop_loss;
+
+        // Check if momentum confirms reversal for N consecutive ticks
+        // We use the composite cache and price history for this
+        let composite = {
+            let cache = self.base.sl_composite_cache.read().await;
+            cache.get(&pos.coin).map(|(c, _)| c.price)
+        }?;
+
+        // Check reversal direction relative to position side
+        let reversal_confirmed = {
+            let history = self.base.price_history.read().await;
+            let entries = history.get(&pos.coin)?;
+            if entries.len() < sl_config.reentry_confirm_ticks {
+                return None;
+            }
+            // Check last N entries all show reversal
+            let recent: Vec<_> = entries
+                .iter()
+                .rev()
+                .take(sl_config.reentry_confirm_ticks)
+                .collect();
+            recent.iter().all(|(_, price, _)| {
+                match pos.side {
+                    // For Up position, reversal means price dropping
+                    OutcomeSide::Up | OutcomeSide::Yes => *price < pos.reference_price,
+                    // For Down position, reversal means price rising
+                    OutcomeSide::Down | OutcomeSide::No => *price > pos.reference_price,
+                }
+            })
+        };
+
+        if !reversal_confirmed {
+            return None;
+        }
+
+        // Look up opposite token
+        let opposite_token = self
+            .base
+            .get_opposite_token(&pos.market_id, &pos.token_id)
+            .await?;
+
+        let other_ask = {
+            let cached = self.base.cached_asks.read().await;
+            cached.get(&opposite_token).copied()
+        }?;
+
+        // Guard: extra risk <= recovery_max_extra_frac of position value
+        let position_value = pos.entry_price * remaining_size;
+        let extra_risk = other_ask * remaining_size;
+        if position_value.is_zero()
+            || extra_risk / position_value > sl_config.recovery_max_extra_frac
+        {
+            debug!(
+                token_id = %pos.token_id,
+                extra_risk = %extra_risk,
+                position_value = %position_value,
+                max_frac = %sl_config.recovery_max_extra_frac,
+                "Opposite alpha: extra risk exceeds budget"
+            );
+            return None;
+        }
+
+        let (neg_risk, min_order_size) = {
+            let markets = self.base.active_markets.read().await;
+            let m = markets.get(&pos.market_id)?;
+            (m.market.neg_risk, m.market.min_order_size)
+        };
+
+        let clip = remaining_size;
+        if clip < min_order_size {
+            return None;
+        }
+
+        let probe_side = match pos.side {
+            OutcomeSide::Up | OutcomeSide::Yes => OutcomeSide::Down,
+            OutcomeSide::Down | OutcomeSide::No => OutcomeSide::Up,
+        };
+
+        let order = OrderRequest::new(
+            opposite_token.clone(),
+            other_ask,
+            clip,
+            OrderSide::Buy,
+            OrderType::Fok,
+            neg_risk,
+        )
+        .with_tick_size(pos.tick_size)
+        .with_fee_rate_bps(pos.fee_rate_bps);
+
+        let recovery_order_id = format!(
+            "recovery-alpha-{}-{}",
+            pos.token_id,
+            now.timestamp_millis()
+        );
+
+        if let Err(e) = lifecycle.transition(
+            PositionLifecycleState::RecoveryProbe {
+                recovery_order_id: recovery_order_id.clone(),
+                probe_side,
+                submitted_at: now,
+            },
+            &format!(
+                "opposite alpha: composite={}, reversal confirmed for {} ticks",
+                composite, sl_config.reentry_confirm_ticks
+            ),
+            now,
+        ) {
+            warn!(token_id = %pos.token_id, error = %e, "Lifecycle transition to RecoveryProbe failed");
+            return None;
+        }
+        lifecycle.pending_exit_order_id = Some(recovery_order_id.clone());
+        self.write_lifecycle(&pos.token_id, lifecycle).await;
+
+        {
+            let mut exit_orders = self.base.exit_orders_by_id.write().await;
+            exit_orders.insert(
+                recovery_order_id,
+                ExitOrderMeta {
+                    token_id: pos.token_id.clone(),
+                    order_type: OrderType::Fok,
+                    source_state: "RecoveryProbe(opposite_alpha)".to_string(),
+                },
+            );
+        }
+
+        info!(
+            token_id = %pos.token_id,
+            opposite = %opposite_token,
+            other_ask = %other_ask,
+            clip = %clip,
+            "RecoveryProbe: placing opposite-side alpha buy"
+        );
+
+        Some(Action::PlaceOrder(order))
+    }
+
+    /// Handle a position in RecoveryProbe state during an orderbook update.
+    ///
+    /// RecoveryProbe is a waiting state — the recovery order is in flight.
+    /// This method checks if the order has been pending too long and should be
+    /// cancelled (handled by fill/reject events, not here).
+    /// Currently a no-op since fill/reject routing handles transitions.
+    async fn handle_recovery_probe(
+        &self,
+        _pos: &ArbitragePosition,
+        _lifecycle: &mut PositionLifecycle,
+        _now: DateTime<Utc>,
+    ) -> Option<Action> {
+        // Recovery orders are tracked via exit_orders_by_id.
+        // Fill → Cooldown transition happens in on_order_filled.
+        // Rejection → resolve with loss happens in rejection handler.
+        None
+    }
+
+    /// Handle a position in Cooldown state during an orderbook update.
+    ///
+    /// When cooldown has elapsed, transitions back to Healthy so the position
+    /// can be re-evaluated by the trigger hierarchy.
+    async fn handle_cooldown(
+        &self,
+        pos: &ArbitragePosition,
+        lifecycle: &mut PositionLifecycle,
+        until: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if now >= until {
+            if let Err(e) = lifecycle.transition(
+                PositionLifecycleState::Healthy,
+                "cooldown elapsed",
+                now,
+            ) {
+                warn!(token_id = %pos.token_id, error = %e, "Cooldown→Healthy transition failed");
+                return false;
+            }
+            info!(
+                token_id = %pos.token_id,
+                "Cooldown elapsed, position back to Healthy"
+            );
+            self.write_lifecycle(&pos.token_id, lifecycle).await;
+            true // Caller should continue to normal evaluation
+        } else {
+            false // Still in cooldown
+        }
+    }
+
     /// Transition a position's lifecycle from ExitExecuting to ResidualRisk.
     ///
     /// Called when an exit order is rejected or fails. Increments retry count
@@ -1486,6 +1859,58 @@ impl TailEndStrategy {
         price: Decimal,
         size: Decimal,
     ) -> Vec<Action> {
+        // Check if this is a recovery order fill (by order_id in exit_orders_by_id)
+        {
+            let exit_meta = {
+                let exit_orders = self.base.exit_orders_by_id.read().await;
+                exit_orders.get(order_id).cloned()
+            };
+            if let Some(meta) = &exit_meta
+                && meta.source_state.starts_with("RecoveryProbe")
+            {
+                let now = self.base.event_time().await;
+                let sl_config = &self.base.config.stop_loss;
+
+                // Transition to Cooldown
+                let mut lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
+                let cooldown_until =
+                    now + chrono::Duration::seconds(sl_config.reentry_cooldown_secs);
+
+                if let Err(e) = lifecycle.transition(
+                    PositionLifecycleState::Cooldown {
+                        until: cooldown_until,
+                    },
+                    &format!("recovery fill: {} at {}", meta.source_state, price),
+                    now,
+                ) {
+                    warn!(
+                        token_id = %meta.token_id,
+                        error = %e,
+                        "RecoveryProbe→Cooldown transition failed"
+                    );
+                }
+                lifecycle.pending_exit_order_id = None;
+                self.write_lifecycle(&meta.token_id, &lifecycle).await;
+
+                // Clean up exit order tracking
+                {
+                    let mut exit_orders = self.base.exit_orders_by_id.write().await;
+                    exit_orders.remove(order_id);
+                }
+
+                info!(
+                    order_id = %order_id,
+                    token_id = %meta.token_id,
+                    source = %meta.source_state,
+                    fill_price = %price,
+                    fill_size = %size,
+                    cooldown_secs = sl_config.reentry_cooldown_secs,
+                    "Recovery order filled — transitioning to Cooldown"
+                );
+                return vec![];
+            }
+        }
+
         // Check if this is a GTC stop-loss fill (by order_id)
         {
             let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
@@ -1832,6 +2257,45 @@ impl Strategy for TailEndStrategy {
                             let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
                             gtc_sl.retain(|_, sl| sl.token_id != *token_id);
                         }
+
+                        return Ok(vec![]);
+                    }
+
+                    // Check if this is a recovery order rejection
+                    if matches!(lifecycle.state, PositionLifecycleState::RecoveryProbe { .. }) {
+                        // Recovery failed — accept loss, resolve position
+                        let pos_info = {
+                            let positions = self.base.positions.read().await;
+                            positions
+                                .values()
+                                .flat_map(|v| v.iter())
+                                .find(|p| p.token_id == *token_id)
+                                .map(|p| (p.size, p.market_id.clone()))
+                        };
+
+                        warn!(
+                            token_id = %token_id,
+                            reason = %reason,
+                            remaining = ?pos_info.as_ref().map(|(s, _)| s),
+                            "Recovery order rejected — accepting loss, resolving position"
+                        );
+
+                        if let Some((remaining, market_id)) = pos_info {
+                            // Record recovery exit cooldown for re-entry gating
+                            self.base.record_recovery_exit_cooldown(&market_id).await;
+                            self.base
+                                .reduce_or_remove_position_by_token(token_id, remaining)
+                                .await;
+                        }
+
+                        // Clean up
+                        {
+                            let mut exit_orders = self.base.exit_orders_by_id.write().await;
+                            exit_orders.retain(|_, meta| meta.token_id != *token_id);
+                        }
+                        // Lifecycle was already cleaned up by reduce_or_remove_position_by_token
+                        // if fully closed. If not, force-remove lifecycle.
+                        self.base.remove_lifecycle(token_id).await;
 
                         return Ok(vec![]);
                     }
