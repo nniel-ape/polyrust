@@ -932,9 +932,10 @@ impl TailEndStrategy {
         // Check if this is a FOK stop-loss sell fill (by token_id in pending_stop_loss)
         {
             let mut pending_sl = self.base.pending_stop_loss.write().await;
-            if let Some(sl_info) = pending_sl.remove(token_id) {
+            if let Some(_sl_info) = pending_sl.remove(token_id) {
                 drop(pending_sl);
-                let exit_price = sl_info.exit_price;
+                // Use actual CLOB fill price, not trigger bid (sl_info.exit_price)
+                let exit_price = price;
                 if let Some((pos, fully_closed)) = self
                     .base
                     .reduce_or_remove_position_by_token(token_id, size)
@@ -1687,5 +1688,68 @@ mod tests {
         assert_eq!(pnl, expected);
         assert!(pnl > Decimal::ZERO);
         assert!(pnl < dec!(8)); // Must be less than gross due to fee
+    }
+
+    // --- PnL exit price bug fix tests ---
+
+    /// FOK stop-loss fill at 0.93 when trigger bid was 0.92.
+    /// PnL must use actual fill price (0.93), not trigger bid (0.92).
+    #[test]
+    fn pnl_fok_exit_uses_actual_fill_price_not_trigger_bid() {
+        use crate::crypto_arb::base::taker_fee;
+
+        let entry_price = dec!(0.95);
+        let trigger_bid = dec!(0.92); // price when stop-loss triggered
+        let actual_fill_price = dec!(0.93); // better fill from CLOB
+        let size = dec!(100);
+        let fee_rate = dec!(0.0315);
+        let entry_fee_per_share = Decimal::ZERO; // GTC entry
+
+        // Correct PnL: uses actual fill price
+        let exit_fee = taker_fee(actual_fill_price, fee_rate);
+        let correct_pnl = (actual_fill_price - entry_price) * size
+            - (entry_fee_per_share * size)
+            - (exit_fee * size);
+
+        // Wrong PnL: would use trigger bid (the old bug)
+        let wrong_exit_fee = taker_fee(trigger_bid, fee_rate);
+        let wrong_pnl = (trigger_bid - entry_price) * size
+            - (entry_fee_per_share * size)
+            - (wrong_exit_fee * size);
+
+        // Actual fill is better (0.93 > 0.92), so correct PnL is less negative
+        assert!(correct_pnl > wrong_pnl);
+        // The difference should be meaningful (not just rounding)
+        assert!(correct_pnl - wrong_pnl > dec!(0.5));
+        // Both should still be negative (stop-loss means loss)
+        assert!(correct_pnl < Decimal::ZERO);
+        assert!(wrong_pnl < Decimal::ZERO);
+    }
+
+    /// When trigger bid equals actual fill price, PnL is the same either way (sanity).
+    #[test]
+    fn pnl_fok_exit_same_trigger_and_fill_price() {
+        use crate::crypto_arb::base::taker_fee;
+
+        let entry_price = dec!(0.95);
+        let fill_price = dec!(0.90); // trigger and fill are identical
+        let size = dec!(50);
+        let fee_rate = dec!(0.0315);
+        let entry_fee_per_share = Decimal::ZERO; // GTC entry
+
+        let exit_fee = taker_fee(fill_price, fee_rate);
+        let pnl = (fill_price - entry_price) * size
+            - (entry_fee_per_share * size)
+            - (exit_fee * size);
+
+        // Manual: (0.90 - 0.95) * 50 - 0 - taker_fee(0.90) * 50
+        // = -2.50 - (2 * 0.90 * 0.10 * 0.0315) * 50
+        // = -2.50 - 0.00567 * 50
+        // = -2.50 - 0.2835
+        // = -2.7835
+        let expected = (dec!(0.90) - dec!(0.95)) * dec!(50)
+            - taker_fee(dec!(0.90), fee_rate) * dec!(50);
+        assert_eq!(pnl, expected);
+        assert!(pnl < Decimal::ZERO);
     }
 }

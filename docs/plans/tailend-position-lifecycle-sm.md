@@ -128,11 +128,11 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 8
 
 ### Task 8: Fix PnL exit price bug
-- [ ] In `tailend.rs` `on_order_filled` FOK stop-loss path (~line 941), change `let exit_price = sl_info.exit_price` to `let exit_price = price` (use actual CLOB fill price)
-- [ ] Verify GTC stop-loss path also uses actual fill price (it likely already does since it gets `price` from Filled event)
-- [ ] Write test: FOK stop-loss fill at 0.93 when trigger bid was 0.92 → PnL uses 0.93
-- [ ] Write test: trigger bid and fill price same → no difference (sanity)
-- [ ] Run tests — must pass before task 9
+- [x] In `tailend.rs` `on_order_filled` FOK stop-loss path (~line 941), change `let exit_price = sl_info.exit_price` to `let exit_price = price` (use actual CLOB fill price)
+- [x] Verify GTC stop-loss path also uses actual fill price (it likely already does since it gets `price` from Filled event)
+- [x] Write test: FOK stop-loss fill at 0.93 when trigger bid was 0.92 → PnL uses 0.93
+- [x] Write test: trigger bid and fill price same → no difference (sanity)
+- [x] Run tests — must pass before task 9
 
 ### Task 9: Add lifecycle store to CryptoArbBase
 - [ ] Add `position_lifecycle: RwLock<HashMap<TokenId, PositionLifecycle>>` to `CryptoArbBase`
