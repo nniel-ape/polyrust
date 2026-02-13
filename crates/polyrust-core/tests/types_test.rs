@@ -199,6 +199,95 @@ fn orderbook_ask_depth_up_to() {
 }
 
 #[test]
+fn orderbook_best_bid_depth() {
+    let ob = OrderbookSnapshot {
+        token_id: "tok1".into(),
+        bids: vec![
+            OrderbookLevel {
+                price: dec!(0.50),
+                size: dec!(40),
+            },
+            OrderbookLevel {
+                price: dec!(0.49),
+                size: dec!(60),
+            },
+        ],
+        asks: vec![],
+        timestamp: Utc::now(),
+    };
+    assert_eq!(ob.best_bid_depth(), Some(dec!(40)));
+}
+
+#[test]
+fn orderbook_best_bid_depth_empty() {
+    let ob = OrderbookSnapshot {
+        token_id: "tok1".into(),
+        bids: vec![],
+        asks: vec![],
+        timestamp: Utc::now(),
+    };
+    assert_eq!(ob.best_bid_depth(), None);
+}
+
+#[test]
+fn orderbook_bid_depth_down_to_single_level() {
+    let ob = OrderbookSnapshot {
+        token_id: "tok1".into(),
+        bids: vec![OrderbookLevel {
+            price: dec!(0.50),
+            size: dec!(100),
+        }],
+        asks: vec![],
+        timestamp: Utc::now(),
+    };
+    assert_eq!(ob.bid_depth_down_to(dec!(0.50)), dec!(100));
+    assert_eq!(ob.bid_depth_down_to(dec!(0.40)), dec!(100));
+    assert_eq!(ob.bid_depth_down_to(dec!(0.51)), dec!(0));
+}
+
+#[test]
+fn orderbook_bid_depth_down_to_multiple_levels() {
+    let ob = OrderbookSnapshot {
+        token_id: "tok1".into(),
+        bids: vec![
+            OrderbookLevel {
+                price: dec!(0.95),
+                size: dec!(20),
+            },
+            OrderbookLevel {
+                price: dec!(0.93),
+                size: dec!(30),
+            },
+            OrderbookLevel {
+                price: dec!(0.90),
+                size: dec!(100),
+            },
+        ],
+        asks: vec![],
+        timestamp: Utc::now(),
+    };
+    // Down to 0.93 should include first two levels
+    assert_eq!(ob.bid_depth_down_to(dec!(0.93)), dec!(50));
+    // Down to 0.95 should include only first level
+    assert_eq!(ob.bid_depth_down_to(dec!(0.95)), dec!(20));
+    // Down to 0.80 should include all levels
+    assert_eq!(ob.bid_depth_down_to(dec!(0.80)), dec!(150));
+    // Down to 0.96 should include nothing (above best bid)
+    assert_eq!(ob.bid_depth_down_to(dec!(0.96)), dec!(0));
+}
+
+#[test]
+fn orderbook_bid_depth_down_to_empty() {
+    let ob = OrderbookSnapshot {
+        token_id: "tok1".into(),
+        bids: vec![],
+        asks: vec![],
+        timestamp: Utc::now(),
+    };
+    assert_eq!(ob.bid_depth_down_to(dec!(0.50)), dec!(0));
+}
+
+#[test]
 fn market_info_seconds_remaining() {
     let future = Utc::now() + TimeDelta::seconds(300);
     let market = MarketInfo {

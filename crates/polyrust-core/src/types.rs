@@ -259,6 +259,21 @@ impl OrderbookSnapshot {
             .map(|l| l.size)
             .sum()
     }
+
+    /// Returns the size available at the best bid level.
+    pub fn best_bid_depth(&self) -> Option<Decimal> {
+        self.bids.first().map(|l| l.size)
+    }
+
+    /// Returns the total bid size available at price levels down to (inclusive) `min_price`.
+    /// Bids are sorted descending by price; this sums sizes where `price >= min_price`.
+    pub fn bid_depth_down_to(&self, min_price: Decimal) -> Decimal {
+        self.bids
+            .iter()
+            .take_while(|l| l.price >= min_price)
+            .map(|l| l.size)
+            .sum()
+    }
 }
 
 /// Market information (from Gamma API)

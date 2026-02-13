@@ -112,12 +112,12 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 6
 
 ### Task 6: Add orderbook bid depth helpers
-- [ ] Add `best_bid_depth(&self) -> Option<Decimal>` to `OrderbookSnapshot` in `crates/polyrust-market/src/orderbook.rs` (or `crates/polyrust-core/src/types.rs` wherever OrderbookSnapshot lives)
-- [ ] Add `bid_depth_down_to(&self, min_price: Decimal) -> Decimal` — sum bid sizes where `price >= min_price` (mirrors existing `ask_depth_up_to`)
-- [ ] Write test: empty bids → `best_bid_depth() == None`, `bid_depth_down_to(..) == 0`
-- [ ] Write test: single bid level → returns that level's size
-- [ ] Write test: multiple bid levels → sums correctly down to min_price threshold
-- [ ] Run tests — must pass before task 7
+- [x] Add `best_bid_depth(&self) -> Option<Decimal>` to `OrderbookSnapshot` in `crates/polyrust-market/src/orderbook.rs` (or `crates/polyrust-core/src/types.rs` wherever OrderbookSnapshot lives)
+- [x] Add `bid_depth_down_to(&self, min_price: Decimal) -> Decimal` — sum bid sizes where `price >= min_price` (mirrors existing `ask_depth_up_to`)
+- [x] Write test: empty bids → `best_bid_depth() == None`, `bid_depth_down_to(..) == 0`
+- [x] Write test: single bid level → returns that level's size
+- [x] Write test: multiple bid levels → sums correctly down to min_price threshold
+- [x] Run tests — must pass before task 7
 
 ### Task 7: Fix PnL entry fee bug
 - [ ] In `tailend.rs` `on_order_filled` (~line 949), replace `pos.estimated_fee * size` with conditional: `if pos.entry_order_type == Gtc { ZERO } else { taker_fee(pos.entry_price, fee_rate) } * size`
