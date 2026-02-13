@@ -1,0 +1,82 @@
+# Spot deployment playbook for Polyrust
+# Usage:
+#   spot -t prod                                    # full deploy (build + push + restart)
+#   spot -t prod -n update-config                   # config only (no rebuild)
+#   spot -t prod -n restart                         # restart container only
+#   spot -t prod --dry                              # dry run
+#
+# Prerequisites:
+#   docker login ghcr.io -u <github-user> -p <PAT>  # local (push)
+#   docker login ghcr.io -u <github-user> -p <PAT>  # server (pull)
+
+user: deploy
+ssh_key: ~/.ssh/id_deploy
+
+targets:
+  prod:
+    hosts:
+      - {host: "31.172.70.91"}
+
+tasks:
+  - name: deploy
+    commands:
+      - name: build docker image
+        script: docker build -t ghcr.io/nniel-ape/polyrust:latest .
+        options: {local: true}
+
+      - name: push image to ghcr
+        script: docker push ghcr.io/nniel-ape/polyrust:latest
+        options: {local: true}
+
+      - name: decrypt secrets
+        script: |
+          sops -d --output-type dotenv secrets/prod.yaml \
+            | awk '{idx=index($0,"="); if(idx>0) print toupper(substr($0,1,idx-1)) "=" substr($0,idx+1)}' \
+            > .env.deploy
+        options: {local: true}
+
+      - name: create remote directory
+        script: mkdir -p /home/deploy/polyrust/data
+
+      - name: copy config files
+        copy:
+          - {src: "docker-compose.yml", dst: "/home/deploy/polyrust/docker-compose.yml", mkdir: true}
+          - {src: "config.toml", dst: "/home/deploy/polyrust/config.toml"}
+          - {src: ".env.deploy", dst: "/home/deploy/polyrust/.env"}
+
+      - name: pull and start services
+        script: cd /home/deploy/polyrust && docker compose pull && docker compose down && docker compose up -d
+
+      - name: verify deployment
+        script: cd /home/deploy/polyrust && docker compose ps
+
+      - name: cleanup local artifacts
+        script: rm -f .env.deploy
+        options: {local: true}
+
+  - name: update-config
+    commands:
+      - name: decrypt secrets
+        script: |
+          sops -d --output-type dotenv secrets/prod.yaml \
+            | awk '{idx=index($0,"="); if(idx>0) print toupper(substr($0,1,idx-1)) "=" substr($0,idx+1)}' \
+            > .env.deploy
+        options: {local: true}
+
+      - name: copy config files
+        copy:
+          - {src: "docker-compose.yml", dst: "/home/deploy/polyrust/docker-compose.yml", mkdir: true}
+          - {src: "config.toml", dst: "/home/deploy/polyrust/config.toml"}
+          - {src: ".env.deploy", dst: "/home/deploy/polyrust/.env"}
+
+      - name: restart services
+        script: cd /home/deploy/polyrust && docker compose down && docker compose up -d
+
+      - name: cleanup local artifacts
+        script: rm -f .env.deploy
+        options: {local: true}
+
+  - name: restart
+    commands:
+      - name: restart container
+        script: cd /home/deploy/polyrust && docker compose restart

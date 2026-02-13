@@ -15,3 +15,6 @@ progress*.txt
 .DS_Store
 backtest_output.txt
 sweep_results*
+
+# Spot deployment artifacts
+.env.deploy
