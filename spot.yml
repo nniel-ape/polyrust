@@ -35,6 +35,10 @@ tasks:
             > .env.deploy
         options: {local: true}
 
+      - name: decrypt tunnel key
+        script: sops -d --extract '["key"]' secrets/tunnel-key.yaml > .tunnel-key.deploy
+        options: {local: true}
+
       - name: create remote directory
         script: mkdir -p /home/deploy/polyrust/data
 
@@ -43,15 +47,22 @@ tasks:
           - {src: "docker-compose.yml", dst: "/home/deploy/polyrust/docker-compose.yml", mkdir: true}
           - {src: "config.toml", dst: "/home/deploy/polyrust/config.toml"}
           - {src: ".env.deploy", dst: "/home/deploy/polyrust/.env"}
+          - {src: "tunnel/Dockerfile", dst: "/home/deploy/polyrust/tunnel/Dockerfile", mkdir: true}
+          - {src: "tunnel/redsocks.conf", dst: "/home/deploy/polyrust/tunnel/redsocks.conf"}
+          - {src: "tunnel/entrypoint.sh", dst: "/home/deploy/polyrust/tunnel/entrypoint.sh"}
+          - {src: ".tunnel-key.deploy", dst: "/home/deploy/polyrust/tunnel-key"}
+
+      - name: fix tunnel key permissions
+        script: chmod 600 /home/deploy/polyrust/tunnel-key
 
       - name: pull and start services
-        script: cd /home/deploy/polyrust && docker compose pull && docker compose down && docker compose up -d
+        script: cd /home/deploy/polyrust && docker compose pull && docker compose build tunnel && docker compose down && docker compose up -d
 
       - name: verify deployment
         script: cd /home/deploy/polyrust && docker compose ps
 
       - name: cleanup local artifacts
-        script: rm -f .env.deploy
+        script: rm -f .env.deploy .tunnel-key.deploy
         options: {local: true}
 
   - name: update-config
@@ -63,17 +74,28 @@ tasks:
             > .env.deploy
         options: {local: true}
 
+      - name: decrypt tunnel key
+        script: sops -d --extract '["key"]' secrets/tunnel-key.yaml > .tunnel-key.deploy
+        options: {local: true}
+
       - name: copy config files
         copy:
           - {src: "docker-compose.yml", dst: "/home/deploy/polyrust/docker-compose.yml", mkdir: true}
           - {src: "config.toml", dst: "/home/deploy/polyrust/config.toml"}
           - {src: ".env.deploy", dst: "/home/deploy/polyrust/.env"}
+          - {src: "tunnel/Dockerfile", dst: "/home/deploy/polyrust/tunnel/Dockerfile", mkdir: true}
+          - {src: "tunnel/redsocks.conf", dst: "/home/deploy/polyrust/tunnel/redsocks.conf"}
+          - {src: "tunnel/entrypoint.sh", dst: "/home/deploy/polyrust/tunnel/entrypoint.sh"}
+          - {src: ".tunnel-key.deploy", dst: "/home/deploy/polyrust/tunnel-key"}
+
+      - name: fix tunnel key permissions
+        script: chmod 600 /home/deploy/polyrust/tunnel-key
 
       - name: restart services
-        script: cd /home/deploy/polyrust && docker compose down && docker compose up -d
+        script: cd /home/deploy/polyrust && docker compose build tunnel && docker compose down && docker compose up -d
 
       - name: cleanup local artifacts
-        script: rm -f .env.deploy
+        script: rm -f .env.deploy .tunnel-key.deploy
         options: {local: true}
 
   - name: restart

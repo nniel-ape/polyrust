@@ -48,3 +48,8 @@ secrets/
 
 # Spot
 spot.yml
+
+# Tunnel
+tunnel/
+tunnel-key
+.tunnel-key.deploy

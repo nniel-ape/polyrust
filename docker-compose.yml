@@ -3,12 +3,28 @@ networks:
     external: true
 
 services:
-  polyrust:
-    image: ${IMAGE_NAME:-ghcr.io/nniel-ape/polyrust:latest}
-    container_name: polyrust
+  tunnel:
+    build: ./tunnel
+    container_name: polyrust-tunnel
     networks:
       - proxy-net
       - default
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - SSH_HOST=79.132.137.31
+      - SSH_USER=${TUNNEL_SSH_USER:-root}
+      - SSH_PORT=${TUNNEL_SSH_PORT:-22}
+    volumes:
+      - ./tunnel-key:/root/.ssh/tunnel_key:ro
+    restart: unless-stopped
+
+  polyrust:
+    image: ${IMAGE_NAME:-ghcr.io/nniel-ape/polyrust:latest}
+    container_name: polyrust
+    network_mode: "service:tunnel"
+    depends_on:
+      - tunnel
     env_file:
       - .env
     environment:
