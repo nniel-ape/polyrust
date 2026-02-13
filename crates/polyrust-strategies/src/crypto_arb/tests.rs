@@ -3942,3 +3942,107 @@ fn stop_loss_config_deserialize_missing_lifecycle_fields_uses_defaults() {
     assert_eq!(config.reentry_confirm_ticks, 2);
     assert_eq!(config.reentry_cooldown_secs, 8);
 }
+
+// ---------------------------------------------------------------------------
+// Config validation tests (Task 3)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stop_loss_validate_trailing_min_greater_than_distance_errors() {
+    let mut config = super::config::StopLossConfig::default();
+    config.trailing_min_distance = dec!(0.10);
+    config.trailing_distance = dec!(0.05);
+    let result = config.validate();
+    assert!(result.is_err());
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("trailing_min_distance") && msg.contains("trailing_distance"),
+        "Error message should mention both fields, got: {msg}"
+    );
+}
+
+#[test]
+fn stop_loss_validate_short_limit_refresh_zero_errors() {
+    let mut config = super::config::StopLossConfig::default();
+    config.short_limit_refresh_secs = 0;
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("short_limit_refresh_secs"));
+}
+
+#[test]
+fn stop_loss_validate_empty_cooldowns_errors() {
+    let mut config = super::config::StopLossConfig::default();
+    config.liquidity_cooldowns = vec![];
+    assert!(config.validate().is_err());
+
+    let mut config = super::config::StopLossConfig::default();
+    config.balance_cooldowns = vec![];
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn stop_loss_validate_exit_depth_cap_factor_bounds() {
+    // Zero is invalid
+    let mut config = super::config::StopLossConfig::default();
+    config.exit_depth_cap_factor = Decimal::ZERO;
+    assert!(config.validate().is_err());
+
+    // Negative is invalid
+    let mut config = super::config::StopLossConfig::default();
+    config.exit_depth_cap_factor = dec!(-0.5);
+    assert!(config.validate().is_err());
+
+    // > 1 is invalid
+    let mut config = super::config::StopLossConfig::default();
+    config.exit_depth_cap_factor = dec!(1.5);
+    assert!(config.validate().is_err());
+
+    // Exactly 1.0 is valid
+    let mut config = super::config::StopLossConfig::default();
+    config.exit_depth_cap_factor = Decimal::ONE;
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn stop_loss_validate_valid_config_passes() {
+    let config = super::config::StopLossConfig::default();
+    assert!(config.validate().is_ok(), "Default StopLossConfig should pass validation");
+}
+
+#[test]
+fn arb_config_validate_post_entry_lte_sell_delay_errors() {
+    let mut config = super::config::ArbitrageConfig::default();
+    config.tailend.post_entry_window_secs = 10;
+    config.tailend.min_sell_delay_secs = 10; // equal — unreachable
+    let result = config.validate();
+    assert!(result.is_err());
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("post_entry_window_secs") && msg.contains("min_sell_delay_secs"),
+        "Error message should mention both fields, got: {msg}"
+    );
+
+    // Also test when post < sell delay
+    let mut config = super::config::ArbitrageConfig::default();
+    config.tailend.post_entry_window_secs = 5;
+    config.tailend.min_sell_delay_secs = 10;
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn arb_config_validate_valid_config_passes() {
+    let config = super::config::ArbitrageConfig::default();
+    assert!(config.validate().is_ok(), "Default ArbitrageConfig should pass validation");
+}
+
+#[test]
+fn arb_config_validate_dead_zone_warning() {
+    // This test verifies the dead zone check doesn't return an error
+    // (it only warns), even with a large dead zone.
+    let mut config = super::config::ArbitrageConfig::default();
+    config.stop_loss.reversal_pct = dec!(0.010); // 1%
+    config.tailend.min_strike_distance_pct = dec!(0.001); // 0.1%
+    // Dead zone = 0.009 > 0.003 — triggers warning but not error
+    assert!(config.validate().is_ok(), "Dead zone should warn but not error");
+}

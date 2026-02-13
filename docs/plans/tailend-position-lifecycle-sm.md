@@ -77,15 +77,15 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 3
 
 ### Task 3: Add config validation methods
-- [ ] Add `StopLossConfig::validate() -> Result<(), String>` — check: `trailing_min_distance <= trailing_distance`, `short_limit_refresh_secs >= 1`, cooldown schedules non-empty, `exit_depth_cap_factor` in (0, 1]
-- [ ] Add `ArbitrageConfig::validate() -> Result<(), String>` — cross-config checks: `post_entry_window_secs > min_sell_delay_secs`, warn if dead zone `(reversal_pct - min_strike_distance_pct) > 0.003`
-- [ ] Call `config.validate()` from TailEndStrategy constructor — fail fast at startup
-- [ ] Wire validation call in `src/main.rs` strategy registration (or from strategy `new()`)
-- [ ] Write test: `trailing_min_distance > trailing_distance` → error with clear message
-- [ ] Write test: `post_entry_window_secs <= min_sell_delay_secs` → error with clear message
-- [ ] Write test: valid config passes validation
-- [ ] Write test: dead zone warning is emitted (check tracing output or return type)
-- [ ] Run tests — must pass before task 4
+- [x] Add `StopLossConfig::validate() -> Result<(), String>` — check: `trailing_min_distance <= trailing_distance`, `short_limit_refresh_secs >= 1`, cooldown schedules non-empty, `exit_depth_cap_factor` in (0, 1]
+- [x] Add `ArbitrageConfig::validate() -> Result<(), String>` — cross-config checks: `post_entry_window_secs > min_sell_delay_secs`, warn if dead zone `(reversal_pct - min_strike_distance_pct) > 0.003`
+- [x] Call `config.validate()` from TailEndStrategy constructor — fail fast at startup
+- [x] Wire validation call in `src/main.rs` strategy registration (or from strategy `new()`)
+- [x] Write test: `trailing_min_distance > trailing_distance` → error with clear message
+- [x] Write test: `post_entry_window_secs <= min_sell_delay_secs` → error with clear message
+- [x] Write test: valid config passes validation
+- [x] Write test: dead zone warning is emitted (check tracing output or return type)
+- [x] Run tests — must pass before task 4
 
 ### Task 4: Define lifecycle types and StopLossTriggerKind
 - [ ] Add `StopLossTriggerKind` enum to `crates/polyrust-strategies/src/crypto_arb/types.rs`: `HardCrash`, `DualTrigger`, `TrailingStop`, `PostEntryExit` — each with relevant fields

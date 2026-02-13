@@ -429,6 +429,35 @@ impl Default for StopLossConfig {
     }
 }
 
+impl StopLossConfig {
+    /// Validate stop-loss configuration values.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.trailing_min_distance > self.trailing_distance {
+            return Err(format!(
+                "trailing_min_distance ({}) must be <= trailing_distance ({})",
+                self.trailing_min_distance, self.trailing_distance
+            ));
+        }
+        if self.short_limit_refresh_secs < 1 {
+            return Err("short_limit_refresh_secs must be >= 1".to_string());
+        }
+        if self.liquidity_cooldowns.is_empty() {
+            return Err("liquidity_cooldowns must not be empty".to_string());
+        }
+        if self.balance_cooldowns.is_empty() {
+            return Err("balance_cooldowns must not be empty".to_string());
+        }
+        if self.exit_depth_cap_factor <= Decimal::ZERO || self.exit_depth_cap_factor > Decimal::ONE
+        {
+            return Err(format!(
+                "exit_depth_cap_factor must be in (0, 1], got {}",
+                self.exit_depth_cap_factor
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Performance tracking and auto-disable configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -558,6 +587,37 @@ impl ArbitrageConfig {
     /// Returns true if the strategy is enabled.
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Validate the full arbitrage configuration, including sub-configs.
+    ///
+    /// Returns `Err` for fatal misconfigurations, emits `tracing::warn` for
+    /// non-fatal but suspicious settings (e.g. large dead zone).
+    pub fn validate(&self) -> Result<(), String> {
+        self.sizing.validate()?;
+        self.stop_loss.validate()?;
+
+        if self.tailend.post_entry_window_secs <= self.tailend.min_sell_delay_secs {
+            return Err(format!(
+                "post_entry_window_secs ({}) must be > min_sell_delay_secs ({}); \
+                 otherwise the post-entry exit is unreachable",
+                self.tailend.post_entry_window_secs, self.tailend.min_sell_delay_secs
+            ));
+        }
+
+        // Non-fatal: warn about large dead zone between reversal_pct and min_strike_distance_pct
+        let dead_zone = self.stop_loss.reversal_pct - self.tailend.min_strike_distance_pct;
+        if dead_zone > Decimal::new(3, 3) {
+            tracing::warn!(
+                reversal_pct = %self.stop_loss.reversal_pct,
+                min_strike_distance_pct = %self.tailend.min_strike_distance_pct,
+                dead_zone = %dead_zone,
+                "Large dead zone between reversal_pct and min_strike_distance_pct (> 0.003); \
+                 entries near strike may exit immediately"
+            );
+        }
+
+        Ok(())
     }
 
     /// Apply environment variable overrides to the configuration.

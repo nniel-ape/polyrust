@@ -159,9 +159,9 @@ async fn main() -> anyhow::Result<()> {
     // Create feed command channel for engine → ClobFeed communication
     let (feed_cmd_tx, feed_cmd_rx) = feed_command_channel();
 
-    // Validate sizing configuration
-    if let Err(e) = arb_config.sizing.validate() {
-        return Err(anyhow::anyhow!("Invalid sizing config: {}", e));
+    // Validate full arbitrage configuration (sizing, stop-loss, cross-config)
+    if let Err(e) = arb_config.validate() {
+        return Err(anyhow::anyhow!("Invalid arbitrage config: {}", e));
     }
 
     // Validate configured coins are supported

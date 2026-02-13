@@ -29,6 +29,11 @@ pub struct TailEndStrategy {
 
 impl TailEndStrategy {
     pub fn new(base: Arc<CryptoArbBase>) -> Self {
+        // Validate config at construction time as defense-in-depth.
+        // main.rs should call ArbitrageConfig::validate() first for graceful errors.
+        if let Err(e) = base.config.validate() {
+            panic!("Invalid arbitrage config: {e}");
+        }
         Self { base }
     }
 
