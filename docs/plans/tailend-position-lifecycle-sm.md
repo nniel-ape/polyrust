@@ -101,15 +101,15 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 5
 
 ### Task 5: Extend ArbitragePosition with fee/order metadata
-- [ ] Add `entry_order_type: OrderType` field to `ArbitragePosition` in `types.rs`
-- [ ] Add `entry_fee_per_share: Decimal` field (actual fee: 0 for GTC, computed for FOK)
-- [ ] Add `realized_pnl: Decimal` field (accumulated P&L from partial exits, starts at 0)
-- [ ] Update `ArbitragePosition::from_limit_order()` to set `entry_order_type = Gtc`, `entry_fee_per_share = Decimal::ZERO`
-- [ ] Update all other ArbitragePosition constructors (FOK path in tailend.ts, synthetic fill in base.rs) to set correct `entry_order_type` and compute `entry_fee_per_share`
-- [ ] Update any struct literals that construct ArbitragePosition to include new fields
-- [ ] Write test: GTC entry → `entry_fee_per_share == 0`
-- [ ] Write test: FOK entry → `entry_fee_per_share == taker_fee(price, rate)`
-- [ ] Run tests — must pass before task 6
+- [x] Add `entry_order_type: OrderType` field to `ArbitragePosition` in `types.rs`
+- [x] Add `entry_fee_per_share: Decimal` field (actual fee: 0 for GTC, computed for FOK)
+- [x] Add `realized_pnl: Decimal` field (accumulated P&L from partial exits, starts at 0)
+- [x] Update `ArbitragePosition::from_limit_order()` to set `entry_order_type = Gtc`, `entry_fee_per_share = Decimal::ZERO`
+- [x] Update all other ArbitragePosition constructors (FOK path in tailend.ts, synthetic fill in base.rs) to set correct `entry_order_type` and compute `entry_fee_per_share`
+- [x] Update any struct literals that construct ArbitragePosition to include new fields
+- [x] Write test: GTC entry → `entry_fee_per_share == 0`
+- [x] Write test: FOK entry → `entry_fee_per_share == taker_fee(price, rate)`
+- [x] Run tests — must pass before task 6
 
 ### Task 6: Add orderbook bid depth helpers
 - [ ] Add `best_bid_depth(&self) -> Option<Decimal>` to `OrderbookSnapshot` in `crates/polyrust-market/src/orderbook.rs` (or `crates/polyrust-core/src/types.rs` wherever OrderbookSnapshot lives)

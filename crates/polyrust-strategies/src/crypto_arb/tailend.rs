@@ -402,6 +402,11 @@ impl TailEndStrategy {
 
         // FOK fallback path (stop-loss sells still use FOK)
         let now = self.base.event_time().await;
+        let entry_fee_per_share = if pending.order_type == OrderType::Fok {
+            taker_fee(pending.price, self.base.config.fee.taker_fee_rate)
+        } else {
+            Decimal::ZERO
+        };
         let position = ArbitragePosition {
             market_id: pending.market_id.clone(),
             token_id: pending.token_id,
@@ -418,6 +423,9 @@ impl TailEndStrategy {
             entry_market_price: pending.price,
             tick_size: pending.tick_size,
             fee_rate_bps: pending.fee_rate_bps,
+            entry_order_type: pending.order_type,
+            entry_fee_per_share,
+            realized_pnl: Decimal::ZERO,
         };
 
         info!(

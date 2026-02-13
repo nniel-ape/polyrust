@@ -209,6 +209,13 @@ pub struct ArbitragePosition {
     pub tick_size: Decimal,
     /// Fee rate in basis points for this market.
     pub fee_rate_bps: u32,
+    /// Order type used for entry (GTC = maker/0% fee, FOK = taker fee).
+    /// Used for correct P&L calculation instead of relying on `estimated_fee`.
+    pub entry_order_type: OrderType,
+    /// Actual fee per share at entry: 0 for GTC (maker), `taker_fee(price, rate)` for FOK.
+    pub entry_fee_per_share: Decimal,
+    /// Accumulated realized P&L from partial exits (starts at 0).
+    pub realized_pnl: Decimal,
 }
 
 impl ArbitragePosition {
@@ -239,6 +246,9 @@ impl ArbitragePosition {
             entry_market_price: fill_price,
             tick_size: lo.tick_size,
             fee_rate_bps: lo.fee_rate_bps,
+            entry_order_type: OrderType::Gtc,
+            entry_fee_per_share: Decimal::ZERO,
+            realized_pnl: Decimal::ZERO,
         }
     }
 }

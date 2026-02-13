@@ -511,6 +511,9 @@ async fn base_can_open_position() {
                 entry_market_price: dec!(0.60),
                 tick_size: dec!(0.01),
                 fee_rate_bps: 0,
+                entry_order_type: OrderType::Gtc,
+                entry_fee_per_share: Decimal::ZERO,
+                realized_pnl: Decimal::ZERO,
             };
             positions
                 .entry(pos.market_id.clone())
@@ -1053,6 +1056,9 @@ fn make_position(
         entry_market_price: entry_price,
         tick_size: dec!(0.01),
         fee_rate_bps: 0,
+        entry_order_type: OrderType::Gtc,
+        entry_fee_per_share: Decimal::ZERO,
+        realized_pnl: Decimal::ZERO,
     }
 }
 
@@ -4495,6 +4501,79 @@ fn exit_order_meta_fields() {
     assert_eq!(meta.token_id, "token-123");
     assert_eq!(meta.order_type, OrderType::Fok);
     assert_eq!(meta.source_state, "ExitExecuting");
+}
+
+// ---------------------------------------------------------------------------
+// ArbitragePosition entry fee/order metadata tests (Task 5)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gtc_entry_has_zero_fee_per_share() {
+    let lo = OpenLimitOrder {
+        order_id: "gtc-order-1".to_string(),
+        market_id: "market-1".to_string(),
+        token_id: "token-1".to_string(),
+        side: OutcomeSide::Up,
+        price: dec!(0.92),
+        size: dec!(10),
+        reference_price: dec!(50000),
+        coin: "BTC".to_string(),
+        placed_at: Utc::now(),
+        kelly_fraction: Some(dec!(0.15)),
+        estimated_fee: Decimal::ZERO,
+        tick_size: dec!(0.01),
+        fee_rate_bps: 315,
+        cancel_pending: false,
+        reconcile_miss_count: 0,
+    };
+
+    let pos = ArbitragePosition::from_limit_order(
+        &lo,
+        dec!(0.92),
+        dec!(10),
+        Some("gtc-order-1".to_string()),
+        Utc::now(),
+    );
+
+    assert_eq!(pos.entry_order_type, OrderType::Gtc);
+    assert_eq!(pos.entry_fee_per_share, Decimal::ZERO);
+    assert_eq!(pos.realized_pnl, Decimal::ZERO);
+}
+
+#[test]
+fn fok_entry_has_computed_taker_fee_per_share() {
+    let price = dec!(0.92);
+    let fee_rate = dec!(0.0315);
+    let expected_fee = taker_fee(price, fee_rate);
+
+    // Simulate FOK position construction (struct literal path used in tailend.rs)
+    let pos = ArbitragePosition {
+        market_id: "market-1".to_string(),
+        token_id: "token-1".to_string(),
+        side: OutcomeSide::Up,
+        entry_price: price,
+        size: dec!(10),
+        reference_price: dec!(50000),
+        coin: "BTC".to_string(),
+        order_id: Some("fok-order-1".to_string()),
+        entry_time: Utc::now(),
+        kelly_fraction: None,
+        peak_bid: price,
+        estimated_fee: expected_fee,
+        entry_market_price: price,
+        tick_size: dec!(0.01),
+        fee_rate_bps: 315,
+        entry_order_type: OrderType::Fok,
+        entry_fee_per_share: expected_fee,
+        realized_pnl: Decimal::ZERO,
+    };
+
+    assert_eq!(pos.entry_order_type, OrderType::Fok);
+    assert_eq!(pos.entry_fee_per_share, expected_fee);
+    assert!(pos.entry_fee_per_share > Decimal::ZERO);
+    // At p=0.92: fee = 2 * 0.92 * 0.08 * 0.0315 = 0.0046368
+    assert_eq!(pos.entry_fee_per_share, dec!(0.0046368));
+    assert_eq!(pos.realized_pnl, Decimal::ZERO);
 }
 
 #[test]
