@@ -481,6 +481,116 @@ impl CryptoArbDashboard {
 }
 
 // ---------------------------------------------------------------------------
+// TailEnd skip-reason bar chart
+// ---------------------------------------------------------------------------
+
+/// Group definition for skip reasons.
+struct SkipGroup {
+    label: &'static str,
+    css_suffix: &'static str,
+    reasons: &'static [&'static str],
+}
+
+const SKIP_GROUPS: &[SkipGroup] = &[
+    SkipGroup {
+        label: "Pre-filters",
+        css_suffix: "prefilter",
+        reasons: &["time_window", "coin_not_near_expiry"],
+    },
+    SkipGroup {
+        label: "Market Quality",
+        css_suffix: "market",
+        reasons: &["no_ask", "stale_ob", "spread"],
+    },
+    SkipGroup {
+        label: "Signal Quality",
+        css_suffix: "signal",
+        reasons: &[
+            "ref_quality",
+            "no_prediction",
+            "threshold",
+            "sustained",
+            "volatility",
+            "strike_proximity",
+        ],
+    },
+    SkipGroup {
+        label: "Rate Limiting",
+        css_suffix: "ratelimit",
+        reasons: &[
+            "stale_cooldown",
+            "rejection_cooldown",
+            "reservation",
+            "auto_disabled",
+        ],
+    },
+    SkipGroup {
+        label: "Composite",
+        css_suffix: "composite",
+        reasons: &["composite_stale"],
+    },
+];
+
+/// Render the TailEnd skip-reason bar chart. Reads the current 60s period
+/// stats from `tailend_skip_stats` without draining.
+fn render_skip_stats(base: &CryptoArbBase, html: &mut String) {
+    let snapshot: Vec<(&'static str, u64)> = {
+        let stats = base.tailend_skip_stats.lock().unwrap();
+        stats.iter().map(|(k, v)| (*k, *v)).collect()
+    };
+
+    let max_count = snapshot.iter().map(|(_, v)| *v).max().unwrap_or(0);
+
+    html.push_str(r#"<div class="bp-card mb-4">"#);
+    html.push_str(r#"<h2 class="bp-section-title">Skip Reasons (last 60s)</h2>"#);
+
+    if snapshot.is_empty() || max_count == 0 {
+        html.push_str(r#"<p class="bp-text-muted">No skips in current period</p></div>"#);
+        return;
+    }
+
+    html.push_str(r#"<div class="bp-skip-chart">"#);
+
+    for group in SKIP_GROUPS {
+        let rows: Vec<_> = group
+            .reasons
+            .iter()
+            .filter_map(|r| {
+                snapshot
+                    .iter()
+                    .find(|(k, _)| k == r)
+                    .map(|(k, v)| (*k, *v))
+            })
+            .filter(|(_, v)| *v > 0)
+            .collect();
+
+        if rows.is_empty() {
+            continue;
+        }
+
+        let _ = write!(
+            html,
+            r#"<div class="bp-skip-group-header">{}</div>"#,
+            group.label
+        );
+
+        for (reason, count) in &rows {
+            let width_pct = (*count as f64 / max_count as f64) * 100.0;
+            let _ = write!(
+                html,
+                r#"<div class="bp-skip-row"><span class="bp-skip-label">{reason}</span><div class="bp-skip-bar-track"><div class="bp-skip-bar-fill bp-skip-bar-fill--{suffix}" style="width:{width:.1}%"></div></div><span class="bp-skip-count">{count}</span></div>"#,
+                reason = reason,
+                suffix = group.css_suffix,
+                width = width_pct,
+                count = count,
+            );
+        }
+    }
+
+    html.push_str("</div></div>");
+}
+
+// ---------------------------------------------------------------------------
 // TailEnd Dashboard
 // ---------------------------------------------------------------------------
 
@@ -833,6 +943,9 @@ impl TailEndDashboard {
 
         // Performance stats
         render_performance_for_mode(&self.base, &mut html, "tailend").await;
+
+        // Skip reason breakdown
+        render_skip_stats(&self.base, &mut html);
 
         Ok(html)
     }

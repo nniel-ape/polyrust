@@ -82,7 +82,7 @@
     summary { list-style: none; }
     summary::-webkit-details-marker { display: none; }
     summary::before {
-      content: "\25B6";  /* ▶ */
+      content: "\25B6\FE0E";  /* ▶︎ text style, not emoji */
       display: inline-block;
       font-size: 0.65em;
       margin-right: 0.5em;
@@ -215,6 +215,21 @@
       color: var(--text-primary);
     }
 
+    /* --- Skip-reason bar chart --- */
+    .bp-skip-chart { display: flex; flex-direction: column; gap: 2px; }
+    .bp-skip-group-header { font-family: var(--font-heading); font-size: 0.7rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); padding: 0.5rem 0 0.15rem 0; border-bottom: 1px dashed var(--border-color); }
+    .bp-skip-group-header:first-child { padding-top: 0; }
+    .bp-skip-row { display: grid; grid-template-columns: 140px 1fr 52px; align-items: center; gap: 8px; padding: 2px 0; }
+    .bp-skip-label { font-family: var(--font-data); font-size: 0.8rem; color: var(--text-secondary); }
+    .bp-skip-bar-track { height: 14px; background: #141414; border-radius: 1px; overflow: hidden; }
+    .bp-skip-bar-fill { height: 100%; border-radius: 1px; min-width: 1px; transition: width 0.3s ease; }
+    .bp-skip-count { font-family: var(--font-data); font-size: 0.8rem; color: var(--text-primary); text-align: right; }
+    .bp-skip-bar-fill--prefilter  { background: var(--text-muted); }
+    .bp-skip-bar-fill--market     { background: #b71c1c; }
+    .bp-skip-bar-fill--signal     { background: #e65100; }
+    .bp-skip-bar-fill--ratelimit  { background: #1565c0; }
+    .bp-skip-bar-fill--composite  { background: #6a1b9a; }
+
     /* --- Utility --- */
     .bp-text-muted { color: var(--text-muted); }
     .bp-text-secondary { color: var(--text-secondary); }
@@ -278,6 +293,10 @@
 
       /* Cards: allow table overflow */
       .bp-card { overflow-x: auto; }
+
+      /* Skip chart: narrower label column */
+      .bp-skip-row { grid-template-columns: 100px 1fr 44px; gap: 4px; }
+      .bp-skip-label, .bp-skip-count { font-size: 0.7rem; }
 
       /* Tables: smaller text, tighter padding, no wrap */
       .bp-table { font-size: 0.8rem; }
