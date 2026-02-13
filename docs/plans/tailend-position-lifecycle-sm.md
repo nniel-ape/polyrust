@@ -158,24 +158,24 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 11
 
 ### Task 11: Implement trigger hierarchy (evaluate_triggers)
-- [ ] Add `evaluate_triggers()` method on `PositionLifecycle` (or as free function) accepting: position, orderbook snapshot, composite price, config, now timestamp
-- [ ] Implement freshness gate: check orderbook age <= `sl_max_book_age_ms`, external age <= `sl_max_external_age_ms`; if stale, only allow hard-crash trigger
-- [ ] Implement Level 1 — Hard Crash: bid drop from entry >= `hard_drop_abs` OR external reversal >= `hard_reversal_pct`; requires 1 fresh source + fresh book; bypasses hysteresis
-- [ ] Implement Level 2 — Dual Trigger + Hysteresis: crypto_reversed AND market_dropped must both hold for `dual_trigger_consecutive_ticks` consecutive evaluations; reset counter if either clears; requires fresh composite + fresh book
-- [ ] Implement Level 3 — Trailing Stop with headroom fix: compute `price_cap = 1 - tick_size`, `headroom = max(0, price_cap - entry_price)`, `effective_arm_distance = min(trailing_arm_distance, headroom)`; if `effective_arm_distance < tick_size` mark `trailing_unarmable = true` and skip; otherwise arm when `peak_bid >= entry + effective_arm_distance`, trigger when `peak_bid - current_bid >= effective_distance` (with time decay, floor <= base)
-- [ ] Implement Level 4 — Post-Entry Deferred: if within sell delay window and adverse move detected, return PostEntryExit trigger (caller handles DeferredExit state)
-- [ ] Return first (highest priority) trigger that fires, or None
-- [ ] Write test: hard crash fires when bid drops 0.08 from entry
-- [ ] Write test: hard crash fires on external reversal 0.6%
-- [ ] Write test: hard crash works with stale composite (only needs 1 fresh source)
-- [ ] Write test: dual trigger requires 2 consecutive ticks (first tick returns None, second returns trigger)
-- [ ] Write test: dual trigger resets counter when condition clears
-- [ ] Write test: trailing at entry 0.99 → `trailing_unarmable = true`, trailing never fires, but hard/dual still work
-- [ ] Write test: trailing at entry 0.90 → `effective_arm_distance = min(0.015, 0.09) = 0.015`, arms at 0.915, triggers on drop from peak
-- [ ] Write test: trailing with time decay — effective distance decreases as time remaining decreases
-- [ ] Write test: post-entry deferred triggers within sell delay window
-- [ ] Write test: stale orderbook suppresses all triggers except hard-crash with fresh external
-- [ ] Run tests — must pass before task 12
+- [x] Add `evaluate_triggers()` method on `PositionLifecycle` (or as free function) accepting: position, orderbook snapshot, composite price, config, now timestamp
+- [x] Implement freshness gate: check orderbook age <= `sl_max_book_age_ms`, external age <= `sl_max_external_age_ms`; if stale, only allow hard-crash trigger
+- [x] Implement Level 1 — Hard Crash: bid drop from entry >= `hard_drop_abs` OR external reversal >= `hard_reversal_pct`; requires 1 fresh source + fresh book; bypasses hysteresis
+- [x] Implement Level 2 — Dual Trigger + Hysteresis: crypto_reversed AND market_dropped must both hold for `dual_trigger_consecutive_ticks` consecutive evaluations; reset counter if either clears; requires fresh composite + fresh book
+- [x] Implement Level 3 — Trailing Stop with headroom fix: compute `price_cap = 1 - tick_size`, `headroom = max(0, price_cap - entry_price)`, `effective_arm_distance = min(trailing_arm_distance, headroom)`; if `effective_arm_distance < tick_size` mark `trailing_unarmable = true` and skip; otherwise arm when `peak_bid >= entry + effective_arm_distance`, trigger when `peak_bid - current_bid >= effective_distance` (with time decay, floor <= base)
+- [x] Implement Level 4 — Post-Entry Deferred: if within sell delay window and adverse move detected, return PostEntryExit trigger (caller handles DeferredExit state)
+- [x] Return first (highest priority) trigger that fires, or None
+- [x] Write test: hard crash fires when bid drops 0.08 from entry
+- [x] Write test: hard crash fires on external reversal 0.6%
+- [x] Write test: hard crash works with stale composite (only needs 1 fresh source)
+- [x] Write test: dual trigger requires 2 consecutive ticks (first tick returns None, second returns trigger)
+- [x] Write test: dual trigger resets counter when condition clears
+- [x] Write test: trailing at entry 0.99 → `trailing_unarmable = true`, trailing never fires, but hard/dual still work
+- [x] Write test: trailing at entry 0.90 → `effective_arm_distance = min(0.015, 0.09) = 0.015`, arms at 0.915, triggers on drop from peak
+- [x] Write test: trailing with time decay — effective distance decreases as time remaining decreases
+- [x] Write test: post-entry deferred triggers within sell delay window
+- [x] Write test: stale orderbook suppresses all triggers except hard-crash with fresh external
+- [x] Run tests — must pass before task 12
 
 ### Task 12: Implement depth-capped exit clip sizing
 - [ ] Add `compute_exit_clip(remaining: Decimal, bid_depth: Decimal, cap_factor: Decimal, min_size: Decimal) -> Decimal` as helper function

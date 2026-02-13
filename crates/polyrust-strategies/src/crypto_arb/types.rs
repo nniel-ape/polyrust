@@ -698,6 +698,220 @@ impl PositionLifecycle {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Trigger Evaluation
+// ---------------------------------------------------------------------------
+
+/// Input data bundle for `evaluate_triggers`.
+///
+/// Keeps the function signature clean by grouping position, market, and
+/// price data that the trigger hierarchy needs.
+#[derive(Debug, Clone)]
+pub struct TriggerEvalContext {
+    /// Entry price of the position.
+    pub entry_price: Decimal,
+    /// Peak bid observed since entry.
+    pub peak_bid: Decimal,
+    /// Which side the position is on (Up/Down).
+    pub side: OutcomeSide,
+    /// Reference crypto price at window start.
+    pub reference_price: Decimal,
+    /// Market tick size.
+    pub tick_size: Decimal,
+    /// When the position was entered.
+    pub entry_time: DateTime<Utc>,
+    /// Current best bid from the orderbook.
+    pub current_bid: Decimal,
+    /// Age of the orderbook snapshot in milliseconds.
+    pub book_age_ms: i64,
+    /// Latest external/composite crypto price (if fresh enough).
+    pub external_price: Option<Decimal>,
+    /// Age of the external price in milliseconds (None if no price).
+    pub external_age_ms: Option<i64>,
+    /// Number of sources in the composite (None if single source).
+    pub composite_sources: Option<usize>,
+    /// Seconds remaining on the market.
+    pub time_remaining: i64,
+    /// Current time.
+    pub now: DateTime<Utc>,
+}
+
+impl PositionLifecycle {
+    /// Evaluate the 4-level trigger hierarchy for a position.
+    ///
+    /// Returns the highest-priority trigger that fires, or `None`.
+    /// Mutates `self.dual_trigger_ticks` and `self.trailing_unarmable` as side effects.
+    ///
+    /// Priority (highest first):
+    /// 1. Hard Crash — absolute bid drop or external reversal (1 fresh source + fresh book)
+    /// 2. Dual Trigger — crypto reversed AND market dropped for N consecutive ticks
+    /// 3. Trailing Stop — peak-to-current drop with headroom fix
+    /// 4. Post-Entry Deferred — adverse move within sell delay window
+    pub fn evaluate_triggers(
+        &mut self,
+        ctx: &TriggerEvalContext,
+        sl_config: &super::config::StopLossConfig,
+        tailend_config: &super::config::TailEndConfig,
+    ) -> Option<StopLossTriggerKind> {
+        let book_fresh = ctx.book_age_ms <= sl_config.sl_max_book_age_ms;
+        let external_fresh = ctx
+            .external_age_ms
+            .is_some_and(|age| age <= sl_config.sl_max_external_age_ms);
+        let has_any_fresh_source = external_fresh
+            || ctx
+                .external_age_ms
+                .is_some_and(|age| age <= sl_config.sl_max_external_age_ms * 2);
+
+        // ── Level 1: Hard Crash ──────────────────────────────────────────
+        // Requires only 1 fresh external source + fresh book.
+        // Bypasses hysteresis — immediate exit.
+        if book_fresh && ctx.external_price.is_some() && has_any_fresh_source {
+            let bid_drop = ctx.entry_price - ctx.current_bid;
+            let hard_bid = bid_drop >= sl_config.hard_drop_abs;
+
+            let hard_reversal = if let Some(ext_price) = ctx.external_price {
+                let reversal = compute_reversal(
+                    ctx.side,
+                    ctx.reference_price,
+                    ext_price,
+                );
+                reversal >= sl_config.hard_reversal_pct
+            } else {
+                false
+            };
+
+            if hard_bid || hard_reversal {
+                // Reset dual trigger counter on hard crash (supersedes)
+                self.dual_trigger_ticks = 0;
+                return Some(StopLossTriggerKind::HardCrash {
+                    bid_drop,
+                    reversal_pct: if let Some(ext_price) = ctx.external_price {
+                        compute_reversal(ctx.side, ctx.reference_price, ext_price)
+                    } else {
+                        Decimal::ZERO
+                    },
+                });
+            }
+        }
+
+        // ── Level 2: Dual Trigger + Hysteresis ───────────────────────────
+        // Both crypto_reversed AND market_dropped must hold for
+        // `dual_trigger_consecutive_ticks` consecutive evaluations.
+        // Requires fresh composite + fresh book.
+        if book_fresh && external_fresh {
+            let composite_ok = ctx
+                .composite_sources
+                .is_some_and(|s| s >= sl_config.sl_min_sources);
+
+            let crypto_reversed = if let Some(ext_price) = ctx.external_price {
+                compute_reversal(ctx.side, ctx.reference_price, ext_price)
+                    >= sl_config.reversal_pct
+            } else {
+                false
+            };
+
+            let market_dropped =
+                (ctx.entry_price - ctx.current_bid) >= sl_config.min_drop;
+
+            if composite_ok && crypto_reversed && market_dropped {
+                self.dual_trigger_ticks += 1;
+                if self.dual_trigger_ticks >= sl_config.dual_trigger_consecutive_ticks {
+                    return Some(StopLossTriggerKind::DualTrigger {
+                        consecutive_ticks: self.dual_trigger_ticks,
+                    });
+                }
+            } else {
+                // Either condition cleared — reset counter
+                self.dual_trigger_ticks = 0;
+            }
+        }
+
+        // ── Level 3: Trailing Stop with headroom fix ─────────────────────
+        // Prevents impossible arming at high entry prices.
+        if book_fresh && sl_config.trailing_enabled {
+            let price_cap = Decimal::ONE - ctx.tick_size;
+            let headroom = (price_cap - ctx.entry_price).max(Decimal::ZERO);
+            let effective_arm_distance =
+                sl_config.trailing_arm_distance.min(headroom);
+
+            if effective_arm_distance < ctx.tick_size {
+                self.trailing_unarmable = true;
+            } else {
+                // Arming check: peak_bid >= entry + effective_arm_distance
+                let armed =
+                    ctx.peak_bid >= ctx.entry_price + effective_arm_distance;
+                if armed {
+                    // Compute effective trailing distance with time decay
+                    let base_distance = sl_config.trailing_distance;
+                    let effective_distance = if sl_config.time_decay {
+                        let decay_factor =
+                            Decimal::from(ctx.time_remaining) / Decimal::from(900i64);
+                        let clamped = decay_factor
+                            .max(Decimal::ZERO)
+                            .min(Decimal::ONE);
+                        (base_distance * clamped)
+                            .max(sl_config.trailing_min_distance)
+                    } else {
+                        base_distance
+                    };
+
+                    let drop_from_peak = ctx.peak_bid - ctx.current_bid;
+                    if drop_from_peak >= effective_distance {
+                        return Some(StopLossTriggerKind::TrailingStop {
+                            peak_bid: ctx.peak_bid,
+                            current_bid: ctx.current_bid,
+                            effective_distance,
+                        });
+                    }
+                }
+            }
+        }
+
+        // ── Level 4: Post-Entry Deferred ─────────────────────────────────
+        // Fires when within sell delay window and adverse move detected.
+        let seconds_since_entry = ctx
+            .now
+            .signed_duration_since(ctx.entry_time)
+            .num_seconds();
+        let within_sell_delay =
+            seconds_since_entry < tailend_config.min_sell_delay_secs;
+        let within_post_entry_window =
+            seconds_since_entry <= tailend_config.post_entry_window_secs;
+
+        if within_sell_delay && within_post_entry_window && book_fresh {
+            let bid_drop = ctx.entry_price - ctx.current_bid;
+            if bid_drop >= tailend_config.post_entry_exit_drop {
+                return Some(StopLossTriggerKind::PostEntryExit { bid_drop });
+            }
+        }
+
+        None
+    }
+}
+
+/// Compute the signed reversal percentage of the external price relative to
+/// the reference price, from the perspective of the position side.
+///
+/// For Up/Yes positions: reversal = (reference - current) / reference  (positive when price drops)
+/// For Down/No positions: reversal = (current - reference) / reference (positive when price rises)
+fn compute_reversal(
+    side: OutcomeSide,
+    reference_price: Decimal,
+    current_price: Decimal,
+) -> Decimal {
+    if reference_price.is_zero() {
+        return Decimal::ZERO;
+    }
+    match side {
+        OutcomeSide::Up | OutcomeSide::Yes => {
+            (reference_price - current_price) / reference_price
+        }
+        OutcomeSide::Down | OutcomeSide::No => {
+            (current_price - reference_price) / reference_price
+        }
+    }
+}
+
 /// Metadata for tracking an exit or recovery order back to its position.
 ///
 /// Stored in `exit_orders_by_id` so that fill/reject events from the execution

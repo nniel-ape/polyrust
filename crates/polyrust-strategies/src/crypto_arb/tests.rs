@@ -21,7 +21,7 @@ use super::config::{ArbitrageConfig, SizingConfig};
 use super::types::{
     ArbitragePosition, BoundarySnapshot, CompositePriceSnapshot, ExitOrderMeta,
     MarketWithReference, ModeStats, OpenLimitOrder, PendingStopLoss, PositionLifecycle,
-    PositionLifecycleState, ReferenceQuality, StopLossTriggerKind,
+    PositionLifecycleState, ReferenceQuality, StopLossTriggerKind, TriggerEvalContext,
 };
 
 // ---------------------------------------------------------------------------
@@ -4929,4 +4929,388 @@ async fn sl_composite_cache_propagates_to_lifecycle() {
         assert_eq!(snap.sources_used, 3);
         assert!(lifecycle.last_composite_at.is_some());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task 11: evaluate_triggers tests
+// ---------------------------------------------------------------------------
+
+use super::config::{StopLossConfig, TailEndConfig};
+
+/// Helper to create a default TriggerEvalContext for testing.
+fn make_trigger_ctx(
+    entry_price: Decimal,
+    peak_bid: Decimal,
+    current_bid: Decimal,
+    reference_price: Decimal,
+    external_price: Option<Decimal>,
+    time_remaining: i64,
+    seconds_since_entry: i64,
+) -> TriggerEvalContext {
+    let now = Utc::now();
+    let entry_time = now - Duration::seconds(seconds_since_entry);
+    TriggerEvalContext {
+        entry_price,
+        peak_bid,
+        side: OutcomeSide::Up,
+        reference_price,
+        tick_size: dec!(0.01),
+        entry_time,
+        current_bid,
+        book_age_ms: 500, // fresh by default
+        external_price,
+        external_age_ms: external_price.map(|_| 500i64), // fresh by default
+        composite_sources: external_price.map(|_| 3usize),
+        time_remaining,
+        now,
+    }
+}
+
+#[test]
+fn evaluate_triggers_hard_crash_bid_drop() {
+    // Hard crash fires when bid drops >= hard_drop_abs (0.08) from entry
+    let sl = StopLossConfig::default();
+    let te = TailEndConfig::default();
+    let mut lifecycle = PositionLifecycle::new();
+
+    // Entry at 0.95, bid dropped to 0.86 => drop = 0.09 >= 0.08
+    let ctx = make_trigger_ctx(
+        dec!(0.95),  // entry
+        dec!(0.95),  // peak (no profit yet)
+        dec!(0.86),  // current bid (dropped 0.09)
+        dec!(90000), // reference BTC price
+        Some(dec!(90000)), // no external reversal
+        300,         // time remaining
+        15,          // seconds since entry (past sell delay)
+    );
+
+    let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
+    assert!(trigger.is_some(), "Hard crash should fire on 0.09 bid drop");
+    match trigger.unwrap() {
+        StopLossTriggerKind::HardCrash { bid_drop, .. } => {
+            assert_eq!(bid_drop, dec!(0.09));
+        }
+        other => panic!("Expected HardCrash, got {other}"),
+    }
+}
+
+#[test]
+fn evaluate_triggers_hard_crash_external_reversal() {
+    // Hard crash fires on external reversal >= 0.6%
+    let sl = StopLossConfig::default();
+    let te = TailEndConfig::default();
+    let mut lifecycle = PositionLifecycle::new();
+
+    // Up position: reference=90000, external dropped to 89400 => reversal = 600/90000 = 0.667%
+    let ctx = make_trigger_ctx(
+        dec!(0.95),  // entry
+        dec!(0.95),  // peak
+        dec!(0.94),  // bid only dropped 0.01 (not enough for bid-based hard crash)
+        dec!(90000), // reference
+        Some(dec!(89400)), // external dropped 0.667%
+        300,
+        15,
+    );
+
+    let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
+    assert!(trigger.is_some(), "Hard crash should fire on 0.667% reversal");
+    match trigger.unwrap() {
+        StopLossTriggerKind::HardCrash { reversal_pct, .. } => {
+            // reversal = (90000-89400)/90000 = 600/90000 ≈ 0.00667
+            assert!(reversal_pct >= dec!(0.006), "Reversal {reversal_pct} should be >= 0.006");
+        }
+        other => panic!("Expected HardCrash, got {other}"),
+    }
+}
+
+#[test]
+fn evaluate_triggers_hard_crash_works_with_stale_composite() {
+    // Hard crash only needs 1 fresh source, NOT a full composite.
+    // Set composite_sources to None (single source) but external price is fresh.
+    let sl = StopLossConfig::default();
+    let te = TailEndConfig::default();
+    let mut lifecycle = PositionLifecycle::new();
+
+    let now = Utc::now();
+    let ctx = TriggerEvalContext {
+        entry_price: dec!(0.95),
+        peak_bid: dec!(0.95),
+        side: OutcomeSide::Up,
+        reference_price: dec!(90000),
+        tick_size: dec!(0.01),
+        entry_time: now - Duration::seconds(15),
+        current_bid: dec!(0.86), // bid drop = 0.09 >= 0.08
+        book_age_ms: 500,
+        external_price: Some(dec!(90000)),
+        external_age_ms: Some(500), // fresh single source
+        composite_sources: None,    // NO composite available
+        time_remaining: 300,
+        now,
+    };
+
+    let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
+    assert!(trigger.is_some(), "Hard crash should work with single fresh source (no composite)");
+    assert!(matches!(trigger.unwrap(), StopLossTriggerKind::HardCrash { .. }));
+}
+
+#[test]
+fn evaluate_triggers_dual_trigger_requires_consecutive_ticks() {
+    // Dual trigger needs 2 consecutive ticks (default) where both conditions hold.
+    // First tick: returns None (counter = 1), second tick: returns trigger (counter = 2).
+    let sl = StopLossConfig::default();
+    let te = TailEndConfig::default();
+    let mut lifecycle = PositionLifecycle::new();
+
+    // Both conditions met: crypto reversed 0.5% and market dropped 0.05
+    // Use a small bid drop that doesn't reach hard_drop_abs (0.08)
+    let ctx = make_trigger_ctx(
+        dec!(0.95),  // entry
+        dec!(0.95),  // peak
+        dec!(0.90),  // bid dropped 0.05 (= min_drop, satisfies market_dropped but not hard crash)
+        dec!(90000), // reference
+        Some(dec!(89700)), // reversal = 300/90000 = 0.333% >= reversal_pct (0.003)
+        300,
+        15,
+    );
+
+    // First tick: counter goes to 1, not yet at threshold (2)
+    let trigger1 = lifecycle.evaluate_triggers(&ctx, &sl, &te);
+    assert!(trigger1.is_none(), "First tick should not trigger (need 2 consecutive)");
+    assert_eq!(lifecycle.dual_trigger_ticks, 1);
+
+    // Second tick: counter goes to 2, threshold met
+    let trigger2 = lifecycle.evaluate_triggers(&ctx, &sl, &te);
+    assert!(trigger2.is_some(), "Second tick should trigger (2 consecutive)");
+    match trigger2.unwrap() {
+        StopLossTriggerKind::DualTrigger { consecutive_ticks } => {
+            assert_eq!(consecutive_ticks, 2);
+        }
+        other => panic!("Expected DualTrigger, got {other}"),
+    }
+}
+
+#[test]
+fn evaluate_triggers_dual_trigger_resets_on_clear() {
+    // Dual trigger counter resets when either condition clears.
+    let sl = StopLossConfig::default();
+    let te = TailEndConfig::default();
+    let mut lifecycle = PositionLifecycle::new();
+
+    // Tick 1: both conditions met
+    let ctx1 = make_trigger_ctx(
+        dec!(0.95),
+        dec!(0.95),
+        dec!(0.90), // market dropped 0.05
+        dec!(90000),
+        Some(dec!(89700)), // crypto reversed
+        300,
+        15,
+    );
+    lifecycle.evaluate_triggers(&ctx1, &sl, &te);
+    assert_eq!(lifecycle.dual_trigger_ticks, 1);
+
+    // Tick 2: market condition clears (bid recovers)
+    let ctx2 = make_trigger_ctx(
+        dec!(0.95),
+        dec!(0.95),
+        dec!(0.94), // market only dropped 0.01, below min_drop (0.05)
+        dec!(90000),
+        Some(dec!(89700)), // crypto still reversed
+        300,
+        16,
+    );
+    lifecycle.evaluate_triggers(&ctx2, &sl, &te);
+    assert_eq!(lifecycle.dual_trigger_ticks, 0, "Counter should reset when market condition clears");
+}
+
+#[test]
+fn evaluate_triggers_trailing_unarmable_at_high_entry() {
+    // Entry at 0.99 with tick_size 0.01: price_cap = 0.99, headroom = 0,
+    // effective_arm_distance = min(0.015, 0) = 0 < 0.01 => trailing_unarmable
+    let sl = StopLossConfig::default();
+    let te = TailEndConfig::default();
+    let mut lifecycle = PositionLifecycle::new();
+
+    let ctx = make_trigger_ctx(
+        dec!(0.99),  // entry (very high)
+        dec!(0.99),  // peak
+        dec!(0.97),  // bid dropped 0.02
+        dec!(90000),
+        Some(dec!(90000)), // no reversal
+        300,
+        15,
+    );
+
+    let _trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
+
+    // Hard crash doesn't fire (bid_drop=0.02 < 0.08, no external reversal)
+    // Dual trigger doesn't fire (market_dropped but no crypto reversal)
+    // Trailing should be marked unarmable
+    assert!(lifecycle.trailing_unarmable, "Trailing should be unarmable at entry 0.99");
+
+    // Hard crash should still work at entry 0.99 (higher priority than trailing).
+    // Since hard crash returns early, trailing_unarmable may not be set on the same call.
+    // But we already verified it was set on the previous call above.
+    let ctx2 = make_trigger_ctx(
+        dec!(0.99),
+        dec!(0.99),
+        dec!(0.90), // bid drop = 0.09 >= 0.08 (hard crash)
+        dec!(90000),
+        Some(dec!(90000)),
+        300,
+        15,
+    );
+    let trigger2 = lifecycle.evaluate_triggers(&ctx2, &sl, &te);
+    assert!(trigger2.is_some(), "Hard crash should work even when trailing is unarmable");
+    assert!(matches!(trigger2.unwrap(), StopLossTriggerKind::HardCrash { .. }));
+}
+
+#[test]
+fn evaluate_triggers_trailing_at_normal_entry() {
+    // Entry at 0.90: price_cap=0.99, headroom=0.09,
+    // effective_arm_distance = min(0.015, 0.09) = 0.015
+    // Arms at peak >= 0.90 + 0.015 = 0.915
+    // At 450s: decay_factor=0.5, raw=0.05*0.5=0.025, floor=max(0.025,0.015)=0.025
+    // Triggers when drop_from_peak >= 0.025
+    let sl = StopLossConfig::default();
+    let te = TailEndConfig::default();
+    let mut lifecycle = PositionLifecycle::new();
+
+    // Peak at 0.96, current bid at 0.93 => drop = 0.03 >= 0.025
+    let ctx = make_trigger_ctx(
+        dec!(0.90),  // entry
+        dec!(0.96),  // peak (armed: 0.96 >= 0.915)
+        dec!(0.93),  // current bid
+        dec!(90000),
+        Some(dec!(90000)),
+        450, // time remaining
+        15,
+    );
+
+    let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
+    assert!(trigger.is_some(), "Trailing should trigger on 0.03 drop from peak at 450s");
+    match trigger.unwrap() {
+        StopLossTriggerKind::TrailingStop { peak_bid, current_bid, effective_distance } => {
+            assert_eq!(peak_bid, dec!(0.96));
+            assert_eq!(current_bid, dec!(0.93));
+            assert_eq!(effective_distance, dec!(0.025));
+        }
+        other => panic!("Expected TrailingStop, got {other}"),
+    }
+    assert!(!lifecycle.trailing_unarmable, "Should NOT be unarmable at entry 0.90");
+}
+
+#[test]
+fn evaluate_triggers_trailing_time_decay() {
+    // At 90s remaining: decay_factor=90/900=0.1, raw=0.05*0.1=0.005,
+    // floor=max(0.005, 0.015)=0.015 (floor kicks in)
+    let sl = StopLossConfig::default();
+    let te = TailEndConfig::default();
+    let mut lifecycle = PositionLifecycle::new();
+
+    // Peak at 0.96, current bid at 0.944 => drop = 0.016 >= 0.015
+    let ctx = make_trigger_ctx(
+        dec!(0.90),  // entry
+        dec!(0.96),  // peak (armed)
+        dec!(0.944), // drop = 0.016
+        dec!(90000),
+        Some(dec!(90000)),
+        90, // 90s remaining => heavy time decay
+        15,
+    );
+
+    let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
+    assert!(trigger.is_some(), "Trailing should trigger with floor distance at 90s");
+    match trigger.unwrap() {
+        StopLossTriggerKind::TrailingStop { effective_distance, .. } => {
+            assert_eq!(effective_distance, dec!(0.015), "Floor should prevent decay below 0.015");
+        }
+        other => panic!("Expected TrailingStop, got {other}"),
+    }
+}
+
+#[test]
+fn evaluate_triggers_post_entry_deferred() {
+    // Post-entry deferred triggers within sell delay window when bid drops
+    let sl = StopLossConfig::default();
+    let te = TailEndConfig::default();
+    let mut lifecycle = PositionLifecycle::new();
+
+    // Within sell delay (5s < min_sell_delay_secs=10) and post_entry_window (5s <= 20s)
+    // Bid dropped 0.06 from entry (>= post_entry_exit_drop=0.05)
+    let ctx = make_trigger_ctx(
+        dec!(0.95),  // entry
+        dec!(0.95),  // peak
+        dec!(0.89),  // bid dropped 0.06
+        dec!(90000),
+        Some(dec!(90000)),
+        300,
+        5, // 5s since entry (within sell delay of 10s)
+    );
+
+    let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
+    assert!(trigger.is_some(), "Post-entry deferred should fire within sell delay");
+    match trigger.unwrap() {
+        StopLossTriggerKind::PostEntryExit { bid_drop } => {
+            assert_eq!(bid_drop, dec!(0.06));
+        }
+        other => panic!("Expected PostEntryExit, got {other}"),
+    }
+}
+
+#[test]
+fn evaluate_triggers_stale_orderbook_suppresses_all_except_hard_crash() {
+    // Stale orderbook (book_age_ms > sl_max_book_age_ms) should suppress
+    // dual trigger, trailing, and post-entry. Only hard crash with fresh external works.
+    let sl = StopLossConfig::default();
+    let te = TailEndConfig::default();
+    let mut lifecycle = PositionLifecycle::new();
+
+    let now = Utc::now();
+    // Stale book, but conditions that would normally trigger dual trigger
+    let ctx = TriggerEvalContext {
+        entry_price: dec!(0.95),
+        peak_bid: dec!(0.96),
+        side: OutcomeSide::Up,
+        reference_price: dec!(90000),
+        tick_size: dec!(0.01),
+        entry_time: now - Duration::seconds(15),
+        current_bid: dec!(0.90),
+        book_age_ms: 5000, // STALE book (> 1200ms)
+        external_price: Some(dec!(89700)), // crypto reversed
+        external_age_ms: Some(500),
+        composite_sources: Some(3),
+        time_remaining: 300,
+        now,
+    };
+
+    let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
+    // Book is stale, so: hard crash (needs fresh book) = no,
+    // dual trigger = no, trailing = no, post-entry = no
+    assert!(trigger.is_none(), "All triggers should be suppressed with stale orderbook");
+}
+
+#[test]
+fn evaluate_triggers_no_external_price_suppresses_hard_and_dual() {
+    // No external price means hard crash and dual trigger can't fire.
+    // But trailing stop can still work (it only needs the orderbook).
+    let sl = StopLossConfig::default();
+    let te = TailEndConfig::default();
+    let mut lifecycle = PositionLifecycle::new();
+
+    // Setup: trailing would trigger (peak=0.96, bid=0.90, drop=0.06 > trailing distance)
+    // at 900s: decay_factor=1, raw=0.05, floor=0.015, effective=0.05
+    let ctx = make_trigger_ctx(
+        dec!(0.90),
+        dec!(0.96),       // peak (armed)
+        dec!(0.90),       // drop = 0.06 >= 0.05
+        dec!(90000),
+        None,             // NO external price
+        900,
+        15,
+    );
+
+    let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
+    assert!(trigger.is_some(), "Trailing should work without external price");
+    assert!(matches!(trigger.unwrap(), StopLossTriggerKind::TrailingStop { .. }));
 }

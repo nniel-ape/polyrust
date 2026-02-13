@@ -19,7 +19,8 @@ pub use tailend::TailEndStrategy;
 pub use types::{
     ArbitrageOpportunity, ArbitragePosition, BoundarySnapshot, CompositePriceSnapshot,
     ExitOrderMeta, MarketWithReference, ModeStats, OpenLimitOrder, PendingOrder,
-    PositionLifecycle, PositionLifecycleState, ReferenceQuality, SpikeEvent, StopLossTriggerKind,
+    PositionLifecycle, PositionLifecycleState, ReferenceQuality, SpikeEvent,
+    StopLossTriggerKind, TriggerEvalContext,
 };
 
 // Re-export fee helpers for use in strategies
