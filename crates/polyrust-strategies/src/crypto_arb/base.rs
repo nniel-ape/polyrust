@@ -1266,10 +1266,12 @@ impl CryptoArbBase {
                     (OutcomeSide::Down | OutcomeSide::No, Some(cp)) => cp <= pos.reference_price,
                     _ => false,
                 };
+                // Use entry_fee_per_share (0 for GTC entry, actual taker fee for FOK entry)
                 let pnl = if won {
-                    (Decimal::ONE - pos.entry_price) * pos.size - (pos.estimated_fee * pos.size)
+                    (Decimal::ONE - pos.entry_price) * pos.size
+                        - (pos.entry_fee_per_share * pos.size)
                 } else {
-                    -(pos.entry_price * pos.size) - (pos.estimated_fee * pos.size)
+                    -(pos.entry_price * pos.size) - (pos.entry_fee_per_share * pos.size)
                 };
                 self.record_trade_pnl(pnl).await;
                 info!(

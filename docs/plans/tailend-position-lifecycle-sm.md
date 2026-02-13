@@ -120,12 +120,12 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 7
 
 ### Task 7: Fix PnL entry fee bug
-- [ ] In `tailend.rs` `on_order_filled` (~line 949), replace `pos.estimated_fee * size` with conditional: `if pos.entry_order_type == Gtc { ZERO } else { taker_fee(pos.entry_price, fee_rate) } * size`
-- [ ] Same fix in GTC stop-loss fill path (if exists separately)
-- [ ] Same fix in `on_market_expired` PnL calculation in `base.rs` if it uses `estimated_fee`
-- [ ] Write test: PnL for GTC entry + FOK exit → entry fee = 0, exit fee = taker
-- [ ] Write test: PnL for GTC entry + GTC exit → both fees = 0
-- [ ] Run tests — must pass before task 8
+- [x] In `tailend.rs` `on_order_filled` (~line 949), replace `pos.estimated_fee * size` with conditional: `if pos.entry_order_type == Gtc { ZERO } else { taker_fee(pos.entry_price, fee_rate) } * size`
+- [x] Same fix in GTC stop-loss fill path (if exists separately)
+- [x] Same fix in `on_market_expired` PnL calculation in `base.rs` if it uses `estimated_fee`
+- [x] Write test: PnL for GTC entry + FOK exit → entry fee = 0, exit fee = taker
+- [x] Write test: PnL for GTC entry + GTC exit → both fees = 0
+- [x] Run tests — must pass before task 8
 
 ### Task 8: Fix PnL exit price bug
 - [ ] In `tailend.rs` `on_order_filled` FOK stop-loss path (~line 941), change `let exit_price = sl_info.exit_price` to `let exit_price = price` (use actual CLOB fill price)

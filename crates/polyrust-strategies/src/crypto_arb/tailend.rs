@@ -898,7 +898,8 @@ impl TailEndStrategy {
                     .await
                 {
                     // GTC fills are maker orders → 0% fee on exit
-                    let pnl = (price - pos.entry_price) * size - (pos.estimated_fee * size);
+                    // Use entry_fee_per_share (0 for GTC entry, actual taker fee for FOK entry)
+                    let pnl = (price - pos.entry_price) * size - (pos.entry_fee_per_share * size);
                     self.base.record_trade_pnl(pnl).await;
                     if !fully_closed {
                         warn!(
@@ -940,8 +941,9 @@ impl TailEndStrategy {
                     .await
                 {
                     let exit_fee = taker_fee(exit_price, self.base.config.fee.taker_fee_rate);
+                    // Use entry_fee_per_share (0 for GTC entry, actual taker fee for FOK entry)
                     let pnl = (exit_price - pos.entry_price) * size
-                        - (pos.estimated_fee * size)
+                        - (pos.entry_fee_per_share * size)
                         - (exit_fee * size);
                     self.base.record_trade_pnl(pnl).await;
                     if !fully_closed {
@@ -1549,5 +1551,141 @@ mod tests {
         let limits = strategy_mut.base.open_limit_orders.read().await;
         let lo = limits.get("order123").expect("limit order still present");
         assert_eq!(lo.size, dec!(6), "size should be updated to remaining_size");
+    }
+
+    // --- PnL entry fee bug fix tests ---
+
+    /// GTC entry (maker, 0% fee) + FOK exit (taker fee on exit only).
+    /// Entry fee must be 0, only exit taker fee is deducted.
+    #[test]
+    fn pnl_gtc_entry_fok_exit_entry_fee_is_zero() {
+        use crate::crypto_arb::base::taker_fee;
+
+        let entry_price = dec!(0.92);
+        let exit_price = dec!(0.85);
+        let size = dec!(100);
+        let fee_rate = dec!(0.0315);
+
+        // GTC entry → entry_fee_per_share = 0
+        let entry_fee_per_share = Decimal::ZERO;
+        let exit_fee = taker_fee(exit_price, fee_rate);
+
+        // Formula from FOK stop-loss path:
+        // pnl = (exit_price - entry_price) * size - (entry_fee_per_share * size) - (exit_fee * size)
+        let pnl = (exit_price - entry_price) * size
+            - (entry_fee_per_share * size)
+            - (exit_fee * size);
+
+        // Expected: (0.85 - 0.92) * 100 - 0 - exit_fee * 100
+        let expected_exit_fee = taker_fee(dec!(0.85), fee_rate);
+        let expected = (dec!(0.85) - dec!(0.92)) * dec!(100) - expected_exit_fee * dec!(100);
+        assert_eq!(pnl, expected);
+
+        // Verify entry fee component is truly zero
+        assert_eq!(entry_fee_per_share * size, Decimal::ZERO);
+    }
+
+    /// GTC entry + GTC exit → both fees = 0.
+    #[test]
+    fn pnl_gtc_entry_gtc_exit_both_fees_zero() {
+        let entry_price = dec!(0.93);
+        let exit_price = dec!(0.88);
+        let size = dec!(50);
+
+        // GTC entry → entry_fee_per_share = 0
+        let entry_fee_per_share = Decimal::ZERO;
+        // GTC exit → 0% maker fee (no exit_fee term)
+
+        // Formula from GTC stop-loss path:
+        // pnl = (price - entry_price) * size - (entry_fee_per_share * size)
+        let pnl = (exit_price - entry_price) * size - (entry_fee_per_share * size);
+
+        // Expected: (0.88 - 0.93) * 50 - 0 = -2.50
+        let expected = (dec!(0.88) - dec!(0.93)) * dec!(50);
+        assert_eq!(pnl, expected);
+        assert_eq!(pnl, dec!(-2.5));
+    }
+
+    /// FOK entry (taker fee) + FOK exit (taker fee) → both fees deducted.
+    /// This verifies entry_fee_per_share is correctly used instead of estimated_fee.
+    #[test]
+    fn pnl_fok_entry_fok_exit_both_fees_deducted() {
+        use crate::crypto_arb::base::taker_fee;
+
+        let entry_price = dec!(0.94);
+        let exit_price = dec!(0.90);
+        let size = dec!(100);
+        let fee_rate = dec!(0.0315);
+
+        // FOK entry → entry_fee_per_share = taker_fee(actual_fill_price, rate)
+        let entry_fee_per_share = taker_fee(entry_price, fee_rate);
+        let exit_fee = taker_fee(exit_price, fee_rate);
+
+        let pnl = (exit_price - entry_price) * size
+            - (entry_fee_per_share * size)
+            - (exit_fee * size);
+
+        // Manual: taker_fee(0.94, 0.0315) = 2 * 0.94 * 0.06 * 0.0315 = 0.0035532
+        // taker_fee(0.90, 0.0315) = 2 * 0.90 * 0.10 * 0.0315 = 0.00567
+        // pnl = (0.90 - 0.94) * 100 - 0.35532 - 0.567 = -4.0 - 0.35532 - 0.567 = -4.92232
+        let expected_entry = taker_fee(dec!(0.94), fee_rate);
+        let expected_exit = taker_fee(dec!(0.90), fee_rate);
+        let expected = (dec!(0.90) - dec!(0.94)) * dec!(100)
+            - expected_entry * dec!(100)
+            - expected_exit * dec!(100);
+        assert_eq!(pnl, expected);
+
+        // Both fees should be non-zero
+        assert!(entry_fee_per_share > Decimal::ZERO);
+        assert!(exit_fee > Decimal::ZERO);
+    }
+
+    /// Market expiry with GTC entry: winning outcome → entry fee = 0.
+    #[test]
+    fn pnl_market_expiry_gtc_entry_win() {
+        let entry_price = dec!(0.90);
+        let size = dec!(100);
+        let entry_fee_per_share = Decimal::ZERO; // GTC
+
+        // Won: pnl = (1.0 - entry_price) * size - (entry_fee_per_share * size)
+        let pnl = (Decimal::ONE - entry_price) * size - (entry_fee_per_share * size);
+
+        // Expected: (1.0 - 0.90) * 100 - 0 = 10.00
+        assert_eq!(pnl, dec!(10));
+    }
+
+    /// Market expiry with GTC entry: losing outcome → entry fee = 0.
+    #[test]
+    fn pnl_market_expiry_gtc_entry_loss() {
+        let entry_price = dec!(0.90);
+        let size = dec!(100);
+        let entry_fee_per_share = Decimal::ZERO; // GTC
+
+        // Lost: pnl = -(entry_price * size) - (entry_fee_per_share * size)
+        let pnl = -(entry_price * size) - (entry_fee_per_share * size);
+
+        // Expected: -(0.90 * 100) - 0 = -90.00
+        assert_eq!(pnl, dec!(-90));
+    }
+
+    /// Market expiry with FOK entry: taker fee deducted from outcome.
+    #[test]
+    fn pnl_market_expiry_fok_entry_win() {
+        use crate::crypto_arb::base::taker_fee;
+
+        let entry_price = dec!(0.92);
+        let size = dec!(100);
+        let fee_rate = dec!(0.0315);
+        let entry_fee_per_share = taker_fee(entry_price, fee_rate);
+
+        // Won: pnl = (1.0 - entry_price) * size - (entry_fee_per_share * size)
+        let pnl = (Decimal::ONE - entry_price) * size - (entry_fee_per_share * size);
+
+        // taker_fee(0.92) = 2 * 0.92 * 0.08 * 0.0315 = 0.0046368
+        // pnl = (0.08) * 100 - 0.46368 = 7.53632
+        let expected = dec!(8) - taker_fee(dec!(0.92), fee_rate) * dec!(100);
+        assert_eq!(pnl, expected);
+        assert!(pnl > Decimal::ZERO);
+        assert!(pnl < dec!(8)); // Must be less than gross due to fee
     }
 }
