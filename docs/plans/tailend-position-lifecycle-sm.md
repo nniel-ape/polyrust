@@ -187,19 +187,19 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 13
 
 ### Task 13: Replace check_stop_loss with lifecycle-driven evaluation in tailend.rs
-- [ ] In `handle_orderbook_update` (tailend.rs), for each open position: get/create lifecycle, get cached composite, call `evaluate_triggers()`
-- [ ] If trigger fires and position is sellable (past `min_sell_delay_secs`): transition lifecycle to `ExitExecuting`, build depth-capped FOK sell order, emit PlaceOrder action
-- [ ] If trigger fires but NOT yet sellable: transition lifecycle to `DeferredExit` (arm the trigger for later)
-- [ ] If position is in `DeferredExit` and now sellable: re-check trigger; if still valid transition to `ExitExecuting` and sell; if cleared transition back to `Healthy`
-- [ ] If no trigger: ensure lifecycle is `Healthy`, update `dual_trigger_ticks` counter (reset if conditions cleared)
-- [ ] Continue updating `peak_bid` on every orderbook update (existing logic)
-- [ ] Store pending exit order in `exit_orders_by_id` for fill routing
-- [ ] Remove old `check_stop_loss()` call path from tailend evaluation loop
-- [ ] Write test: orderbook update with trigger condition → lifecycle transitions to ExitExecuting
-- [ ] Write test: orderbook update during sell delay → lifecycle transitions to DeferredExit
-- [ ] Write test: deferred exit re-checks and fires when sellable
-- [ ] Write test: deferred exit clears when condition resolves
-- [ ] Run tests — must pass before task 14
+- [x] In `handle_orderbook_update` (tailend.rs), for each open position: get/create lifecycle, get cached composite, call `evaluate_triggers()`
+- [x] If trigger fires and position is sellable (past `min_sell_delay_secs`): transition lifecycle to `ExitExecuting`, build depth-capped FOK sell order, emit PlaceOrder action
+- [x] If trigger fires but NOT yet sellable: transition lifecycle to `DeferredExit` (arm the trigger for later)
+- [x] If position is in `DeferredExit` and now sellable: re-check trigger; if still valid transition to `ExitExecuting` and sell; if cleared transition back to `Healthy`
+- [x] If no trigger: ensure lifecycle is `Healthy`, update `dual_trigger_ticks` counter (reset if conditions cleared)
+- [x] Continue updating `peak_bid` on every orderbook update (existing logic)
+- [x] Store pending exit order in `exit_orders_by_id` for fill routing
+- [x] Remove old `check_stop_loss()` call path from tailend evaluation loop
+- [x] Write test: orderbook update with trigger condition → lifecycle transitions to ExitExecuting
+- [x] Write test: orderbook update during sell delay → lifecycle transitions to DeferredExit
+- [x] Write test: deferred exit re-checks and fires when sellable
+- [x] Write test: deferred exit clears when condition resolves
+- [x] Run tests — must pass before task 14
 
 ### Task 14: Implement execution ladder (FOK → short-lived GTC refresh)
 - [ ] When ExitExecuting FOK is rejected for liquidity: transition to `ResidualRisk { use_gtc_next: true, retry_count: 1, remaining_size }`

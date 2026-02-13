@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use tracing::{debug, info, warn};
 
@@ -19,7 +20,9 @@ use polyrust_core::prelude::*;
 use crate::crypto_arb::base::{CryptoArbBase, GtcStopLossOrder, taker_fee};
 use crate::crypto_arb::dashboard::try_emit_dashboard_updates;
 use crate::crypto_arb::types::{
-    ArbitrageOpportunity, ArbitragePosition, OpenLimitOrder, PendingOrder, PendingStopLoss,
+    ArbitrageOpportunity, ArbitragePosition, ExitOrderMeta, OpenLimitOrder, PendingOrder,
+    PendingStopLoss, PositionLifecycleState, StopLossTriggerKind, TriggerEvalContext,
+    compute_exit_clip,
 };
 
 /// TailEnd strategy: trades near expiration with high market prices.
@@ -706,8 +709,11 @@ impl TailEndStrategy {
         result
     }
 
-    /// Handle an orderbook update: update cached asks, peak bids, check
-    /// stop-losses, and trigger post-entry exits on our positions.
+    /// Handle an orderbook update: update cached asks, peak bids, evaluate
+    /// lifecycle-driven stop-loss triggers on our positions.
+    ///
+    /// Replaces the old check_stop_loss + post-entry exit logic with the
+    /// 4-level trigger hierarchy (evaluate_triggers) and lifecycle state machine.
     async fn handle_orderbook_update(&self, snapshot: &OrderbookSnapshot) -> Vec<Action> {
         // Update cached asks
         if let Some(best_ask) = snapshot.asks.first() {
@@ -750,8 +756,8 @@ impl TailEndStrategy {
             }
         }
 
-        // Check stop-losses on our positions
-        let position_ids: Vec<(MarketId, ArbitragePosition)> = {
+        // Lifecycle-driven stop-loss evaluation on our positions
+        let position_snapshot: Vec<(MarketId, ArbitragePosition)> = {
             let positions = self.base.positions.read().await;
             positions
                 .iter()
@@ -759,12 +765,14 @@ impl TailEndStrategy {
                 .collect()
         };
 
-        for (_, pos) in position_ids {
+        let now = self.base.event_time().await;
+
+        for (_, pos) in position_snapshot {
             if pos.token_id != snapshot.token_id {
                 continue;
             }
 
-            // Skip if stop-loss already in flight or in cooldown
+            // Skip if stop-loss already in flight (legacy pending_stop_loss check for transition period)
             {
                 let pending_sl = self.base.pending_stop_loss.read().await;
                 if pending_sl.contains_key(&pos.token_id) {
@@ -775,108 +783,354 @@ impl TailEndStrategy {
                 continue;
             }
 
-            // Skip sells too soon after entry — CLOB needs time to settle buy
-            // before conditional tokens are available for selling
-            let seconds_since_entry = self
-                .base
-                .event_time()
-                .await
-                .signed_duration_since(pos.entry_time)
-                .num_seconds();
-            if seconds_since_entry < self.base.config.tailend.min_sell_delay_secs {
+            // Get or create lifecycle for this position
+            let mut lifecycle = self.base.ensure_lifecycle(&pos.token_id).await;
+
+            // If lifecycle is in ExitExecuting, skip — order is already in flight
+            if matches!(lifecycle.state, PositionLifecycleState::ExitExecuting { .. }) {
+                continue;
+            }
+
+            // Get market metadata (time remaining, neg_risk, min_order_size)
+            let (time_remaining, neg_risk, min_order_size) = {
+                let markets = self.base.active_markets.read().await;
+                match markets.get(&pos.market_id) {
+                    Some(m) => (
+                        m.market.seconds_remaining_at(now),
+                        m.market.neg_risk,
+                        m.market.min_order_size,
+                    ),
+                    None => continue,
+                }
+            };
+
+            // Skip if time remaining is below threshold (don't sell in final seconds)
+            if time_remaining <= self.base.config.stop_loss.min_remaining_secs {
+                continue;
+            }
+
+            // Skip dust positions below min order size
+            if pos.size < min_order_size {
                 debug!(
-                    market = %pos.market_id,
-                    seconds_since_entry = seconds_since_entry,
-                    min_sell_delay = self.base.config.tailend.min_sell_delay_secs,
-                    "Skipping sell: settlement delay not elapsed"
+                    token_id = %pos.token_id,
+                    size = %pos.size,
+                    min = %min_order_size,
+                    "Lifecycle skip: dust position below min order size"
                 );
                 continue;
             }
 
-            if let Some((action, exit_price, sl_order_type, trigger)) = self
-                .base
-                .check_stop_loss(&pos, snapshot, self.base.event_time().await)
-                .await
-            {
-                info!(
-                    market = %pos.market_id,
-                    entry = %pos.entry_price,
-                    exit = %exit_price,
-                    side = ?pos.side,
-                    order_type = ?sl_order_type,
-                    reason = trigger.reason,
-                    peak_bid = %trigger.peak_bid,
-                    effective_distance = %trigger.effective_distance,
-                    time_remaining = trigger.time_remaining,
-                    "TailEnd stop-loss triggered"
-                );
-                let mut pending_sl = self.base.pending_stop_loss.write().await;
-                pending_sl.insert(
-                    pos.token_id.clone(),
-                    PendingStopLoss {
-                        exit_price,
-                        order_type: sl_order_type,
-                    },
-                );
-                actions.push(action);
-                continue;
-            }
+            let current_bid = match snapshot.best_bid() {
+                Some(b) => b,
+                None => continue,
+            };
 
-            // Post-entry confirmation: exit if price drops significantly
-            // within post_entry_window_secs of entry (catches false signals immediately)
-            let seconds_since_entry = self
-                .base
-                .event_time()
-                .await
+            // Build the trigger evaluation context
+            let book_age_ms = now
+                .signed_duration_since(snapshot.timestamp)
+                .num_milliseconds();
+
+            // Get composite price for this coin from cache
+            let sl_config = &self.base.config.stop_loss;
+            let (external_price, external_age_ms, composite_sources) = {
+                // Read the cache directly to get both the result and its timestamp
+                let cache = self.base.sl_composite_cache.read().await;
+                if let Some((composite, cached_at)) = cache.get(&pos.coin) {
+                    let age = now.signed_duration_since(*cached_at).num_milliseconds();
+                    if age <= sl_config.sl_max_external_age_ms * 2 {
+                        (Some(composite.price), Some(age), Some(composite.sources_used))
+                    } else {
+                        drop(cache);
+                        // Composite too stale, try single fresh source
+                        if let Some(single) = self
+                            .base
+                            .get_sl_single_fresh(
+                                &pos.coin,
+                                sl_config.sl_max_external_age_ms * 2,
+                                now,
+                            )
+                            .await
+                        {
+                            let history = self.base.price_history.read().await;
+                            let age = history
+                                .get(&pos.coin)
+                                .and_then(|h| h.back())
+                                .map(|(ts, _, _)| {
+                                    now.signed_duration_since(*ts).num_milliseconds()
+                                })
+                                .unwrap_or(sl_config.sl_max_external_age_ms * 3);
+                            (Some(single), Some(age), None)
+                        } else {
+                            (None, None, None)
+                        }
+                    }
+                } else {
+                    drop(cache);
+                    // No composite cached, try single fresh source
+                    if let Some(single) = self
+                        .base
+                        .get_sl_single_fresh(
+                            &pos.coin,
+                            sl_config.sl_max_external_age_ms * 2,
+                            now,
+                        )
+                        .await
+                    {
+                        let history = self.base.price_history.read().await;
+                        let age = history
+                            .get(&pos.coin)
+                            .and_then(|h| h.back())
+                            .map(|(ts, _, _)| {
+                                now.signed_duration_since(*ts).num_milliseconds()
+                            })
+                            .unwrap_or(sl_config.sl_max_external_age_ms * 3);
+                        (Some(single), Some(age), None)
+                    } else {
+                        (None, None, None)
+                    }
+                }
+            };
+
+            let trigger_ctx = TriggerEvalContext {
+                entry_price: pos.entry_price,
+                peak_bid: pos.peak_bid,
+                side: pos.side,
+                reference_price: pos.reference_price,
+                tick_size: pos.tick_size,
+                entry_time: pos.entry_time,
+                current_bid,
+                book_age_ms,
+                external_price,
+                external_age_ms,
+                composite_sources,
+                time_remaining,
+                now,
+            };
+
+            let seconds_since_entry = now
                 .signed_duration_since(pos.entry_time)
                 .num_seconds();
-            let window = self.base.config.tailend.post_entry_window_secs;
-            let max_drop = self.base.config.tailend.post_entry_exit_drop;
-            if seconds_since_entry <= window
-                && let Some(current_bid) = snapshot.best_bid()
-            {
-                // Exit if bid dropped more than post_entry_exit_drop below entry price
-                let exit_threshold = pos.entry_price - max_drop;
-                if current_bid < exit_threshold {
+            let is_sellable = seconds_since_entry >= self.base.config.tailend.min_sell_delay_secs;
+
+            // Handle existing DeferredExit state
+            if let PositionLifecycleState::DeferredExit { .. } = &lifecycle.state {
+                if is_sellable {
+                    // Re-evaluate triggers — if still firing, transition to ExitExecuting
+                    let trigger = lifecycle.evaluate_triggers(
+                        &trigger_ctx,
+                        sl_config,
+                        &self.base.config.tailend,
+                    );
+                    if let Some(trigger_kind) = trigger {
+                        // Trigger persists — execute exit
+                        if let Some(action) = self
+                            .build_exit_order(
+                                &pos,
+                                current_bid,
+                                snapshot,
+                                neg_risk,
+                                min_order_size,
+                                &trigger_kind,
+                                &mut lifecycle,
+                                now,
+                            )
+                            .await
+                        {
+                            self.write_lifecycle(&pos.token_id, &lifecycle).await;
+                            actions.push(action);
+                            continue;
+                        }
+                    }
+                    // Trigger cleared or exit couldn't be built — return to Healthy
+                    if let Err(e) = lifecycle.transition(
+                        PositionLifecycleState::Healthy,
+                        "deferred trigger cleared",
+                        now,
+                    ) {
+                        warn!(token_id = %pos.token_id, error = %e, "Lifecycle transition error");
+                    }
+                    lifecycle.dual_trigger_ticks = 0;
+                    self.write_lifecycle(&pos.token_id, &lifecycle).await;
+                    continue;
+                }
+                // Still in sell delay — keep DeferredExit, skip further evaluation
+                self.write_lifecycle(&pos.token_id, &lifecycle).await;
+                continue;
+            }
+
+            // Evaluate triggers for Healthy positions
+            let trigger = lifecycle.evaluate_triggers(
+                &trigger_ctx,
+                sl_config,
+                &self.base.config.tailend,
+            );
+
+            if let Some(trigger_kind) = trigger {
+                if !is_sellable {
+                    // Trigger during sell delay — defer exit
+                    if let Err(e) = lifecycle.transition(
+                        PositionLifecycleState::DeferredExit {
+                            trigger: trigger_kind.clone(),
+                            armed_at: now,
+                        },
+                        &format!("trigger during sell delay: {trigger_kind}"),
+                        now,
+                    ) {
+                        warn!(token_id = %pos.token_id, error = %e, "Lifecycle transition error");
+                    }
                     info!(
                         market = %pos.market_id,
-                        entry_price = %pos.entry_price,
-                        exit_threshold = %exit_threshold,
-                        current_bid = %current_bid,
-                        seconds_since_entry = seconds_since_entry,
-                        "TailEnd post-entry exit triggered: bid dropped {max_drop} below entry"
+                        token_id = %pos.token_id,
+                        trigger = %trigger_kind,
+                        seconds_since_entry,
+                        "TailEnd exit deferred: trigger during sell delay"
                     );
-                    let neg_risk = {
-                        let markets = self.base.active_markets.read().await;
-                        markets
-                            .get(&pos.market_id)
-                            .map(|m| m.market.neg_risk)
-                            .unwrap_or(false)
-                    };
-                    let order = OrderRequest::new(
-                        pos.token_id.clone(),
+                    self.write_lifecycle(&pos.token_id, &lifecycle).await;
+                    continue;
+                }
+
+                // Sellable + trigger fired — execute exit
+                if let Some(action) = self
+                    .build_exit_order(
+                        &pos,
                         current_bid,
-                        pos.size,
-                        OrderSide::Sell,
-                        OrderType::Fok,
+                        snapshot,
                         neg_risk,
+                        min_order_size,
+                        &trigger_kind,
+                        &mut lifecycle,
+                        now,
                     )
-                    .with_tick_size(pos.tick_size)
-                    .with_fee_rate_bps(pos.fee_rate_bps);
-                    let mut pending_sl = self.base.pending_stop_loss.write().await;
-                    pending_sl.insert(
-                        pos.token_id.clone(),
-                        PendingStopLoss {
-                            exit_price: current_bid,
-                            order_type: OrderType::Fok,
-                        },
-                    );
-                    actions.push(Action::PlaceOrder(order));
+                    .await
+                {
+                    self.write_lifecycle(&pos.token_id, &lifecycle).await;
+                    actions.push(action);
+                    continue;
                 }
             }
+
+            // No trigger fired — write back lifecycle (updated dual_trigger_ticks, trailing_unarmable)
+            self.write_lifecycle(&pos.token_id, &lifecycle).await;
         }
 
         actions
+    }
+
+    /// Build an exit sell order with depth-capped clip sizing and transition
+    /// lifecycle to ExitExecuting. Stores exit order metadata for fill routing.
+    ///
+    /// Returns `None` if the clip size is dust (below min_order_size).
+    #[allow(clippy::too_many_arguments)]
+    async fn build_exit_order(
+        &self,
+        pos: &ArbitragePosition,
+        current_bid: Decimal,
+        snapshot: &OrderbookSnapshot,
+        neg_risk: bool,
+        min_order_size: Decimal,
+        trigger_kind: &StopLossTriggerKind,
+        lifecycle: &mut crate::crypto_arb::types::PositionLifecycle,
+        now: DateTime<Utc>,
+    ) -> Option<Action> {
+        // Compute depth-capped clip size
+        let bid_depth = snapshot.bid_depth_down_to(
+            current_bid - pos.tick_size * Decimal::from(3u32),
+        );
+        let clip = compute_exit_clip(
+            pos.size,
+            bid_depth,
+            self.base.config.stop_loss.exit_depth_cap_factor,
+            min_order_size,
+        );
+
+        if clip.is_zero() {
+            debug!(
+                token_id = %pos.token_id,
+                remaining = %pos.size,
+                bid_depth = %bid_depth,
+                "Exit clip is dust — skipping exit order"
+            );
+            return None;
+        }
+
+        let order = OrderRequest::new(
+            pos.token_id.clone(),
+            current_bid,
+            clip,
+            OrderSide::Sell,
+            OrderType::Fok,
+            neg_risk,
+        )
+        .with_tick_size(pos.tick_size)
+        .with_fee_rate_bps(pos.fee_rate_bps);
+
+        // Generate a synthetic order ID for lifecycle tracking
+        // (real order ID comes back from PlaceOrder result, but we need to track intent now)
+        let exit_order_id = format!("exit-{}-{}", pos.token_id, now.timestamp_millis());
+
+        // Transition lifecycle to ExitExecuting
+        if let Err(e) = lifecycle.transition(
+            PositionLifecycleState::ExitExecuting {
+                order_id: exit_order_id.clone(),
+                order_type: OrderType::Fok,
+                exit_price: current_bid,
+                submitted_at: now,
+            },
+            &format!("trigger fired: {trigger_kind}"),
+            now,
+        ) {
+            warn!(token_id = %pos.token_id, error = %e, "Lifecycle transition to ExitExecuting failed");
+            return None;
+        }
+        lifecycle.pending_exit_order_id = Some(exit_order_id.clone());
+
+        // Store exit order meta for fill routing
+        {
+            let mut exit_orders = self.base.exit_orders_by_id.write().await;
+            exit_orders.insert(
+                exit_order_id,
+                ExitOrderMeta {
+                    token_id: pos.token_id.clone(),
+                    order_type: OrderType::Fok,
+                    source_state: format!("{trigger_kind}"),
+                },
+            );
+        }
+
+        // Also store in legacy pending_stop_loss for compatibility with existing fill handler
+        {
+            let mut pending_sl = self.base.pending_stop_loss.write().await;
+            pending_sl.insert(
+                pos.token_id.clone(),
+                PendingStopLoss {
+                    exit_price: current_bid,
+                    order_type: OrderType::Fok,
+                },
+            );
+        }
+
+        info!(
+            market = %pos.market_id,
+            token_id = %pos.token_id,
+            entry = %pos.entry_price,
+            exit = %current_bid,
+            clip = %clip,
+            side = ?pos.side,
+            trigger = %trigger_kind,
+            "TailEnd lifecycle stop-loss triggered"
+        );
+
+        Some(Action::PlaceOrder(order))
+    }
+
+    /// Write a lifecycle back to the shared store.
+    async fn write_lifecycle(
+        &self,
+        token_id: &str,
+        lifecycle: &crate::crypto_arb::types::PositionLifecycle,
+    ) {
+        let mut lifecycles = self.base.position_lifecycle.write().await;
+        lifecycles.insert(token_id.to_string(), lifecycle.clone());
     }
 
     /// Handle a fully filled order event (GTC entry fills, stop-loss sells, GTC SL fills).
@@ -1756,5 +2010,330 @@ mod tests {
             - taker_fee(dec!(0.90), fee_rate) * dec!(50);
         assert_eq!(pnl, expected);
         assert!(pnl < Decimal::ZERO);
+    }
+
+    // -----------------------------------------------------------------------
+    // Lifecycle-driven stop-loss evaluation tests (Task 13)
+    // -----------------------------------------------------------------------
+
+    use crate::crypto_arb::types::PositionLifecycleState;
+
+    /// Helper: create a TailEndStrategy with a market, position, and price history
+    /// configured so that stop-loss can fire.
+    async fn make_lifecycle_test_setup(
+        entry_time_offset_secs: i64,
+        time_remaining_secs: i64,
+    ) -> (TailEndStrategy, polyrust_core::types::OrderbookSnapshot) {
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.enabled = true;
+        config.tailend.min_sustained_secs = 0;
+        config.tailend.max_recent_volatility = dec!(1.0);
+        // Hard crash: bid drop >= 0.08 OR reversal >= 0.6%
+        config.stop_loss.hard_drop_abs = dec!(0.08);
+        config.stop_loss.hard_reversal_pct = dec!(0.006);
+        // Dual trigger: both conditions for 2 ticks
+        config.stop_loss.dual_trigger_consecutive_ticks = 2;
+        config.stop_loss.reversal_pct = dec!(0.003);
+        config.stop_loss.min_drop = dec!(0.05);
+        // Freshness: generous limits for testing
+        config.stop_loss.sl_max_book_age_ms = 5000;
+        config.stop_loss.sl_max_external_age_ms = 5000;
+        config.stop_loss.sl_min_sources = 1;
+        config.stop_loss.sl_max_dispersion_bps = dec!(100);
+        // Sell delay: 10 seconds
+        config.tailend.min_sell_delay_secs = 10;
+        // Post-entry window: 20 seconds
+        config.tailend.post_entry_window_secs = 20;
+        config.tailend.post_entry_exit_drop = dec!(0.04);
+        // Min remaining: 0 (allow stop-loss at any time)
+        config.stop_loss.min_remaining_secs = 0;
+        // Exit depth cap
+        config.stop_loss.exit_depth_cap_factor = dec!(0.80);
+
+        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+        let now = Utc::now();
+        let end_date = now + Duration::seconds(time_remaining_secs);
+
+        // Insert active market
+        {
+            let mut markets = base.active_markets.write().await;
+            markets.insert(
+                "market1".to_string(),
+                MarketWithReference {
+                    market: make_market_info("market1", end_date),
+                    reference_price: dec!(50000),
+                    reference_quality: ReferenceQuality::Exact,
+                    discovery_time: now,
+                    coin: "BTC".to_string(),
+                    window_ts: 0,
+                },
+            );
+        }
+
+        // Seed price history: BTC reversed from 50000 → 49700 (0.6%)
+        {
+            let mut history = base.price_history.write().await;
+            let mut entries = std::collections::VecDeque::new();
+            entries.push_back((now, dec!(49700), "test".to_string()));
+            history.insert("BTC".to_string(), entries);
+        }
+
+        // Seed the composite cache with fresh data
+        {
+            let mut cache = base.sl_composite_cache.write().await;
+            cache.insert(
+                "BTC".to_string(),
+                (
+                    crate::crypto_arb::base::CompositePriceResult {
+                        price: dec!(49700),
+                        sources_used: 2,
+                        max_lag_ms: 100,
+                        dispersion_bps: dec!(5),
+                    },
+                    now,
+                ),
+            );
+        }
+
+        // Create position: entry at 0.90 (entry_time_offset_secs ago)
+        let entry_time = now - Duration::seconds(entry_time_offset_secs);
+        let pos = ArbitragePosition {
+            market_id: "market1".to_string(),
+            token_id: "token_up".to_string(),
+            side: polyrust_core::types::OutcomeSide::Up,
+            entry_price: dec!(0.90),
+            size: dec!(10),
+            reference_price: dec!(50000),
+            coin: "BTC".to_string(),
+            order_id: None,
+            entry_time,
+            kelly_fraction: None,
+            peak_bid: dec!(0.90),
+            estimated_fee: Decimal::ZERO,
+            entry_market_price: dec!(0.90),
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+            entry_order_type: OrderType::Gtc,
+            entry_fee_per_share: Decimal::ZERO,
+            realized_pnl: Decimal::ZERO,
+        };
+        base.record_position(pos).await;
+
+        let strategy = TailEndStrategy::new(base);
+
+        // Snapshot: bid dropped to 0.82 (drop = 0.08 from 0.90 = hard crash level)
+        let snapshot = polyrust_core::types::OrderbookSnapshot {
+            token_id: "token_up".to_string(),
+            bids: vec![polyrust_core::types::OrderbookLevel {
+                price: dec!(0.82),
+                size: dec!(100),
+            }],
+            asks: vec![polyrust_core::types::OrderbookLevel {
+                price: dec!(0.85),
+                size: dec!(100),
+            }],
+            timestamp: now,
+        };
+
+        (strategy, snapshot)
+    }
+
+    /// Orderbook update with trigger condition (hard crash) on a sellable position
+    /// transitions lifecycle to ExitExecuting and produces a PlaceOrder action.
+    #[tokio::test]
+    async fn lifecycle_trigger_transitions_to_exit_executing() {
+        // entry_time 20s ago (past sell delay of 10s), market 300s remaining
+        let (strategy, snapshot) = make_lifecycle_test_setup(20, 300).await;
+
+        let actions = strategy.handle_orderbook_update(&snapshot).await;
+
+        // Should produce a PlaceOrder (FOK sell) action
+        assert!(
+            actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))),
+            "Expected PlaceOrder action for stop-loss exit, got: {actions:?}"
+        );
+
+        // Check lifecycle transitioned to ExitExecuting
+        let lifecycles = strategy.base.position_lifecycle.read().await;
+        let lc = lifecycles
+            .get("token_up")
+            .expect("lifecycle for token_up should exist");
+        assert!(
+            matches!(lc.state, PositionLifecycleState::ExitExecuting { .. }),
+            "Expected ExitExecuting, got: {:?}",
+            lc.state
+        );
+
+        // Verify exit_orders_by_id has an entry
+        let exit_orders = strategy.base.exit_orders_by_id.read().await;
+        assert!(
+            !exit_orders.is_empty(),
+            "exit_orders_by_id should have the exit order meta"
+        );
+
+        // Verify pending_stop_loss was also populated (legacy compat)
+        let pending_sl = strategy.base.pending_stop_loss.read().await;
+        assert!(
+            pending_sl.contains_key("token_up"),
+            "pending_stop_loss should be set for fill handler"
+        );
+    }
+
+    /// Orderbook update with trigger condition during sell delay window
+    /// transitions lifecycle to DeferredExit (no sell order placed).
+    #[tokio::test]
+    async fn lifecycle_trigger_during_sell_delay_defers_exit() {
+        // entry_time 5s ago (still within sell delay of 10s), market 300s remaining
+        let (strategy, snapshot) = make_lifecycle_test_setup(5, 300).await;
+
+        let actions = strategy.handle_orderbook_update(&snapshot).await;
+
+        // Should NOT produce a PlaceOrder action (sell delay not elapsed)
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))),
+            "Should not sell during sell delay, got: {actions:?}"
+        );
+
+        // Lifecycle should be DeferredExit
+        let lifecycles = strategy.base.position_lifecycle.read().await;
+        let lc = lifecycles
+            .get("token_up")
+            .expect("lifecycle should exist");
+        assert!(
+            matches!(lc.state, PositionLifecycleState::DeferredExit { .. }),
+            "Expected DeferredExit during sell delay, got: {:?}",
+            lc.state
+        );
+    }
+
+    /// When a deferred exit becomes sellable and the trigger still fires,
+    /// the lifecycle transitions to ExitExecuting and a sell order is placed.
+    #[tokio::test]
+    async fn lifecycle_deferred_exit_fires_when_sellable() {
+        // Start with position in sell delay (5s ago)
+        let (strategy, snapshot) = make_lifecycle_test_setup(5, 300).await;
+
+        // First call: should defer (still in sell delay)
+        let _ = strategy.handle_orderbook_update(&snapshot).await;
+        {
+            let lifecycles = strategy.base.position_lifecycle.read().await;
+            let lc = lifecycles.get("token_up").unwrap();
+            assert!(matches!(lc.state, PositionLifecycleState::DeferredExit { .. }));
+        }
+
+        // Simulate time passing: move position entry_time to 20s ago
+        {
+            let mut positions = strategy.base.positions.write().await;
+            for pos_list in positions.values_mut() {
+                for pos in pos_list.iter_mut() {
+                    if pos.token_id == "token_up" {
+                        pos.entry_time = Utc::now() - Duration::seconds(20);
+                    }
+                }
+            }
+        }
+
+        // Second call: sell delay now elapsed, trigger still holds
+        let actions = strategy.handle_orderbook_update(&snapshot).await;
+
+        // Should produce a PlaceOrder action
+        assert!(
+            actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))),
+            "Should sell now that delay elapsed, got: {actions:?}"
+        );
+
+        // Lifecycle should be ExitExecuting
+        let lifecycles = strategy.base.position_lifecycle.read().await;
+        let lc = lifecycles.get("token_up").unwrap();
+        assert!(
+            matches!(lc.state, PositionLifecycleState::ExitExecuting { .. }),
+            "Expected ExitExecuting after deferred exit, got: {:?}",
+            lc.state
+        );
+    }
+
+    /// When a deferred exit's trigger condition clears before the sell delay
+    /// expires, the lifecycle transitions back to Healthy.
+    #[tokio::test]
+    async fn lifecycle_deferred_exit_clears_when_condition_resolves() {
+        // Start with position in sell delay (5s ago)
+        let (strategy, snapshot) = make_lifecycle_test_setup(5, 300).await;
+
+        // First call: should defer
+        let _ = strategy.handle_orderbook_update(&snapshot).await;
+        {
+            let lifecycles = strategy.base.position_lifecycle.read().await;
+            let lc = lifecycles.get("token_up").unwrap();
+            assert!(matches!(lc.state, PositionLifecycleState::DeferredExit { .. }));
+        }
+
+        // Simulate time passing (sell delay elapsed)
+        {
+            let mut positions = strategy.base.positions.write().await;
+            for pos_list in positions.values_mut() {
+                for pos in pos_list.iter_mut() {
+                    if pos.token_id == "token_up" {
+                        pos.entry_time = Utc::now() - Duration::seconds(20);
+                    }
+                }
+            }
+        }
+
+        // Now send a healthy snapshot (bid recovered near entry)
+        let healthy_snapshot = polyrust_core::types::OrderbookSnapshot {
+            token_id: "token_up".to_string(),
+            bids: vec![polyrust_core::types::OrderbookLevel {
+                price: dec!(0.89),
+                size: dec!(100),
+            }],
+            asks: vec![polyrust_core::types::OrderbookLevel {
+                price: dec!(0.91),
+                size: dec!(100),
+            }],
+            timestamp: Utc::now(),
+        };
+
+        // Also update price history to reflect no reversal
+        {
+            let mut history = strategy.base.price_history.write().await;
+            let mut entries = std::collections::VecDeque::new();
+            entries.push_back((Utc::now(), dec!(50100), "test".to_string()));
+            history.insert("BTC".to_string(), entries);
+        }
+        // Clear the composite cache so no stale reversal signal
+        {
+            let mut cache = strategy.base.sl_composite_cache.write().await;
+            cache.insert(
+                "BTC".to_string(),
+                (
+                    crate::crypto_arb::base::CompositePriceResult {
+                        price: dec!(50100),
+                        sources_used: 2,
+                        max_lag_ms: 100,
+                        dispersion_bps: dec!(5),
+                    },
+                    Utc::now(),
+                ),
+            );
+        }
+
+        let actions = strategy.handle_orderbook_update(&healthy_snapshot).await;
+
+        // Should NOT produce a sell action (conditions cleared)
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))),
+            "Should not sell when conditions cleared, got: {actions:?}"
+        );
+
+        // Lifecycle should transition back to Healthy
+        let lifecycles = strategy.base.position_lifecycle.read().await;
+        let lc = lifecycles.get("token_up").unwrap();
+        assert!(
+            matches!(lc.state, PositionLifecycleState::Healthy),
+            "Expected Healthy after deferred exit cleared, got: {:?}",
+            lc.state
+        );
     }
 }
