@@ -89,7 +89,7 @@ src/main.rs → wires all crates into a single binary
 
 Strategies can expose custom dashboard pages via the `DashboardViewProvider` trait (`crates/polyrust-core/src/dashboard_view.rs`). Each strategy optionally returns a view provider from `dashboard_view()`, which asynchronously renders an HTML fragment for `/strategy/:name`. The dashboard auto-generates nav links for all registered strategy views.
 
-Real-time updates use SSE: strategies emit `"dashboard-update"` signals, the SSE handler re-renders the view, and HTMX swaps the content in the browser. For dashboard-only views (no event processing), use `DashboardStrategyWrapper` in `src/main.rs` to register a view provider as a no-op strategy. See the crypto arbitrage strategy's per-mode dashboards for a reference implementation.
+Real-time updates use SSE: strategies emit `"dashboard-update"` signals, the SSE handler re-renders the view, and HTMX swaps the content in the browser. For dashboard-only views (no event processing), use `DashboardStrategyWrapper` in `src/main.rs` to register a view provider as a no-op strategy. See the crypto arbitrage strategy's dashboard for a reference implementation.
 
 ## Domain Concepts
 
@@ -115,7 +115,7 @@ Other runtime overrides via `POLY_*` env vars: `POLY_DASHBOARD_HOST`, `POLY_DASH
 Paper mode: `[paper] enabled = true` or `POLY_PAPER_TRADING=true`
 Docker deployment: Set `POLY_DASHBOARD_HOST=0.0.0.0` in `docker-compose.yml` to allow access from host machine.
 
-Strategy configuration: Add `[arbitrage]` section (and nested `[arbitrage.tailend]`, `[arbitrage.twosided]`) to `config.toml`. All trading modes are disabled by default and must be explicitly enabled with `enabled = true`. See `config.example.toml` for the complete reference.
+Strategy configuration: Add `[arbitrage]` section (with `enabled = true` and nested `[arbitrage.tailend]`) to `config.toml`. The strategy is disabled by default. See `config.example.toml` for the complete reference.
 
 Backtest configuration: Add `[backtest]` section to `config.toml` or use env overrides (`POLY_BACKTEST_START`, `POLY_BACKTEST_END`, etc.). Backtesting evaluates strategies on historical data without live/paper trading. See `config.example.toml` for the complete reference.
 
@@ -192,20 +192,18 @@ See `examples/simple_strategy.rs` for a complete runnable example.
 
 ## Reference Strategy: Crypto Arbitrage
 
-Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-minute Up/Down crypto markets with two modes:
-1. **Tail-End** (<2 min remaining, market >= 90%) — highest confidence
-2. **Two-Sided** (both outcomes < $1 combined) — guaranteed profit
+Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-minute Up/Down crypto markets using high-confidence tail-end trades (<2 min remaining, market >= 90%).
 
 ### Strategy Configuration
 
-Configured via `[arbitrage]` in `config.toml`. Modular directory structure (`crates/polyrust-strategies/src/crypto_arb/`) with per-mode strategy structs sharing state through `Arc<CryptoArbBase>`:
+Configured via `[arbitrage]` in `config.toml`. Directory structure at `crates/polyrust-strategies/src/crypto_arb/` with shared state through `Arc<CryptoArbBase>`:
 
 - `TailEndStrategy` — high-confidence trades near expiration
-- `TwoSidedStrategy` — risk-free arbitrage
+- `CryptoArbDashboard` — unified dashboard view
 
-Each mode is conditionally registered with the engine based on its `enabled` flag. All modes disabled by default.
+Strategy is disabled by default; set `enabled = true` in `[arbitrage]` to activate.
 
-`ArbitrageConfig` has core settings (coins, max_positions, min_profit_margin) plus per-mode configs (`TailEndConfig`, `TwoSidedConfig`) and shared sub-configs: `FeeConfig` (taker fee model), `SpikeConfig` (price spike detection), `OrderConfig` (hybrid GTC/FOK), `SizingConfig` (Kelly criterion), `StopLossConfig` (dual-trigger + trailing), `PerformanceConfig` (per-mode tracking + auto-disable). See `config.rs` for field details.
+`ArbitrageConfig` has core settings (coins, max_positions, min_profit_margin) plus `TailEndConfig` and shared sub-configs: `FeeConfig` (taker fee model), `SpikeConfig` (price spike detection), `OrderConfig` (GTC/FOK), `SizingConfig` (Kelly criterion), `StopLossConfig` (dual-trigger + trailing), `PerformanceConfig` (tracking + auto-disable). See `config.rs` for field details.
 
 ### Key Features
 
@@ -214,8 +212,7 @@ Each mode is conditionally registered with the engine based on its `enabled` fla
 - **Kelly criterion sizing**: Position size scales with confidence and edge, clamped to [min_size, max_size]
 - **Spike detection**: Pre-filters small moves, triggers evaluation only on significant price changes or when delta exceeds fee+margin threshold
 - **Trailing stop-loss**: Locks in profits as position moves favorably, with optional time decay near expiration
-- **Batch order API**: TwoSided mode places both legs in a single API call for atomic execution
-- **Performance tracking**: Per-mode statistics with optional auto-disable for underperforming modes
+- **Performance tracking**: Statistics with optional auto-disable when underperforming
 
 ## Polymarket API Endpoints
 
@@ -261,7 +258,7 @@ Add `[backtest]` section to `config.toml`:
 
 ```toml
 [backtest]
-strategy_name = "crypto-arb-tailend"    # or "crypto-arb-twosided"
+strategy_name = "crypto-arb-tailend"
 market_ids = []                         # Empty = auto-discover via Gamma API
 start_date = "2025-01-01T00:00:00Z"     # Backtest window start (RFC3339)
 end_date = "2025-01-31T23:59:59Z"       # Backtest window end (RFC3339)

@@ -22,8 +22,8 @@ use polyrust_market::ChainlinkHistoricalClient;
 
 use crate::crypto_arb::config::{ArbitrageConfig, SizingConfig};
 use crate::crypto_arb::types::{
-    ArbitrageMode, ArbitragePosition, BoundarySnapshot, MarketWithReference, ModeStats,
-    OpenLimitOrder, OrderTelemetry, PendingOrder, PendingStopLoss, ReferenceQuality, SpikeEvent,
+    ArbitragePosition, BoundarySnapshot, MarketWithReference, ModeStats, OpenLimitOrder,
+    OrderTelemetry, PendingOrder, PendingStopLoss, ReferenceQuality, SpikeEvent,
 };
 
 /// Result of a composite fair price calculation from multiple data sources.
@@ -231,11 +231,7 @@ pub fn fmt_market_price(price: Decimal) -> String {
 // Shared base struct
 // ---------------------------------------------------------------------------
 
-/// Shared state and utilities for all crypto arbitrage strategies.
-///
-/// This struct holds all the mutable state that is shared between the two
-/// strategy implementations (TailEnd, TwoSided).
-/// Using a shared base avoids duplication and ensures consistent state.
+/// Shared state and utilities for the crypto arbitrage strategy.
 #[allow(clippy::type_complexity)]
 pub struct CryptoArbBase {
     /// Strategy configuration.
@@ -266,8 +262,8 @@ pub struct CryptoArbBase {
     pub pending_discovery: RwLock<HashMap<String, Vec<MarketInfo>>>,
     /// Recent spike events for display and analysis.
     pub spike_events: RwLock<VecDeque<SpikeEvent>>,
-    /// Per-mode performance statistics (wins, losses, P&L).
-    pub mode_stats: RwLock<HashMap<ArbitrageMode, ModeStats>>,
+    /// Performance statistics (wins, losses, P&L).
+    pub stats: RwLock<ModeStats>,
     /// Cached best-ask prices per token_id, updated on orderbook events.
     /// Used by render_view() to display UP/DOWN market prices.
     pub cached_asks: RwLock<HashMap<TokenId, Decimal>>,
@@ -294,10 +290,10 @@ pub struct CryptoArbBase {
     /// to skip ExternalPrice events for coins where no market is near expiration.
     /// Updated on market discovered/expired.
     pub coin_nearest_expiry: RwLock<HashMap<String, DateTime<Utc>>>,
-    /// Atomic market reservations to prevent race conditions between strategies.
-    /// Holds a market_id → (mode, slot_count) mapping for markets currently being evaluated.
+    /// Atomic market reservations to prevent race conditions.
+    /// Holds a market_id → slot_count mapping for markets currently being evaluated.
     /// Protects the gap between exposure check and pending_orders.insert().
-    pub market_reservations: RwLock<HashMap<MarketId, (ArbitrageMode, usize)>>,
+    pub market_reservations: RwLock<HashMap<MarketId, usize>>,
     /// Order lifecycle telemetry (fill times, rejects, cancels).
     pub order_telemetry: std::sync::Mutex<OrderTelemetry>,
     /// Last time each feed source was seen (source name -> timestamp).
@@ -329,6 +325,7 @@ impl CryptoArbBase {
         };
 
         let coins: HashSet<String> = config.coins.iter().cloned().collect();
+        let window_size = config.performance.window_size;
 
         Self {
             config,
@@ -342,7 +339,7 @@ impl CryptoArbBase {
             pending_stop_loss: RwLock::new(HashMap::new()),
             pending_discovery: RwLock::new(HashMap::new()),
             spike_events: RwLock::new(VecDeque::new()),
-            mode_stats: RwLock::new(HashMap::new()),
+            stats: RwLock::new(ModeStats::new(window_size)),
             cached_asks: RwLock::new(HashMap::new()),
             last_dashboard_emit: RwLock::new(None),
             last_status_log: RwLock::new(None),
@@ -1274,10 +1271,9 @@ impl CryptoArbBase {
                 } else {
                     -(pos.entry_price * pos.size) - (pos.estimated_fee * pos.size)
                 };
-                self.record_trade_pnl(&pos.mode, pnl).await;
+                self.record_trade_pnl(pnl).await;
                 info!(
                     market = %market_id,
-                    mode = %pos.mode,
                     won,
                     pnl = %pnl,
                     settlement_price = ?settlement_price,
@@ -1450,7 +1446,7 @@ impl CryptoArbBase {
         let reservations = self.market_reservations.read().await;
 
         let total_positions: usize = positions.values().map(|v| v.len()).sum();
-        let reserved_slots: usize = reservations.values().map(|(_, slots)| slots).sum();
+        let reserved_slots: usize = reservations.values().sum();
         let total = total_positions + pending.len() + limits.len() + reserved_slots;
 
         total < self.config.max_positions
@@ -1509,17 +1505,9 @@ impl CryptoArbBase {
     /// Atomically check exposure + position limits and reserve a market for trading.
     ///
     /// Returns `true` if the reservation succeeded (no existing exposure,
-    /// position limit not exceeded). The reservation prevents other strategy
-    /// tasks from entering the same market concurrently.
-    ///
-    /// `slot_count` is the number of position slots this trade will use
-    /// (1 for TailEnd, 2 for TwoSided).
-    pub async fn try_reserve_market(
-        &self,
-        market_id: &MarketId,
-        mode: ArbitrageMode,
-        slot_count: usize,
-    ) -> bool {
+    /// position limit not exceeded). The reservation prevents concurrent
+    /// entry into the same market.
+    pub async fn try_reserve_market(&self, market_id: &MarketId, slot_count: usize) -> bool {
         // Acquire all locks in a consistent order to prevent deadlocks
         let positions = self.positions.read().await;
         let pending = self.pending_orders.read().await;
@@ -1537,13 +1525,13 @@ impl CryptoArbBase {
 
         // Check position limit (reservations track slot counts)
         let total_positions: usize = positions.values().map(|v| v.len()).sum();
-        let reserved_slots: usize = reservations.values().map(|(_, slots)| slots).sum();
+        let reserved_slots: usize = reservations.values().sum();
         let total = total_positions + pending.len() + limits.len() + reserved_slots;
         if total + slot_count > self.config.max_positions {
             return false;
         }
 
-        reservations.insert(market_id.clone(), (mode, slot_count));
+        reservations.insert(market_id.clone(), slot_count);
         true
     }
 
@@ -1837,28 +1825,20 @@ impl CryptoArbBase {
     // Performance tracking
     // -------------------------------------------------------------------------
 
-    /// Check if a mode is auto-disabled due to poor performance.
-    pub async fn is_mode_disabled(&self, mode: &ArbitrageMode) -> bool {
+    /// Check if the strategy is auto-disabled due to poor performance.
+    pub async fn is_auto_disabled(&self) -> bool {
         if !self.config.performance.auto_disable {
             return false;
         }
-        let stats = self.mode_stats.read().await;
-        if let Some(s) = stats.get(mode) {
-            s.total_trades() >= self.config.performance.min_trades
-                && s.win_rate() < self.config.performance.min_win_rate
-        } else {
-            false
-        }
+        let s = self.stats.read().await;
+        s.total_trades() >= self.config.performance.min_trades
+            && s.win_rate() < self.config.performance.min_win_rate
     }
 
-    /// Record a trade P&L outcome for the given mode.
-    pub async fn record_trade_pnl(&self, mode: &ArbitrageMode, pnl: Decimal) {
-        let window_size = self.config.performance.window_size;
-        let mut stats = self.mode_stats.write().await;
-        stats
-            .entry(mode.clone())
-            .or_insert_with(|| ModeStats::new(window_size))
-            .record(pnl);
+    /// Record a trade P&L outcome.
+    pub async fn record_trade_pnl(&self, pnl: Decimal) {
+        let mut s = self.stats.write().await;
+        s.record(pnl);
     }
 
     // -------------------------------------------------------------------------
@@ -2047,7 +2027,6 @@ impl CryptoArbBase {
                 warn!(
                     order_id = %order_id,
                     market = %lo.market_id,
-                    mode = %lo.mode,
                     reason = %reason,
                     "Order permanently gone — removed from tracking"
                 );
@@ -2057,7 +2036,6 @@ impl CryptoArbBase {
                     info!(
                         order_id = %order_id,
                         market = %lo.market_id,
-                        mode = %lo.mode,
                         "Detected matched fill from cancel failure — creating position"
                     );
                     let now = self.event_time().await;
@@ -2090,7 +2068,6 @@ impl CryptoArbBase {
                             "order_id": order_id,
                             "market_id": lo.market_id,
                             "token_id": lo.token_id,
-                            "mode": lo.mode.to_string(),
                         }),
                     });
                 }
@@ -2100,7 +2077,6 @@ impl CryptoArbBase {
                 warn!(
                     order_id = %order_id,
                     market = %lo.market_id,
-                    mode = %lo.mode,
                     reason = %reason,
                     "Cancel failed (transient), will retry"
                 );
@@ -2175,7 +2151,6 @@ impl CryptoArbBase {
                 token = %lo.token_id,
                 price = %lo.price,
                 size = %lo.size,
-                mode = %lo.mode,
                 miss_count = lo.reconcile_miss_count,
                 "Reconciled fill: order confirmed missing from CLOB after {} snapshots",
                 lo.reconcile_miss_count
@@ -2219,7 +2194,6 @@ impl CryptoArbBase {
                     "price": lo.price.to_string(),
                     "size": lo.size.to_string(),
                     "side": format!("{:?}", lo.side),
-                    "mode": lo.mode.to_string(),
                 }),
             });
         }

@@ -19,8 +19,7 @@ use polyrust_core::prelude::*;
 use crate::crypto_arb::base::{CryptoArbBase, GtcStopLossOrder, taker_fee};
 use crate::crypto_arb::dashboard::try_emit_dashboard_updates;
 use crate::crypto_arb::types::{
-    ArbitrageMode, ArbitrageOpportunity, ArbitragePosition, OpenLimitOrder, PendingOrder,
-    PendingStopLoss,
+    ArbitrageOpportunity, ArbitragePosition, OpenLimitOrder, PendingOrder, PendingStopLoss,
 };
 
 /// TailEnd strategy: trades near expiration with high market prices.
@@ -93,8 +92,8 @@ impl TailEndStrategy {
             return None;
         }
 
-        // Check if mode is disabled
-        if self.base.is_mode_disabled(&ArbitrageMode::TailEnd).await {
+        // Check if auto-disabled by performance tracker
+        if self.base.is_auto_disabled().await {
             debug!(
                 market = %market_id,
                 "TailEnd skip: mode auto-disabled by performance tracker"
@@ -266,7 +265,6 @@ impl TailEndStrategy {
         let confidence = Decimal::ONE * quality_factor;
 
         Some(ArbitrageOpportunity {
-            mode: ArbitrageMode::TailEnd,
             market_id: market_id.clone(),
             outcome_to_buy: predicted,
             token_id: token_id.clone(),
@@ -348,12 +346,7 @@ impl TailEndStrategy {
         let pending = {
             let mut orders = self.base.pending_orders.write().await;
             match orders.remove(&result.token_id) {
-                Some(p) if p.mode == ArbitrageMode::TailEnd => p,
-                Some(p) => {
-                    // Not our mode, put it back
-                    orders.insert(result.token_id.clone(), p);
-                    return vec![];
-                }
+                Some(p) => p,
                 None => return vec![],
             }
         };
@@ -390,7 +383,6 @@ impl TailEndStrategy {
                         reference_price: pending.reference_price,
                         coin: pending.coin,
                         placed_at: self.base.event_time().await,
-                        mode: pending.mode,
                         kelly_fraction: pending.kelly_fraction,
                         estimated_fee: pending.estimated_fee,
                         tick_size: pending.tick_size,
@@ -417,7 +409,6 @@ impl TailEndStrategy {
             entry_time: now,
             kelly_fraction: pending.kelly_fraction,
             peak_bid: pending.price,
-            mode: pending.mode.clone(),
             estimated_fee: pending.estimated_fee,
             entry_market_price: pending.price,
             tick_size: pending.tick_size,
@@ -429,7 +420,6 @@ impl TailEndStrategy {
             side = ?position.side,
             price = %position.entry_price,
             size = %position.size,
-            mode = %pending.mode,
             "TailEnd FOK position confirmed"
         );
 
@@ -534,7 +524,7 @@ impl TailEndStrategy {
             // Atomically check exposure + position limits and reserve the market
             if !self
                 .base
-                .try_reserve_market(&market_id, ArbitrageMode::TailEnd, 1)
+                .try_reserve_market(&market_id, 1)
                 .await
             {
                 debug!(
@@ -652,7 +642,6 @@ impl TailEndStrategy {
             order = order.with_post_only(self.base.config.tailend.post_only);
 
             info!(
-                mode = ?opp.mode,
                 market = %market_id,
                 confidence = %opp.confidence,
                 ask_price = %opp.buy_price,
@@ -679,7 +668,6 @@ impl TailEndStrategy {
                         reference_price: market_info.reference_price,
                         coin: market_info.coin.clone(),
                         order_type: OrderType::Gtc,
-                        mode: ArbitrageMode::TailEnd,
                         kelly_fraction: None,
                         estimated_fee: opp.estimated_fee,
                         tick_size,
@@ -750,7 +738,6 @@ impl TailEndStrategy {
             positions
                 .iter()
                 .flat_map(|(mid, plist)| plist.iter().map(|p| (mid.clone(), p.clone())))
-                .filter(|(_, p)| p.mode == ArbitrageMode::TailEnd)
                 .collect()
         };
 
@@ -897,31 +884,26 @@ impl TailEndStrategy {
                     .reduce_or_remove_position_by_token(&sl_order.token_id, size)
                     .await
                 {
-                    if pos.mode == ArbitrageMode::TailEnd {
-                        // GTC fills are maker orders → 0% fee on exit
-                        let pnl = (price - pos.entry_price) * size - (pos.estimated_fee * size);
-                        self.base.record_trade_pnl(&pos.mode, pnl).await;
-                        if !fully_closed {
-                            warn!(
-                                token_id = %sl_order.token_id,
-                                order_id = %order_id,
-                                fill_size = %size,
-                                remaining = %(pos.size - size),
-                                "GTC stop-loss partial fill: residual position kept"
-                            );
-                        }
-                        info!(
+                    // GTC fills are maker orders → 0% fee on exit
+                    let pnl = (price - pos.entry_price) * size - (pos.estimated_fee * size);
+                    self.base.record_trade_pnl(pnl).await;
+                    if !fully_closed {
+                        warn!(
                             token_id = %sl_order.token_id,
                             order_id = %order_id,
-                            mode = %pos.mode,
-                            pnl = %pnl,
                             fill_size = %size,
-                            fully_closed,
-                            "TailEnd GTC stop-loss sell filled (maker, 0% fee)"
+                            remaining = %(pos.size - size),
+                            "GTC stop-loss partial fill: residual position kept"
                         );
-                    } else {
-                        self.base.record_position(pos).await;
                     }
+                    info!(
+                        token_id = %sl_order.token_id,
+                        order_id = %order_id,
+                        pnl = %pnl,
+                        fill_size = %size,
+                        fully_closed,
+                        "GTC stop-loss sell filled (maker, 0% fee)"
+                    );
                 } else {
                     warn!(
                         token_id = %sl_order.token_id,
@@ -944,53 +926,47 @@ impl TailEndStrategy {
                     .reduce_or_remove_position_by_token(token_id, size)
                     .await
                 {
-                    if pos.mode == ArbitrageMode::TailEnd {
-                        let exit_fee = taker_fee(exit_price, self.base.config.fee.taker_fee_rate);
-                        let pnl = (exit_price - pos.entry_price) * size
-                            - (pos.estimated_fee * size)
-                            - (exit_fee * size);
-                        self.base.record_trade_pnl(&pos.mode, pnl).await;
-                        if !fully_closed {
-                            let remaining = pos.size - size;
-                            // Check if residual is below minimum order size (unsellable dust)
-                            let is_dust = {
-                                let markets = self.base.active_markets.read().await;
-                                markets
-                                    .get(&pos.market_id)
-                                    .map(|m| remaining < m.market.min_order_size)
-                                    .unwrap_or(true)
-                            };
-                            if is_dust {
-                                // Remove dust — too small to sell, will resolve at expiry
-                                self.base
-                                    .reduce_or_remove_position_by_token(token_id, remaining)
-                                    .await;
-                                warn!(
-                                    token_id = %token_id,
-                                    dust_size = %remaining,
-                                    "Removed unsellable dust after FOK partial fill — will resolve at expiry"
-                                );
-                            } else {
-                                warn!(
-                                    token_id = %token_id,
-                                    fill_size = %size,
-                                    remaining = %remaining,
-                                    "FOK stop-loss partial fill: residual position kept"
-                                );
-                            }
+                    let exit_fee = taker_fee(exit_price, self.base.config.fee.taker_fee_rate);
+                    let pnl = (exit_price - pos.entry_price) * size
+                        - (pos.estimated_fee * size)
+                        - (exit_fee * size);
+                    self.base.record_trade_pnl(pnl).await;
+                    if !fully_closed {
+                        let remaining = pos.size - size;
+                        // Check if residual is below minimum order size (unsellable dust)
+                        let is_dust = {
+                            let markets = self.base.active_markets.read().await;
+                            markets
+                                .get(&pos.market_id)
+                                .map(|m| remaining < m.market.min_order_size)
+                                .unwrap_or(true)
+                        };
+                        if is_dust {
+                            // Remove dust — too small to sell, will resolve at expiry
+                            self.base
+                                .reduce_or_remove_position_by_token(token_id, remaining)
+                                .await;
+                            warn!(
+                                token_id = %token_id,
+                                dust_size = %remaining,
+                                "Removed unsellable dust after FOK partial fill — will resolve at expiry"
+                            );
+                        } else {
+                            warn!(
+                                token_id = %token_id,
+                                fill_size = %size,
+                                remaining = %remaining,
+                                "FOK stop-loss partial fill: residual position kept"
+                            );
                         }
-                        info!(
-                            token_id = %token_id,
-                            mode = %pos.mode,
-                            pnl = %pnl,
-                            fill_size = %size,
-                            fully_closed,
-                            "TailEnd stop-loss sell filled"
-                        );
-                    } else {
-                        // Not our mode, put position back
-                        self.base.record_position(pos).await;
                     }
+                    info!(
+                        token_id = %token_id,
+                        pnl = %pnl,
+                        fill_size = %size,
+                        fully_closed,
+                        "Stop-loss sell filled"
+                    );
                 } else {
                     warn!(
                         token_id = %token_id,
@@ -1004,12 +980,7 @@ impl TailEndStrategy {
         let lo = {
             let mut limits = self.base.open_limit_orders.write().await;
             match limits.remove(order_id) {
-                Some(lo) if lo.mode == ArbitrageMode::TailEnd => lo,
-                Some(lo) => {
-                    // Not our mode, put it back
-                    limits.insert(order_id.to_string(), lo);
-                    return vec![];
-                }
+                Some(lo) => lo,
                 None => return vec![],
             }
         };
@@ -1110,9 +1081,7 @@ impl Strategy for TailEndStrategy {
                 remaining_size,
             }) => {
                 let mut limits = self.base.open_limit_orders.write().await;
-                if let Some(lo) = limits.get_mut(order_id)
-                    && lo.mode == ArbitrageMode::TailEnd
-                {
+                if let Some(lo) = limits.get_mut(order_id) {
                     lo.size = *remaining_size;
                     info!(
                         order_id = %order_id,
@@ -1130,9 +1099,7 @@ impl Strategy for TailEndStrategy {
                 if let Some(token_id) = token_id {
                     // Clear pending buy order if it's ours and record cooldown
                     let mut pending = self.base.pending_orders.write().await;
-                    if let Some(p) = pending.get(token_id)
-                        && p.mode == ArbitrageMode::TailEnd
-                    {
+                    if let Some(p) = pending.get(token_id) {
                         let market_id = p.market_id.clone();
                         pending.remove(token_id);
                         drop(pending);
@@ -1200,13 +1167,11 @@ impl Strategy for TailEndStrategy {
                 }
 
                 let mut limits = self.base.open_limit_orders.write().await;
-                if let Some(lo) = limits.remove(order_id)
-                    && lo.mode == ArbitrageMode::TailEnd
-                {
+                if let Some(lo) = limits.remove(order_id) {
                     info!(
                         order_id = %order_id,
                         market = %lo.market_id,
-                        "TailEnd GTC order cancelled"
+                        "GTC order cancelled"
                     );
                 }
                 vec![]
@@ -1281,7 +1246,7 @@ mod tests {
     async fn make_tailend_strategy(time_remaining: i64) -> (TailEndStrategy, StrategyContext) {
         let mut config = ArbitrageConfig::default();
         config.use_chainlink = false;
-        config.tailend.enabled = true;
+        config.enabled = true;
         config.tailend.min_sustained_secs = 5; // Small window to keep test simple
         config.tailend.max_recent_volatility = dec!(1.0); // Disable volatility filter
         let base = Arc::new(CryptoArbBase::new(config, vec![]));
@@ -1347,7 +1312,6 @@ mod tests {
             .await;
         assert!(opp.is_some());
         let opp = opp.unwrap();
-        assert_eq!(opp.mode, ArbitrageMode::TailEnd);
         assert_eq!(opp.token_id, "token_up");
         assert_eq!(opp.buy_price, dec!(0.94));
     }
@@ -1434,7 +1398,7 @@ mod tests {
     async fn tailend_respects_max_spread() {
         let mut config = ArbitrageConfig::default();
         config.use_chainlink = false;
-        config.tailend.enabled = true;
+        config.enabled = true;
         config.tailend.min_sustained_secs = 0;
         config.tailend.max_recent_volatility = dec!(1.0);
         config.tailend.max_spread_bps = dec!(50); // 50 bps = 0.5%
@@ -1547,7 +1511,6 @@ mod tests {
                     reference_price: dec!(50000),
                     coin: "BTC".to_string(),
                     placed_at: Utc::now(),
-                    mode: ArbitrageMode::TailEnd,
                     kelly_fraction: None,
                     estimated_fee: dec!(0.001),
                     tick_size: dec!(0.01),

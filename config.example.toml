@@ -72,14 +72,13 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CRYPTO ARBITRAGE STRATEGY
 # ═══════════════════════════════════════════════════════════════════════════════
-# Exploits mispricing in 15-minute Up/Down crypto markets with two modes:
-#   1. Tail-End    — <2 min remaining, market >= 90% (highest confidence)
-#   2. Two-Sided   — both outcomes < $1 combined (guaranteed profit)
+# Exploits mispricing in 15-minute Up/Down crypto markets.
+# High-confidence trades near expiration (<2 min remaining, market >= 90%).
 #
-# IMPORTANT: All trading modes are DISABLED by default. Enable each mode
-# explicitly with `enabled = true` in its config section.
+# IMPORTANT: Strategy is DISABLED by default. Set `enabled = true` to activate.
 
 # [arbitrage]
+# enabled = true                       # Enable the strategy
 # coins = ["BTC", "ETH", "SOL", "XRP"]  # Coins to track
 # max_positions = 5                      # Maximum concurrent positions
 # min_profit_margin = 0.03               # 3% net profit margin (env: POLY_MIN_PROFIT_MARGIN, CLI: --min-profit)
@@ -93,7 +92,6 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # High-confidence trades near market expiration
 
 # [arbitrage.tailend]
-# enabled = true                 # Enable TailEnd mode
 # time_threshold_secs = 120      # Max time remaining to enter (default 120s)
 # ask_threshold = 0.90           # Minimum ask price to enter (default 0.90)
 # min_sustained_ticks = 2        # Minimum price ticks confirming direction (default 2)
@@ -102,15 +100,6 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # max_source_stale_secs = 10      # Max age per source in seconds (default 10)
 # min_sources = 2                 # Minimum fresh sources required (default 2)
 # max_dispersion_bps = 50         # Max allowed source disagreement in bps (default 50)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TwoSided Mode
-# ─────────────────────────────────────────────────────────────────────────────
-# Risk-free arbitrage when both outcomes are mispriced
-
-# [arbitrage.twosided]
-# enabled = true                 # Enable TwoSided mode
-# combined_threshold = 0.98      # Max combined ask price (default 0.98)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fee Model
@@ -131,13 +120,11 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # history_size = 50       # Maximum spike events to retain
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Hybrid Order Mode
+# Order Settings
 # ─────────────────────────────────────────────────────────────────────────────
 # GTC maker orders (0% fee) for most trades, FOK taker only for tail-end urgency
 
 # [arbitrage.order]
-# hybrid_mode = true      # Enable GTC maker + FOK taker strategy
-# limit_offset = 0.01     # 1¢ below best ask for GTC limit orders
 # max_age_secs = 30       # Cancel stale GTC orders after this duration
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -173,7 +160,7 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # ─────────────────────────────────────────────────────────────────────────────
 # Performance Tracking & Auto-Disable
 # ─────────────────────────────────────────────────────────────────────────────
-# Track win rate / P&L per mode; optionally auto-disable underperformers
+# Track win rate / P&L; optionally auto-disable when underperforming
 
 # [arbitrage.performance]
 # min_trades = 20         # Minimum trades before auto-disable can trigger
@@ -228,7 +215,7 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 #   POLY_BACKTEST_FETCH_CONCURRENCY — number of markets to fetch in parallel
 
 # [backtest]
-# strategy_name = "crypto-arb"            # Strategy to backtest (must be registered)
+# strategy_name = "crypto-arb-tailend"    # Strategy to backtest (must be registered)
 # market_ids = []                         # Markets to include (empty = auto-discover via Gamma API)
 # start_date = "2025-01-01T00:00:00Z"     # Backtest window start (RFC3339 format)
 # end_date = "2025-01-31T23:59:59Z"       # Backtest window end (RFC3339 format)

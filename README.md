@@ -299,11 +299,8 @@ Environment variable overrides: `POLY_BACKTEST_START`, `POLY_BACKTEST_END`, `POL
 
 ### Supported Strategies
 
-Currently supported crypto arbitrage strategies:
+Currently supported crypto arbitrage strategy:
 - `crypto-arb-tailend` - High-confidence tail-end trades (<2 min remaining)
-- `crypto-arb-twosided` - Risk-free arbitrage (both outcomes < $1)
-- `crypto-arb-confirmed` - Directional trades with confidence model
-- `crypto-arb-crosscorr` - Cross-market correlation signals
 
 Any strategy implementing the `Strategy` trait works without modification. See `examples/run_backtest.rs` for custom strategy usage.
 

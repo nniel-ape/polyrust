@@ -131,30 +131,6 @@ impl MarketWithReference {
     }
 }
 
-/// Arbitrage trading modes, ordered by priority.
-///
-/// Each mode represents a different market condition or signal type:
-/// - **TailEnd**: Highest confidence, market near certainty + time urgency
-/// - **TwoSided**: Risk-free arbitrage when both outcomes mispriced
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ArbitrageMode {
-    /// Tail-end mode: < 2 min remaining, market price >= 90%.
-    /// Uses GTC orders with aggressive pricing above ask for immediate fills.
-    TailEnd,
-    /// Two-sided mode: both outcomes priced below combined $0.98.
-    /// Guaranteed profit regardless of outcome. Uses batch GTC orders.
-    TwoSided,
-}
-
-impl std::fmt::Display for ArbitrageMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ArbitrageMode::TailEnd => write!(f, "TailEnd"),
-            ArbitrageMode::TwoSided => write!(f, "TwoSided"),
-        }
-    }
-}
-
 /// Metadata for a pending stop-loss sell order.
 ///
 /// Carries the exit price and order type so the fill handler can apply
@@ -174,8 +150,6 @@ pub struct PendingStopLoss {
 /// for Polymarket's dynamic taker fees (0% for maker/GTC orders).
 #[derive(Debug, Clone)]
 pub struct ArbitrageOpportunity {
-    /// Trading mode that generated this opportunity.
-    pub mode: ArbitrageMode,
     /// Market to trade.
     pub market_id: MarketId,
     /// Outcome to buy (Up or Down).
@@ -224,8 +198,6 @@ pub struct ArbitragePosition {
     pub kelly_fraction: Option<Decimal>,
     /// Highest bid price observed since position entry (for trailing stop-loss).
     pub peak_bid: Decimal,
-    /// Trading mode that opened this position.
-    pub mode: ArbitrageMode,
     /// Estimated fee **per share** at entry (for P&L calculation).
     /// Total fee for position = `estimated_fee * size`.
     pub estimated_fee: Decimal,
@@ -262,7 +234,6 @@ impl ArbitragePosition {
             entry_time,
             kelly_fraction: lo.kelly_fraction,
             peak_bid: fill_price,
-            mode: lo.mode.clone(),
             estimated_fee: lo.estimated_fee,
             entry_market_price: fill_price,
             tick_size: lo.tick_size,
@@ -405,7 +376,6 @@ pub struct PendingOrder {
     pub reference_price: Decimal,
     pub coin: String,
     pub order_type: OrderType,
-    pub mode: ArbitrageMode,
     pub kelly_fraction: Option<Decimal>,
     /// Estimated fee **per share** at entry. Total fee = `estimated_fee * size`.
     pub estimated_fee: Decimal,
@@ -441,8 +411,6 @@ pub struct OpenLimitOrder {
     /// Uses `DateTime<Utc>` instead of `tokio::time::Instant` so that
     /// backtests with simulated time can correctly detect stale orders.
     pub placed_at: DateTime<Utc>,
-    /// Trading mode that generated this order.
-    pub mode: ArbitrageMode,
     /// Kelly fraction used for sizing (None if fixed).
     pub kelly_fraction: Option<Decimal>,
     /// Estimated fee **per share** at entry (0 for GTC maker orders).

@@ -1,8 +1,4 @@
-//! Configuration structs for the crypto arbitrage strategies.
-//!
-//! Each trading mode (TailEnd, TwoSided) has its own configuration struct with
-//! an `enabled` flag. All modes are disabled by default and must be explicitly
-//! enabled in config.
+//! Configuration structs for the crypto arbitrage strategy.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -42,8 +38,6 @@ pub enum ReferenceQualityLevel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TailEndConfig {
-    /// Enable TailEnd trading mode. Default: false.
-    pub enabled: bool,
     /// Maximum seconds remaining to enter (default 120).
     pub time_threshold_secs: u64,
     /// Minimum ask price to enter (default 0.90).
@@ -136,7 +130,6 @@ fn default_time_thresholds() -> Vec<(u64, Decimal)> {
 impl Default for TailEndConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             time_threshold_secs: 120,
             ask_threshold: Decimal::new(90, 2), // 0.90
             min_reference_quality: ReferenceQualityLevel::Historical, // Default: skip Current quality
@@ -157,29 +150,6 @@ impl Default for TailEndConfig {
             feed_stale_secs: 30,
             min_sell_delay_secs: 15,
             min_strike_distance_pct: Decimal::new(12, 4), // 0.0012 = 0.12%
-        }
-    }
-}
-
-/// TwoSided mode configuration.
-///
-/// Entry conditions:
-/// - Combined ask prices < `combined_threshold` (default 0.98)
-/// - Risk-free arbitrage when both outcomes are mispriced
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct TwoSidedConfig {
-    /// Enable TwoSided trading mode. Default: false.
-    pub enabled: bool,
-    /// Maximum combined ask price for both outcomes (default 0.98).
-    pub combined_threshold: Decimal,
-}
-
-impl Default for TwoSidedConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            combined_threshold: Decimal::new(98, 2), // 0.98
         }
     }
 }
@@ -226,14 +196,10 @@ impl Default for SpikeConfig {
     }
 }
 
-/// Hybrid order mode configuration.
+/// Order execution configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OrderConfig {
-    /// Use GTC maker orders for TwoSided mode.
-    pub hybrid_mode: bool,
-    /// Price offset below best ask for GTC limit orders (TwoSided backward compat).
-    pub limit_offset: Decimal,
     /// Cancel stale GTC orders after this many seconds.
     pub max_age_secs: u64,
     /// Number of tick steps above the best ask for TailEnd GTC orders.
@@ -244,8 +210,6 @@ pub struct OrderConfig {
 impl Default for OrderConfig {
     fn default() -> Self {
         Self {
-            hybrid_mode: true,
-            limit_offset: Decimal::new(1, 2), // 0.01
             max_age_secs: 30,
             tick_steps_above_ask: 1,
         }
@@ -442,6 +406,8 @@ impl Default for RoundingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ArbitrageConfig {
+    /// Enable the arbitrage strategy. Default: false.
+    pub enabled: bool,
     /// Coins to track (e.g. ["BTC", "ETH", "SOL", "XRP"])
     pub coins: Vec<String>,
     /// Maximum concurrent positions
@@ -456,14 +422,11 @@ pub struct ArbitrageConfig {
     pub use_chainlink: bool,
 
     // -------------------------------------------------------------------------
-    // Per-mode configurations (each mode disabled by default)
+    // TailEnd configuration
     // -------------------------------------------------------------------------
     /// TailEnd mode configuration.
     #[serde(default)]
     pub tailend: TailEndConfig,
-    /// TwoSided mode configuration.
-    #[serde(default)]
-    pub twosided: TwoSidedConfig,
 
     // -------------------------------------------------------------------------
     // Shared configurations
@@ -494,15 +457,14 @@ pub struct ArbitrageConfig {
 impl Default for ArbitrageConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
             max_positions: 5,
             min_profit_margin: Decimal::new(3, 2),  // 0.03
             late_window_margin: Decimal::new(2, 2), // 0.02
             scan_interval_secs: 30,
             use_chainlink: true,
-            // Per-mode configs (all disabled by default)
             tailend: TailEndConfig::default(),
-            twosided: TwoSidedConfig::default(),
             // Shared configs
             fee: FeeConfig::default(),
             spike: SpikeConfig::default(),
@@ -516,9 +478,9 @@ impl Default for ArbitrageConfig {
 }
 
 impl ArbitrageConfig {
-    /// Returns true if at least one trading mode is enabled.
-    pub fn any_mode_enabled(&self) -> bool {
-        self.tailend.enabled || self.twosided.enabled
+    /// Returns true if the strategy is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Apply environment variable overrides to the configuration.

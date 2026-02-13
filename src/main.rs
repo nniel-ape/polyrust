@@ -13,8 +13,7 @@ use polyrust_market::{
 };
 use polyrust_store::Store;
 use polyrust_strategies::{
-    ArbitrageConfig, CryptoArbBase, CryptoArbDashboard, ReferenceQualityLevel, TailEndDashboard,
-    TailEndStrategy, TwoSidedDashboard, TwoSidedStrategy,
+    ArbitrageConfig, CryptoArbBase, CryptoArbDashboard, ReferenceQualityLevel, TailEndStrategy,
 };
 use serde::Deserialize;
 
@@ -179,8 +178,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Create shared base for all crypto arbitrage strategies
     info!(
-        tailend_enabled = arb_config.tailend.enabled,
-        twosided_enabled = arb_config.twosided.enabled,
+        enabled = arb_config.enabled,
         "Loaded arbitrage config"
     );
     let base = Arc::new(CryptoArbBase::new(
@@ -195,38 +193,19 @@ async fn main() -> anyhow::Result<()> {
         .execution(execution_backend)
         .feed_commands(feed_cmd_tx);
 
-    // Always register the overview dashboard (shows what's enabled/disabled)
-    let overview_dashboard = CryptoArbDashboard::new(Arc::clone(&base));
-    builder = builder.strategy(DashboardStrategyWrapper::new(
-        "crypto-arb-overview",
-        Box::new(overview_dashboard),
-    ));
-
-    // Conditionally register trading strategies based on config
-    if arb_config.tailend.enabled {
-        info!("TailEnd mode enabled");
+    // Conditionally register strategy based on config
+    if arb_config.enabled {
+        info!("Arbitrage strategy enabled");
         builder = builder.strategy(TailEndStrategy::new(Arc::clone(&base)));
+    } else {
+        info!("Arbitrage strategy disabled — running in dashboard-only mode");
     }
 
-    if arb_config.twosided.enabled {
-        info!("TwoSided mode enabled");
-        builder = builder.strategy(TwoSidedStrategy::new(Arc::clone(&base)));
-    }
-
-    // Always register per-mode dashboards so overview links don't 404.
-    // Each dashboard already renders its enabled/disabled status.
+    // Always register dashboard
     builder = builder.strategy(DashboardStrategyWrapper::new(
-        "crypto-arb-tailend-dashboard",
-        Box::new(TailEndDashboard::new(Arc::clone(&base))),
+        "crypto-arb-dashboard",
+        Box::new(CryptoArbDashboard::new(Arc::clone(&base))),
     ));
-    builder = builder.strategy(DashboardStrategyWrapper::new(
-        "crypto-arb-twosided-dashboard",
-        Box::new(TwoSidedDashboard::new(Arc::clone(&base))),
-    ));
-
-    if !arb_config.any_mode_enabled() {
-        info!("No trading modes enabled — running in dashboard-only mode");
-    }
 
     let mut engine = builder.build().await?;
 
@@ -730,10 +709,6 @@ async fn run_backtest() -> anyhow::Result<()> {
         "crypto-arb-tailend" => {
             let base = Arc::new(CryptoArbBase::new(arb_config.clone(), vec![]));
             Box::new(TailEndStrategy::new(base))
-        }
-        "crypto-arb-twosided" => {
-            let base = Arc::new(CryptoArbBase::new(arb_config.clone(), vec![]));
-            Box::new(TwoSidedStrategy::new(base))
         }
         other => {
             return Err(anyhow::anyhow!("Unknown strategy name: {}", other));

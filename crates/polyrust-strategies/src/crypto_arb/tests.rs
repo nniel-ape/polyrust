@@ -19,8 +19,8 @@ use super::base::{
 };
 use super::config::{ArbitrageConfig, SizingConfig};
 use super::types::{
-    ArbitrageMode, ArbitragePosition, BoundarySnapshot, MarketWithReference, ModeStats,
-    OpenLimitOrder, PendingStopLoss, ReferenceQuality,
+    ArbitragePosition, BoundarySnapshot, MarketWithReference, ModeStats, OpenLimitOrder,
+    PendingStopLoss, ReferenceQuality,
 };
 
 // ---------------------------------------------------------------------------
@@ -189,16 +189,6 @@ fn mode_stats_avg_pnl() {
 }
 
 // ---------------------------------------------------------------------------
-// ArbitrageMode tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn arbitrage_mode_display() {
-    assert_eq!(ArbitrageMode::TailEnd.to_string(), "TailEnd");
-    assert_eq!(ArbitrageMode::TwoSided.to_string(), "TwoSided");
-}
-
-// ---------------------------------------------------------------------------
 // Fee calculation tests
 // ---------------------------------------------------------------------------
 
@@ -317,8 +307,6 @@ fn config_default_sub_configs() {
     assert_eq!(config.spike.history_size, 50);
 
     // Order defaults
-    assert!(config.order.hybrid_mode);
-    assert_eq!(config.order.limit_offset, dec!(0.01));
     assert_eq!(config.order.max_age_secs, 30);
 
     // Sizing defaults
@@ -358,7 +346,6 @@ fn config_deserialize_missing_sub_configs() {
     assert!(!config.use_chainlink);
     // Sub-configs should have their defaults
     assert_eq!(config.fee.taker_fee_rate, dec!(0.0315));
-    assert!(config.order.hybrid_mode);
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +505,7 @@ async fn base_can_open_position() {
                 entry_time: Utc::now(),
                 kelly_fraction: None,
                 peak_bid: dec!(0.60),
-                mode: ArbitrageMode::TailEnd,
+
                 estimated_fee: Decimal::ZERO,
                 entry_market_price: dec!(0.60),
                 tick_size: dec!(0.01),
@@ -545,14 +532,14 @@ async fn reservation_blocks_concurrent_access() {
 
     // First reservation succeeds
     assert!(
-        base.try_reserve_market(&"market1".to_string(), ArbitrageMode::TailEnd, 1,)
+        base.try_reserve_market(&"market1".to_string(), 1)
             .await
     );
 
     // Second reservation for same market fails
     assert!(
         !base
-            .try_reserve_market(&"market1".to_string(), ArbitrageMode::TwoSided, 2,)
+            .try_reserve_market(&"market1".to_string(), 2)
             .await
     );
 }
@@ -566,7 +553,7 @@ async fn reservation_counted_in_has_market_exposure() {
 
     // Reserve the market
     assert!(
-        base.try_reserve_market(&"market1".to_string(), ArbitrageMode::TailEnd, 1)
+        base.try_reserve_market(&"market1".to_string(), 1)
             .await
     );
 
@@ -583,9 +570,9 @@ async fn reservation_counted_in_can_open_position() {
 
     assert!(base.can_open_position().await);
 
-    // Reserve 2 slots (TwoSided)
+    // Reserve 2 slots
     assert!(
-        base.try_reserve_market(&"market1".to_string(), ArbitrageMode::TwoSided, 2)
+        base.try_reserve_market(&"market1".to_string(), 2)
             .await
     );
 
@@ -593,7 +580,7 @@ async fn reservation_counted_in_can_open_position() {
     // Actually the reservation uses 1 map entry. Let's reserve another.
     assert!(
         !base
-            .try_reserve_market(&"market2".to_string(), ArbitrageMode::TailEnd, 1)
+            .try_reserve_market(&"market2".to_string(), 1)
             .await
     );
 }
@@ -604,7 +591,7 @@ async fn release_reservation_makes_market_available() {
 
     // Reserve and then release
     assert!(
-        base.try_reserve_market(&"market1".to_string(), ArbitrageMode::TailEnd, 1)
+        base.try_reserve_market(&"market1".to_string(), 1)
             .await
     );
     assert!(base.has_market_exposure(&"market1".to_string()).await);
@@ -614,7 +601,7 @@ async fn release_reservation_makes_market_available() {
     // Market is now available again
     assert!(!base.has_market_exposure(&"market1".to_string()).await);
     assert!(
-        base.try_reserve_market(&"market1".to_string(), ArbitrageMode::TwoSided, 2)
+        base.try_reserve_market(&"market1".to_string(), 2)
             .await
     );
 }
@@ -625,7 +612,7 @@ async fn consume_reservation_then_pending_preserves_exposure() {
 
     // Reserve market
     assert!(
-        base.try_reserve_market(&"market1".to_string(), ArbitrageMode::TailEnd, 1)
+        base.try_reserve_market(&"market1".to_string(), 1)
             .await
     );
 
@@ -645,7 +632,7 @@ async fn consume_reservation_then_pending_preserves_exposure() {
                 reference_price: dec!(50000),
                 coin: "BTC".to_string(),
                 order_type: OrderType::Gtc,
-                mode: ArbitrageMode::TailEnd,
+
                 kelly_fraction: None,
                 estimated_fee: Decimal::ZERO,
                 tick_size: dec!(0.01),
@@ -659,7 +646,7 @@ async fn consume_reservation_then_pending_preserves_exposure() {
 }
 
 #[tokio::test]
-async fn base_is_mode_disabled() {
+async fn base_is_auto_disabled() {
     let mut config = ArbitrageConfig::default();
     config.performance.auto_disable = true;
     config.performance.min_trades = 3;
@@ -667,18 +654,18 @@ async fn base_is_mode_disabled() {
     let base = Arc::new(CryptoArbBase::new(config, vec![]));
 
     // Initially not disabled
-    assert!(!base.is_mode_disabled(&ArbitrageMode::TailEnd).await);
+    assert!(!base.is_auto_disabled().await);
 
     // Record losing trades
-    base.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(-1.0))
+    base.record_trade_pnl(dec!(-1.0))
         .await;
-    base.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(-1.0))
+    base.record_trade_pnl(dec!(-1.0))
         .await;
-    base.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(-1.0))
+    base.record_trade_pnl(dec!(-1.0))
         .await;
 
     // Now should be disabled (0% win rate after 3 trades)
-    assert!(base.is_mode_disabled(&ArbitrageMode::TailEnd).await);
+    assert!(base.is_auto_disabled().await);
 }
 
 // ---------------------------------------------------------------------------
@@ -913,7 +900,6 @@ fn tailend_config_defaults() {
     use super::config::{ReferenceQualityLevel, TailEndConfig};
 
     let config = TailEndConfig::default();
-    assert!(!config.enabled);
     assert_eq!(config.time_threshold_secs, 120);
     assert_eq!(config.ask_threshold, dec!(0.90));
     assert_eq!(
@@ -1061,7 +1047,7 @@ fn make_position(
         entry_time: Utc::now(),
         kelly_fraction: None,
         peak_bid,
-        mode: ArbitrageMode::TailEnd,
+
         estimated_fee: Decimal::ZERO,
         entry_market_price: entry_price,
         tick_size: dec!(0.01),
@@ -2005,17 +1991,17 @@ async fn auto_disable_boundary_at_min_trades() {
 
     // Record exactly 20 trades: 8 wins (40%), 12 losses
     for _ in 0..8 {
-        base.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(1.0))
+        base.record_trade_pnl(dec!(1.0))
             .await;
     }
     for _ in 0..12 {
-        base.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(-1.0))
+        base.record_trade_pnl(dec!(-1.0))
             .await;
     }
 
     // 40% win rate = exactly at threshold → NOT disabled (need to be strictly below)
     assert!(
-        !base.is_mode_disabled(&ArbitrageMode::TailEnd).await,
+        !base.is_auto_disabled().await,
         "At exactly min_win_rate should NOT be disabled"
     );
 }
@@ -2030,16 +2016,16 @@ async fn auto_disable_below_threshold() {
 
     // Record 20 trades: 7 wins (35%), 13 losses
     for _ in 0..7 {
-        base.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(1.0))
+        base.record_trade_pnl(dec!(1.0))
             .await;
     }
     for _ in 0..13 {
-        base.record_trade_pnl(&ArbitrageMode::TailEnd, dec!(-1.0))
+        base.record_trade_pnl(dec!(-1.0))
             .await;
     }
 
     assert!(
-        base.is_mode_disabled(&ArbitrageMode::TailEnd).await,
+        base.is_auto_disabled().await,
         "35% win rate after 20 trades should trigger auto-disable"
     );
 }
@@ -2097,7 +2083,7 @@ async fn has_market_exposure_checks_all_types() {
                 reference_price: dec!(50000),
                 coin: "BTC".to_string(),
                 order_type: polyrust_core::types::OrderType::Gtc,
-                mode: ArbitrageMode::TailEnd,
+
                 kelly_fraction: None,
                 estimated_fee: Decimal::ZERO,
                 tick_size: dec!(0.01),
@@ -2174,7 +2160,7 @@ async fn can_open_position_counts_all_order_types() {
                 reference_price: dec!(50000),
                 coin: "BTC".to_string(),
                 order_type: polyrust_core::types::OrderType::Gtc,
-                mode: ArbitrageMode::TailEnd,
+
                 kelly_fraction: None,
                 estimated_fee: Decimal::ZERO,
                 tick_size: dec!(0.01),
@@ -2199,7 +2185,7 @@ async fn can_open_position_counts_all_order_types() {
                 reference_price: dec!(50000),
                 coin: "BTC".to_string(),
                 placed_at: Utc::now(),
-                mode: ArbitrageMode::TailEnd,
+
                 kelly_fraction: None,
                 estimated_fee: Decimal::ZERO,
                 tick_size: dec!(0.01),
@@ -2241,7 +2227,7 @@ async fn stale_limit_order_cancelled_after_max_age() {
                 reference_price: dec!(50000),
                 coin: "BTC".to_string(),
                 placed_at: Utc::now() - chrono::Duration::seconds(5),
-                mode: ArbitrageMode::TailEnd,
+
                 kelly_fraction: None,
                 estimated_fee: Decimal::ZERO,
                 tick_size: dec!(0.01),
@@ -2285,7 +2271,7 @@ async fn stale_order_cancel_pending_prevents_double() {
                 reference_price: dec!(50000),
                 coin: "BTC".to_string(),
                 placed_at: Utc::now() - chrono::Duration::seconds(5),
-                mode: ArbitrageMode::TailEnd,
+
                 kelly_fraction: None,
                 estimated_fee: Decimal::ZERO,
                 tick_size: dec!(0.01),
@@ -2838,7 +2824,7 @@ fn make_open_limit_order(order_id: &str, market_id: &str, token_id: &str) -> Ope
         reference_price: dec!(50000),
         coin: "BTC".to_string(),
         placed_at: Utc::now(),
-        mode: ArbitrageMode::TailEnd,
+
         kelly_fraction: None,
         estimated_fee: Decimal::ZERO,
         tick_size: dec!(0.01),
@@ -3079,7 +3065,7 @@ async fn strike_proximity_rejects_within_threshold() {
 
     let mut config = ArbitrageConfig::default();
     config.use_chainlink = false;
-    config.tailend.enabled = true;
+    config.enabled = true;
     config.tailend.min_sustained_secs = 0;
     config.tailend.min_sustained_ticks = 0;
     config.tailend.max_recent_volatility = dec!(1.0);
@@ -3134,7 +3120,7 @@ async fn strike_proximity_allows_beyond_threshold() {
 
     let mut config = ArbitrageConfig::default();
     config.use_chainlink = false;
-    config.tailend.enabled = true;
+    config.enabled = true;
     config.tailend.min_sustained_secs = 0;
     config.tailend.min_sustained_ticks = 0;
     config.tailend.max_recent_volatility = dec!(1.0);

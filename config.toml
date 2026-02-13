@@ -60,9 +60,9 @@ batch_min_count = 2           # Flush early when this many claims are ready (bef
 # ═══════════════════════════════════════════════════════════════════════════════
 # CRYPTO ARBITRAGE STRATEGY
 # ═══════════════════════════════════════════════════════════════════════════════
-# All modes are DISABLED by default. Enable each mode explicitly.
 
 [arbitrage]
+enabled = true
 coins = ["BTC", "ETH"]
 max_positions = 5
 use_chainlink = true
@@ -76,7 +76,6 @@ base_size = 5          # Base USDC position size
 # use_kelly = true        # false = fixed base_size for all trades
 
 [arbitrage.tailend]
-enabled = true
 dynamic_thresholds = [[120, "0.90"], [90, "0.92"], [60, "0.96"], [30, "0.94"]]
 max_spread_bps = "200"
 max_recent_volatility = "0.020"
@@ -84,10 +83,6 @@ fok_cooldown_secs = 15
 stale_ob_secs = 30
 use_composite_price = true
 max_source_stale_secs = 5
-
-[arbitrage.twosided]
-enabled = false
-combined_threshold = "0.98"
 
 [arbitrage.stop_loss]
 reversal_pct = 0.005
