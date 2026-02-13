@@ -22,8 +22,9 @@ use polyrust_market::ChainlinkHistoricalClient;
 
 use crate::crypto_arb::config::{ArbitrageConfig, SizingConfig};
 use crate::crypto_arb::types::{
-    ArbitragePosition, BoundarySnapshot, MarketWithReference, ModeStats, OpenLimitOrder,
-    OrderTelemetry, PendingOrder, PendingStopLoss, ReferenceQuality, SpikeEvent,
+    ArbitragePosition, BoundarySnapshot, ExitOrderMeta, MarketWithReference, ModeStats,
+    OpenLimitOrder, OrderTelemetry, PendingOrder, PendingStopLoss, PositionLifecycle,
+    ReferenceQuality, SpikeEvent,
 };
 
 /// Result of a composite fair price calculation from multiple data sources.
@@ -307,6 +308,12 @@ pub struct CryptoArbBase {
     pub stop_loss_use_gtc: RwLock<HashSet<TokenId>>,
     /// Outstanding GTC stop-loss sell orders, keyed by order_id.
     pub gtc_stop_loss_orders: RwLock<HashMap<OrderId, GtcStopLossOrder>>,
+    /// Per-position lifecycle state machines, keyed by token_id.
+    /// Tracks each position through Healthy → DeferredExit → ExitExecuting → etc.
+    pub position_lifecycle: RwLock<HashMap<TokenId, PositionLifecycle>>,
+    /// Exit/recovery orders in flight, keyed by order_id.
+    /// Used to route fill/reject events back to the correct position lifecycle.
+    pub exit_orders_by_id: RwLock<HashMap<OrderId, ExitOrderMeta>>,
     /// Coins configured for this strategy.
     coins: HashSet<String>,
     /// Last event timestamp from the strategy context (simulated or real).
@@ -355,6 +362,8 @@ impl CryptoArbBase {
             signal_veto_stats: std::sync::Mutex::new(HashMap::new()),
             stop_loss_use_gtc: RwLock::new(HashSet::new()),
             gtc_stop_loss_orders: RwLock::new(HashMap::new()),
+            position_lifecycle: RwLock::new(HashMap::new()),
+            exit_orders_by_id: RwLock::new(HashMap::new()),
             coins,
             last_event_time: RwLock::new(Utc::now()),
         }
@@ -1274,6 +1283,8 @@ impl CryptoArbBase {
                     -(pos.entry_price * pos.size) - (pos.entry_fee_per_share * pos.size)
                 };
                 self.record_trade_pnl(pnl).await;
+                // Clean up lifecycle state for expired positions
+                self.remove_lifecycle(&pos.token_id).await;
                 info!(
                     market = %market_id,
                     won,
@@ -1554,13 +1565,38 @@ impl CryptoArbBase {
     // Position management
     // -------------------------------------------------------------------------
 
-    /// Record a new position.
+    /// Record a new position and create its lifecycle state machine in Healthy state.
     pub async fn record_position(&self, pos: ArbitragePosition) {
+        let token_id = pos.token_id.clone();
         let mut positions = self.positions.write().await;
         positions
             .entry(pos.market_id.clone())
             .or_default()
             .push(pos);
+        drop(positions);
+        self.ensure_lifecycle(&token_id).await;
+    }
+
+    /// Get or create a lifecycle entry for the given token_id.
+    /// Returns a clone of the current lifecycle state.
+    /// Creates a new Healthy lifecycle if none exists (handles migration of
+    /// positions that existed before the lifecycle system was added).
+    pub async fn ensure_lifecycle(&self, token_id: &str) -> PositionLifecycle {
+        let mut lifecycles = self.position_lifecycle.write().await;
+        lifecycles
+            .entry(token_id.to_string())
+            .or_insert_with(PositionLifecycle::new)
+            .clone()
+    }
+
+    /// Remove the lifecycle entry for the given token_id.
+    /// Called when a position is fully closed or expired.
+    pub async fn remove_lifecycle(&self, token_id: &str) {
+        let mut lifecycles = self.position_lifecycle.write().await;
+        lifecycles.remove(token_id);
+        // Also clean up any exit orders referencing this token
+        let mut exit_orders = self.exit_orders_by_id.write().await;
+        exit_orders.retain(|_, meta| meta.token_id != token_id);
     }
 
     /// Remove a position by token_id across all markets, returning it.
@@ -1587,13 +1623,15 @@ impl CryptoArbBase {
             removed
         };
 
-        // Clear stop-loss state when position is removed
+        // Clear stop-loss state and lifecycle when position is removed
         if removed.is_some() {
             let mut counts = self.stop_loss_retry_counts.write().await;
             counts.remove(token_id);
             drop(counts);
             let mut gtc_set = self.stop_loss_use_gtc.write().await;
             gtc_set.remove(token_id);
+            drop(gtc_set);
+            self.remove_lifecycle(token_id).await;
         }
 
         removed
@@ -1642,13 +1680,15 @@ impl CryptoArbBase {
             result
         };
 
-        // Clear stop-loss state only on full close
+        // Clear stop-loss state and lifecycle only on full close
         if let Some((_, true)) = &result {
             let mut counts = self.stop_loss_retry_counts.write().await;
             counts.remove(token_id);
             drop(counts);
             let mut gtc_set = self.stop_loss_use_gtc.write().await;
             gtc_set.remove(token_id);
+            drop(gtc_set);
+            self.remove_lifecycle(token_id).await;
         }
 
         result

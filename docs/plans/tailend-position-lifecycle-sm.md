@@ -135,16 +135,16 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 9
 
 ### Task 9: Add lifecycle store to CryptoArbBase
-- [ ] Add `position_lifecycle: RwLock<HashMap<TokenId, PositionLifecycle>>` to `CryptoArbBase`
-- [ ] Add `exit_orders_by_id: RwLock<HashMap<OrderId, ExitOrderMeta>>` to `CryptoArbBase`
-- [ ] Initialize both as empty in `CryptoArbBase::new()`
-- [ ] Add helper: `ensure_lifecycle(&self, token_id) -> PositionLifecycle` — creates Healthy state if not exists (for existing positions during migration)
-- [ ] Add helper: `remove_lifecycle(&self, token_id)` — cleanup on position close
-- [ ] When a position is created (GTC fill, FOK fill, synthetic fill), also create its `PositionLifecycle` entry in Healthy state
-- [ ] When a position is fully removed, also remove its lifecycle entry
-- [ ] Write test: position creation creates lifecycle in Healthy state
-- [ ] Write test: position removal cleans up lifecycle
-- [ ] Run tests — must pass before task 10
+- [x] Add `position_lifecycle: RwLock<HashMap<TokenId, PositionLifecycle>>` to `CryptoArbBase`
+- [x] Add `exit_orders_by_id: RwLock<HashMap<OrderId, ExitOrderMeta>>` to `CryptoArbBase`
+- [x] Initialize both as empty in `CryptoArbBase::new()`
+- [x] Add helper: `ensure_lifecycle(&self, token_id) -> PositionLifecycle` — creates Healthy state if not exists (for existing positions during migration)
+- [x] Add helper: `remove_lifecycle(&self, token_id)` — cleanup on position close
+- [x] When a position is created (GTC fill, FOK fill, synthetic fill), also create its `PositionLifecycle` entry in Healthy state
+- [x] When a position is fully removed, also remove its lifecycle entry
+- [x] Write test: position creation creates lifecycle in Healthy state
+- [x] Write test: position removal cleans up lifecycle
+- [x] Run tests — must pass before task 10
 
 ### Task 10: Implement composite price caching for stop-loss
 - [ ] Add `sl_composite_cache: RwLock<HashMap<String, (CompositePriceResult, DateTime<Utc>)>>` to `CryptoArbBase` (keyed by coin)

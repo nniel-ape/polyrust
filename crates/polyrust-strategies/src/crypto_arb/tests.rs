@@ -4588,3 +4588,145 @@ fn composite_price_snapshot_clone() {
     assert_eq!(cloned.price, dec!(50000.50));
     assert_eq!(cloned.sources_used, 3);
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle store tests (Task 9)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn position_creation_creates_lifecycle_in_healthy_state() {
+    let base = make_base_with_market("m1", 300).await;
+
+    // Create and record a position
+    let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    base.record_position(pos).await;
+
+    // Verify lifecycle was created in Healthy state
+    let lifecycles = base.position_lifecycle.read().await;
+    assert!(lifecycles.contains_key("token_up"));
+    let lc = lifecycles.get("token_up").unwrap();
+    assert_eq!(lc.state, PositionLifecycleState::Healthy);
+}
+
+#[tokio::test]
+async fn position_removal_cleans_up_lifecycle() {
+    let base = make_base_with_market("m1", 300).await;
+
+    // Create and record a position
+    let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    base.record_position(pos).await;
+
+    // Verify lifecycle exists
+    {
+        let lifecycles = base.position_lifecycle.read().await;
+        assert!(lifecycles.contains_key("token_up"));
+    }
+
+    // Remove the position
+    base.remove_position_by_token("token_up").await;
+
+    // Verify lifecycle was cleaned up
+    let lifecycles = base.position_lifecycle.read().await;
+    assert!(!lifecycles.contains_key("token_up"));
+}
+
+#[tokio::test]
+async fn partial_close_preserves_lifecycle() {
+    let base = make_base_with_market("m1", 300).await;
+
+    // Create and record a position of size 10
+    let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    base.record_position(pos).await;
+
+    // Partially close (5 of 10)
+    let result = base
+        .reduce_or_remove_position_by_token("token_up", dec!(5))
+        .await;
+    assert!(result.is_some());
+    let (_, fully_closed) = result.unwrap();
+    assert!(!fully_closed);
+
+    // Lifecycle should still exist (not fully closed)
+    let lifecycles = base.position_lifecycle.read().await;
+    assert!(lifecycles.contains_key("token_up"));
+}
+
+#[tokio::test]
+async fn full_close_via_reduce_removes_lifecycle() {
+    let base = make_base_with_market("m1", 300).await;
+
+    // Create and record a position of size 10
+    let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    base.record_position(pos).await;
+
+    // Fully close (10 of 10)
+    let result = base
+        .reduce_or_remove_position_by_token("token_up", dec!(10))
+        .await;
+    assert!(result.is_some());
+    let (_, fully_closed) = result.unwrap();
+    assert!(fully_closed);
+
+    // Lifecycle should be cleaned up
+    let lifecycles = base.position_lifecycle.read().await;
+    assert!(!lifecycles.contains_key("token_up"));
+}
+
+#[tokio::test]
+async fn ensure_lifecycle_creates_healthy_if_missing() {
+    let base = make_base_with_market("m1", 300).await;
+
+    // No lifecycle exists yet
+    {
+        let lifecycles = base.position_lifecycle.read().await;
+        assert!(!lifecycles.contains_key("token_orphan"));
+    }
+
+    // ensure_lifecycle creates one
+    let lc = base.ensure_lifecycle("token_orphan").await;
+    assert_eq!(lc.state, PositionLifecycleState::Healthy);
+
+    // It persists in the store
+    let lifecycles = base.position_lifecycle.read().await;
+    assert!(lifecycles.contains_key("token_orphan"));
+}
+
+#[tokio::test]
+async fn remove_lifecycle_also_cleans_exit_orders() {
+    let base = make_base_with_market("m1", 300).await;
+
+    // Create a position and its lifecycle
+    let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    base.record_position(pos).await;
+
+    // Simulate adding an exit order for this token
+    {
+        use super::types::ExitOrderMeta;
+        let mut exit_orders = base.exit_orders_by_id.write().await;
+        exit_orders.insert(
+            "exit-order-1".to_string(),
+            ExitOrderMeta {
+                token_id: "token_up".to_string(),
+                order_type: OrderType::Fok,
+                source_state: "ExitExecuting".to_string(),
+            },
+        );
+        // Add an unrelated exit order too
+        exit_orders.insert(
+            "exit-order-2".to_string(),
+            ExitOrderMeta {
+                token_id: "other_token".to_string(),
+                order_type: OrderType::Gtc,
+                source_state: "ResidualRisk".to_string(),
+            },
+        );
+    }
+
+    // Remove the position — should also clean up exit orders for that token
+    base.remove_position_by_token("token_up").await;
+
+    // exit-order-1 should be gone, exit-order-2 should remain
+    let exit_orders = base.exit_orders_by_id.read().await;
+    assert!(!exit_orders.contains_key("exit-order-1"));
+    assert!(exit_orders.contains_key("exit-order-2"));
+}
