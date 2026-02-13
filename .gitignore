@@ -5,6 +5,7 @@ target/
 
 # Docker volumes and overrides
 /data/
+/logs/
 docker-compose.override.yml
 
 # SOPS deploy key (never commit private keys)

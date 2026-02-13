@@ -31,8 +31,8 @@ tasks:
             > .env.deploy
         options: { local: true }
 
-      - name: create remote directory
-        script: mkdir -p /root/polyrust/data && chown 1000:1000 /root/polyrust/data
+      - name: create remote directories
+        script: mkdir -p /root/polyrust/data /root/polyrust/logs && chown 1000:1000 /root/polyrust/data /root/polyrust/logs
 
       - name: copy config files
         copy:
