@@ -11,10 +11,7 @@ pub fn fmt_usdc(d: Decimal) -> String {
     // Split into integer and fractional parts
     let int_part = abs.trunc().to_u64().unwrap_or(0);
     let frac = abs.fract().round_dp(2);
-    let cents = (frac * Decimal::from(100))
-        .trunc()
-        .to_u64()
-        .unwrap_or(0);
+    let cents = (frac * Decimal::from(100)).trunc().to_u64().unwrap_or(0);
 
     let int_str = format_thousands(int_part);
     if is_negative {

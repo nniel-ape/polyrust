@@ -899,8 +899,7 @@ impl TailEndStrategy {
                 {
                     if pos.mode == ArbitrageMode::TailEnd {
                         // GTC fills are maker orders → 0% fee on exit
-                        let pnl =
-                            (price - pos.entry_price) * size - (pos.estimated_fee * size);
+                        let pnl = (price - pos.entry_price) * size - (pos.estimated_fee * size);
                         self.base.record_trade_pnl(&pos.mode, pnl).await;
                         if !fully_closed {
                             warn!(

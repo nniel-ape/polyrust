@@ -151,8 +151,7 @@ impl Store {
             .map_err(|e| StoreError::Query(e.to_string()))?
         {
             let pnl_str: String = row.get(0).map_err(|e| StoreError::Query(e.to_string()))?;
-            let pnl =
-                Decimal::from_str(&pnl_str).map_err(|e| StoreError::Query(e.to_string()))?;
+            let pnl = Decimal::from_str(&pnl_str).map_err(|e| StoreError::Query(e.to_string()))?;
             total += pnl;
         }
         Ok(total)
@@ -162,9 +161,7 @@ impl Store {
     pub async fn sum_fees(&self, strategy: Option<&str>) -> StoreResult<Decimal> {
         let conn = self.conn();
         let query = match strategy {
-            Some(_) => {
-                "SELECT fee FROM trades WHERE fee IS NOT NULL AND strategy_name = ?1"
-            }
+            Some(_) => "SELECT fee FROM trades WHERE fee IS NOT NULL AND strategy_name = ?1",
             None => "SELECT fee FROM trades WHERE fee IS NOT NULL",
         };
 
@@ -181,8 +178,7 @@ impl Store {
             .map_err(|e| StoreError::Query(e.to_string()))?
         {
             let fee_str: String = row.get(0).map_err(|e| StoreError::Query(e.to_string()))?;
-            let fee =
-                Decimal::from_str(&fee_str).map_err(|e| StoreError::Query(e.to_string()))?;
+            let fee = Decimal::from_str(&fee_str).map_err(|e| StoreError::Query(e.to_string()))?;
             total += fee;
         }
         Ok(total)

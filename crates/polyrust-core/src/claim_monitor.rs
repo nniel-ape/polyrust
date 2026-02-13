@@ -389,13 +389,12 @@ impl ClaimMonitor {
                 .unwrap(); // safe: resolved_count > 0
 
             let window_elapsed = self.config.batch_window_secs == 0
-                || (now - oldest_resolved_at).num_seconds()
-                    >= self.config.batch_window_secs as i64;
+                || (now - oldest_resolved_at).num_seconds() >= self.config.batch_window_secs as i64;
             let count_reached = resolved_count >= self.config.batch_min_count;
 
             if !window_elapsed && !count_reached {
-                let remaining = self.config.batch_window_secs as i64
-                    - (now - oldest_resolved_at).num_seconds();
+                let remaining =
+                    self.config.batch_window_secs as i64 - (now - oldest_resolved_at).num_seconds();
                 info!(
                     resolved_count,
                     remaining_secs = remaining,
@@ -491,7 +490,9 @@ impl ClaimMonitor {
 
             // Handle individual redemption failures
             for id in &failed_ids {
-                if let Some(claim) = pending.get_mut(id) && self.handle_retry(claim) {
+                if let Some(claim) = pending.get_mut(id)
+                    && self.handle_retry(claim)
+                {
                     to_remove.push(id.clone());
                 }
             }
@@ -499,7 +500,9 @@ impl ClaimMonitor {
             // Batch-level error (non-gas): retry each resolved claim
             if batch_error {
                 for mid in &resolved_claims {
-                    if let Some(claim) = pending.get_mut(mid) && self.handle_retry(claim) {
+                    if let Some(claim) = pending.get_mut(mid)
+                        && self.handle_retry(claim)
+                    {
                         to_remove.push(mid.clone());
                     }
                 }

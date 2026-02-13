@@ -1811,7 +1811,13 @@ async fn stop_loss_rejection_balance_allowance_keeps_position_and_cools_down() {
     // Add to pending_stop_loss
     {
         let mut pending_sl = base.pending_stop_loss.write().await;
-        pending_sl.insert("token1".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
+        pending_sl.insert(
+            "token1".to_string(),
+            PendingStopLoss {
+                exit_price: dec!(0.85),
+                order_type: OrderType::Fok,
+            },
+        );
     }
 
     // Handle rejection with balance error
@@ -1852,7 +1858,13 @@ async fn stop_loss_rejection_transient_applies_cooldown() {
     // Add to pending_stop_loss
     {
         let mut pending_sl = base.pending_stop_loss.write().await;
-        pending_sl.insert("token1".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
+        pending_sl.insert(
+            "token1".to_string(),
+            PendingStopLoss {
+                exit_price: dec!(0.85),
+                order_type: OrderType::Fok,
+            },
+        );
     }
 
     // Handle rejection with transient error
@@ -2476,7 +2488,13 @@ async fn handle_stop_loss_rejection_balance_allowance_does_not_mark_stale() {
     // Add to pending_stop_loss
     {
         let mut pending_sl = base.pending_stop_loss.write().await;
-        pending_sl.insert("token_stale".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
+        pending_sl.insert(
+            "token_stale".to_string(),
+            PendingStopLoss {
+                exit_price: dec!(0.85),
+                order_type: OrderType::Fok,
+            },
+        );
     }
 
     // Handle rejection with balance error
@@ -2853,11 +2871,17 @@ async fn reconcile_detects_filled_order_after_two_misses() {
     assert!(actions.is_empty(), "First miss should not create position");
     {
         let limits = base.open_limit_orders.read().await;
-        assert!(limits.contains_key("order-2"), "order-2 should still be tracked after first miss");
+        assert!(
+            limits.contains_key("order-2"),
+            "order-2 should still be tracked after first miss"
+        );
         assert_eq!(limits["order-2"].reconcile_miss_count, 1);
     }
     let positions = base.positions.read().await;
-    assert!(!positions.contains_key("market-B"), "no position after first miss");
+    assert!(
+        !positions.contains_key("market-B"),
+        "no position after first miss"
+    );
     drop(positions);
 
     // Second reconciliation: order-2 gets miss_count=2, now confirmed fill
@@ -3239,7 +3263,13 @@ async fn liquidity_rejection_marks_gtc_fallback() {
     // Add to pending_stop_loss
     {
         let mut psl = base.pending_stop_loss.write().await;
-        psl.insert("token_gtc".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
+        psl.insert(
+            "token_gtc".to_string(),
+            PendingStopLoss {
+                exit_price: dec!(0.85),
+                order_type: OrderType::Fok,
+            },
+        );
     }
 
     // Handle liquidity rejection
@@ -3281,7 +3311,13 @@ async fn balance_rejection_does_not_mark_gtc_fallback() {
 
     {
         let mut psl = base.pending_stop_loss.write().await;
-        psl.insert("token_bal".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
+        psl.insert(
+            "token_bal".to_string(),
+            PendingStopLoss {
+                exit_price: dec!(0.85),
+                order_type: OrderType::Fok,
+            },
+        );
     }
 
     base.handle_stop_loss_rejection(&"token_bal".to_string(), "not enough balance", "TailEnd")
@@ -3416,7 +3452,13 @@ async fn cooldown_schedule_escalates_per_rejection_kind() {
     // First liquidity rejection → 1s cooldown
     {
         let mut psl = base.pending_stop_loss.write().await;
-        psl.insert("tok1".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
+        psl.insert(
+            "tok1".to_string(),
+            PendingStopLoss {
+                exit_price: dec!(0.85),
+                order_type: OrderType::Fok,
+            },
+        );
     }
     base.handle_stop_loss_rejection(&"tok1".to_string(), "couldn't be fully filled", "Test")
         .await;
@@ -3428,7 +3470,13 @@ async fn cooldown_schedule_escalates_per_rejection_kind() {
     // Second liquidity rejection → 3s cooldown
     {
         let mut psl = base.pending_stop_loss.write().await;
-        psl.insert("tok1".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
+        psl.insert(
+            "tok1".to_string(),
+            PendingStopLoss {
+                exit_price: dec!(0.85),
+                order_type: OrderType::Fok,
+            },
+        );
     }
     base.handle_stop_loss_rejection(&"tok1".to_string(), "couldn't be fully filled", "Test")
         .await;
@@ -3440,7 +3488,13 @@ async fn cooldown_schedule_escalates_per_rejection_kind() {
     // Balance rejection on different token → uses balance schedule
     {
         let mut psl = base.pending_stop_loss.write().await;
-        psl.insert("tok2".to_string(), PendingStopLoss { exit_price: dec!(0.85), order_type: OrderType::Fok });
+        psl.insert(
+            "tok2".to_string(),
+            PendingStopLoss {
+                exit_price: dec!(0.85),
+                order_type: OrderType::Fok,
+            },
+        );
     }
     base.handle_stop_loss_rejection(&"tok2".to_string(), "not enough balance", "Test")
         .await;
@@ -3547,7 +3601,10 @@ async fn reconcile_miss_counter_resets_on_reappear() {
 
     // Order disappears again — needs 2 new misses, not 1
     let actions = base.reconcile_limit_orders(&empty_clob).await;
-    assert!(actions.is_empty(), "Should not reconcile on first miss after reset");
+    assert!(
+        actions.is_empty(),
+        "Should not reconcile on first miss after reset"
+    );
     {
         let limits = base.open_limit_orders.read().await;
         assert_eq!(limits["order-1"].reconcile_miss_count, 1);
@@ -3643,11 +3700,21 @@ async fn pending_stop_loss_stores_order_type() {
 async fn reduce_or_remove_full_close() {
     let base = make_base_no_chainlink();
 
-    let pos = make_position("m1", "t1", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    let pos = make_position(
+        "m1",
+        "t1",
+        OutcomeSide::Up,
+        dec!(0.90),
+        dec!(10),
+        dec!(50000),
+        dec!(0.90),
+    );
     base.record_position(pos).await;
 
     // Full close: fill_size == pos.size
-    let result = base.reduce_or_remove_position_by_token("t1", dec!(10)).await;
+    let result = base
+        .reduce_or_remove_position_by_token("t1", dec!(10))
+        .await;
     assert!(result.is_some());
     let (snapshot, fully_closed) = result.unwrap();
     assert!(fully_closed);
@@ -3666,7 +3733,15 @@ async fn reduce_or_remove_full_close() {
 async fn reduce_or_remove_partial_close() {
     let base = make_base_no_chainlink();
 
-    let pos = make_position("m1", "t1", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    let pos = make_position(
+        "m1",
+        "t1",
+        OutcomeSide::Up,
+        dec!(0.90),
+        dec!(10),
+        dec!(50000),
+        dec!(0.90),
+    );
     base.record_position(pos).await;
 
     // Partial close: fill_size < pos.size
@@ -3674,13 +3749,21 @@ async fn reduce_or_remove_partial_close() {
     assert!(result.is_some());
     let (snapshot, fully_closed) = result.unwrap();
     assert!(!fully_closed);
-    assert_eq!(snapshot.size, dec!(10), "Snapshot should have original size");
+    assert_eq!(
+        snapshot.size,
+        dec!(10),
+        "Snapshot should have original size"
+    );
 
     // Position should still exist with reduced size
     let positions = base.positions.read().await;
     let pos_list = positions.get("m1").unwrap();
     assert_eq!(pos_list.len(), 1);
-    assert_eq!(pos_list[0].size, dec!(4), "Remaining size should be 10 - 6 = 4");
+    assert_eq!(
+        pos_list[0].size,
+        dec!(4),
+        "Remaining size should be 10 - 6 = 4"
+    );
 
     // Stop-loss state should NOT be cleared (position still open)
     drop(positions);
@@ -3693,5 +3776,9 @@ async fn reduce_or_remove_partial_close() {
     let (_, fully_closed2) = result2.unwrap();
     assert!(!fully_closed2);
     let counts = base.stop_loss_retry_counts.read().await;
-    assert_eq!(*counts.get("t1").unwrap(), 2, "Retry count preserved on partial close");
+    assert_eq!(
+        *counts.get("t1").unwrap(),
+        2,
+        "Retry count preserved on partial close"
+    );
 }
