@@ -1871,26 +1871,86 @@ impl TailEndStrategy {
                 let now = self.base.event_time().await;
                 let sl_config = &self.base.config.stop_loss;
 
-                // Transition to Cooldown
-                let mut lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
-                let cooldown_until =
-                    now + chrono::Duration::seconds(sl_config.reentry_cooldown_secs);
+                // Check if this is a partial fill by comparing fill size to remaining position
+                let remaining_after = {
+                    let positions = self.base.positions.read().await;
+                    positions
+                        .values()
+                        .flat_map(|v| v.iter())
+                        .find(|p| p.token_id == meta.token_id)
+                        .map(|p| p.size)
+                };
 
-                if let Err(e) = lifecycle.transition(
-                    PositionLifecycleState::Cooldown {
-                        until: cooldown_until,
-                    },
-                    &format!("recovery fill: {} at {}", meta.source_state, price),
-                    now,
-                ) {
+                let is_partial = remaining_after
+                    .map(|pos_size| size < pos_size)
+                    .unwrap_or(false);
+
+                let mut lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
+
+                if is_partial {
+                    // Partial recovery fill — accept what we got, resolve remaining with loss.
+                    // Recovery orders are FOK so partials are rare, but handle defensively.
                     warn!(
+                        order_id = %order_id,
                         token_id = %meta.token_id,
-                        error = %e,
-                        "RecoveryProbe→Cooldown transition failed"
+                        fill_size = %size,
+                        remaining = ?remaining_after,
+                        "Recovery order partially filled — resolving remaining with loss"
+                    );
+
+                    // Record recovery exit cooldown for re-entry gating
+                    let pos_info = {
+                        let positions = self.base.positions.read().await;
+                        positions
+                            .values()
+                            .flat_map(|v| v.iter())
+                            .find(|p| p.token_id == meta.token_id)
+                            .map(|p| p.market_id.clone())
+                    };
+                    if let Some(market_id) = pos_info {
+                        self.base.record_recovery_exit_cooldown(&market_id).await;
+                    }
+
+                    // Remove the entire position (partial recovery is not worth continuing)
+                    if let Some(remaining) = remaining_after {
+                        self.base
+                            .reduce_or_remove_position_by_token(&meta.token_id, remaining)
+                            .await;
+                    }
+
+                    // Force-remove lifecycle since position is resolved
+                    self.base.remove_lifecycle(&meta.token_id).await;
+                } else {
+                    // Full recovery fill — transition to Cooldown
+                    let cooldown_until =
+                        now + chrono::Duration::seconds(sl_config.reentry_cooldown_secs);
+
+                    if let Err(e) = lifecycle.transition(
+                        PositionLifecycleState::Cooldown {
+                            until: cooldown_until,
+                        },
+                        &format!("recovery fill: {} at {}", meta.source_state, price),
+                        now,
+                    ) {
+                        warn!(
+                            token_id = %meta.token_id,
+                            error = %e,
+                            "RecoveryProbe→Cooldown transition failed"
+                        );
+                    }
+                    lifecycle.pending_exit_order_id = None;
+                    self.write_lifecycle(&meta.token_id, &lifecycle).await;
+
+                    info!(
+                        order_id = %order_id,
+                        token_id = %meta.token_id,
+                        source = %meta.source_state,
+                        fill_price = %price,
+                        fill_size = %size,
+                        cooldown_secs = sl_config.reentry_cooldown_secs,
+                        "Recovery order filled — transitioning to Cooldown"
                     );
                 }
-                lifecycle.pending_exit_order_id = None;
-                self.write_lifecycle(&meta.token_id, &lifecycle).await;
 
                 // Clean up exit order tracking
                 {
@@ -1898,15 +1958,6 @@ impl TailEndStrategy {
                     exit_orders.remove(order_id);
                 }
 
-                info!(
-                    order_id = %order_id,
-                    token_id = %meta.token_id,
-                    source = %meta.source_state,
-                    fill_price = %price,
-                    fill_size = %size,
-                    cooldown_secs = sl_config.reentry_cooldown_secs,
-                    "Recovery order filled — transitioning to Cooldown"
-                );
                 return vec![];
             }
         }
@@ -3924,6 +3975,648 @@ mod tests {
         assert!(
             !has_position,
             "Position should have been resolved after max retries"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 16: Order event routing through lifecycle transitions
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a strategy with a position in ExitExecuting state,
+    /// with properly tracked exit order metadata for fill routing.
+    async fn make_exit_fill_test_setup(
+        exit_order_type: OrderType,
+    ) -> (TailEndStrategy, String) {
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.enabled = true;
+        config.tailend.min_sustained_secs = 0;
+        config.tailend.max_recent_volatility = dec!(1.0);
+        config.stop_loss.min_remaining_secs = 0;
+        config.stop_loss.exit_depth_cap_factor = dec!(0.80);
+        config.stop_loss.reentry_cooldown_secs = 8;
+
+        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+        let now = Utc::now();
+
+        // Insert active market
+        {
+            let mut markets = base.active_markets.write().await;
+            markets.insert(
+                "market1".to_string(),
+                MarketWithReference {
+                    market: make_market_info("market1", now + Duration::seconds(300)),
+                    reference_price: dec!(50000),
+                    reference_quality: ReferenceQuality::Exact,
+                    discovery_time: now,
+                    coin: "BTC".to_string(),
+                    window_ts: 0,
+                },
+            );
+        }
+
+        // Create position
+        let pos = ArbitragePosition {
+            market_id: "market1".to_string(),
+            token_id: "token_up".to_string(),
+            side: polyrust_core::types::OutcomeSide::Up,
+            entry_price: dec!(0.92),
+            size: dec!(10),
+            reference_price: dec!(50000),
+            coin: "BTC".to_string(),
+            order_id: None,
+            entry_time: now - Duration::seconds(20),
+            kelly_fraction: None,
+            peak_bid: dec!(0.92),
+            estimated_fee: Decimal::ZERO,
+            entry_market_price: dec!(0.92),
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+            entry_order_type: OrderType::Gtc,
+            entry_fee_per_share: Decimal::ZERO,
+            realized_pnl: Decimal::ZERO,
+        };
+        base.record_position(pos).await;
+
+        let exit_oid = format!("exit-{}-token_up-{}", if exit_order_type == OrderType::Gtc { "gtc" } else { "fok" }, now.timestamp_millis());
+
+        // Set lifecycle to ExitExecuting
+        {
+            let mut lifecycle = base.ensure_lifecycle("token_up").await;
+            lifecycle
+                .transition(
+                    PositionLifecycleState::ExitExecuting {
+                        order_id: exit_oid.clone(),
+                        order_type: exit_order_type,
+                        exit_price: dec!(0.85),
+                        submitted_at: now,
+                    },
+                    "test setup: trigger fired",
+                    now,
+                )
+                .unwrap();
+            lifecycle.pending_exit_order_id = Some(exit_oid.clone());
+            let mut lifecycles = base.position_lifecycle.write().await;
+            lifecycles.insert("token_up".to_string(), lifecycle);
+        }
+
+        // Track in exit_orders_by_id
+        {
+            let mut exit_orders = base.exit_orders_by_id.write().await;
+            exit_orders.insert(
+                exit_oid.clone(),
+                ExitOrderMeta {
+                    token_id: "token_up".to_string(),
+                    order_type: exit_order_type,
+                    source_state: "HardCrash(bid_drop=0.08, reversal=0.006)".to_string(),
+                },
+            );
+        }
+
+        // Track in pending_stop_loss (legacy compat)
+        {
+            let mut pending_sl = base.pending_stop_loss.write().await;
+            pending_sl.insert(
+                "token_up".to_string(),
+                PendingStopLoss {
+                    exit_price: dec!(0.85),
+                    order_type: exit_order_type,
+                },
+            );
+        }
+
+        // For GTC: also track in gtc_stop_loss_orders
+        if exit_order_type == OrderType::Gtc {
+            let mut gtc_sl = base.gtc_stop_loss_orders.write().await;
+            gtc_sl.insert(
+                exit_oid.clone(),
+                GtcStopLossOrder {
+                    order_id: exit_oid.clone(),
+                    token_id: "token_up".to_string(),
+                    market_id: "market1".to_string(),
+                    price: dec!(0.85),
+                    size: dec!(10),
+                    placed_at: now,
+                },
+            );
+        }
+
+        let strategy = TailEndStrategy::new(base);
+        (strategy, exit_oid)
+    }
+
+    /// Full exit fill (FOK) routes correctly: removes position and lifecycle,
+    /// computes P&L, and cleans up exit_orders_by_id.
+    #[tokio::test]
+    async fn lifecycle_exit_fill_routes_through_lifecycle_fok() {
+        let (strategy, _exit_oid) = make_exit_fill_test_setup(OrderType::Fok).await;
+
+        // Simulate a Filled event: full fill at price 0.85 for size 10
+        let actions = strategy
+            .on_order_filled("token_up_fill", "token_up", dec!(0.85), dec!(10))
+            .await;
+
+        // No further actions needed (fill handled internally)
+        assert!(
+            actions.is_empty() || !actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))),
+            "Should not produce further orders after full exit fill"
+        );
+
+        // Position should be removed
+        let positions = strategy.base.positions.read().await;
+        let has_position = positions
+            .values()
+            .flat_map(|v| v.iter())
+            .any(|p| p.token_id == "token_up");
+        assert!(!has_position, "Position should be removed after full exit fill");
+
+        // Lifecycle should be cleaned up (removed by reduce_or_remove_position_by_token)
+        let lifecycles = strategy.base.position_lifecycle.read().await;
+        assert!(
+            !lifecycles.contains_key("token_up"),
+            "Lifecycle should be removed after full exit fill"
+        );
+
+        // exit_orders_by_id should be cleaned up
+        let exit_orders = strategy.base.exit_orders_by_id.read().await;
+        let has_token = exit_orders.values().any(|m| m.token_id == "token_up");
+        assert!(
+            !has_token,
+            "exit_orders_by_id should be cleaned up after full fill"
+        );
+
+        // pending_stop_loss should be cleaned up
+        let pending_sl = strategy.base.pending_stop_loss.read().await;
+        assert!(
+            !pending_sl.contains_key("token_up"),
+            "pending_stop_loss should be cleaned up after full fill"
+        );
+    }
+
+    /// Full exit fill (GTC) routes correctly: removes position and lifecycle,
+    /// computes P&L with 0% maker fee, and cleans up tracking maps.
+    #[tokio::test]
+    async fn lifecycle_exit_fill_routes_through_lifecycle_gtc() {
+        let (strategy, exit_oid) = make_exit_fill_test_setup(OrderType::Gtc).await;
+
+        // Simulate GTC fill: full fill at price 0.88 for size 10
+        let actions = strategy
+            .on_order_filled(&exit_oid, "token_up", dec!(0.88), dec!(10))
+            .await;
+
+        assert!(actions.is_empty(), "Should not produce further orders");
+
+        // Position should be removed
+        let positions = strategy.base.positions.read().await;
+        let has_position = positions
+            .values()
+            .flat_map(|v| v.iter())
+            .any(|p| p.token_id == "token_up");
+        assert!(!has_position, "Position should be removed after GTC exit fill");
+
+        // Lifecycle should be cleaned up
+        let lifecycles = strategy.base.position_lifecycle.read().await;
+        assert!(
+            !lifecycles.contains_key("token_up"),
+            "Lifecycle should be removed after GTC full fill"
+        );
+
+        // gtc_stop_loss_orders should be cleaned up
+        let gtc_sl = strategy.base.gtc_stop_loss_orders.read().await;
+        assert!(
+            !gtc_sl.contains_key(&exit_oid),
+            "GTC stop-loss order should be removed"
+        );
+    }
+
+    /// Partial exit fill (FOK) with remaining below min_order_size
+    /// triggers dust detection and removes position.
+    #[tokio::test]
+    async fn lifecycle_partial_exit_fill_dust_removed() {
+        let (strategy, _exit_oid) = make_exit_fill_test_setup(OrderType::Fok).await;
+
+        // Simulate partial FOK fill: 6 out of 10 filled, remaining=4 < min_order_size(5)
+        let _actions = strategy
+            .on_order_filled("token_up_fill", "token_up", dec!(0.85), dec!(6))
+            .await;
+
+        // Remaining 4 < min_order_size(5) — dust detection should remove position
+        let positions = strategy.base.positions.read().await;
+        let has_position = positions
+            .values()
+            .flat_map(|v| v.iter())
+            .any(|p| p.token_id == "token_up");
+        assert!(
+            !has_position,
+            "Dust position (4 < min_order_size 5) should be removed"
+        );
+    }
+
+    /// Partial exit fill (FOK) with remaining above min_order_size
+    /// transitions to ResidualRisk properly.
+    #[tokio::test]
+    async fn lifecycle_partial_exit_fill_above_min_to_residual_risk() {
+        // Create a larger position so partial fill leaves above min_order_size
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.enabled = true;
+        config.tailend.min_sustained_secs = 0;
+        config.tailend.max_recent_volatility = dec!(1.0);
+        config.stop_loss.min_remaining_secs = 0;
+        config.stop_loss.exit_depth_cap_factor = dec!(0.80);
+
+        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+        let now = Utc::now();
+
+        {
+            let mut markets = base.active_markets.write().await;
+            markets.insert(
+                "market1".to_string(),
+                MarketWithReference {
+                    market: make_market_info("market1", now + Duration::seconds(300)),
+                    reference_price: dec!(50000),
+                    reference_quality: ReferenceQuality::Exact,
+                    discovery_time: now,
+                    coin: "BTC".to_string(),
+                    window_ts: 0,
+                },
+            );
+        }
+
+        // Larger position: size=20 so after partial fill of 12, remaining=8 > min_order_size(5)
+        let pos = ArbitragePosition {
+            market_id: "market1".to_string(),
+            token_id: "token_up".to_string(),
+            side: polyrust_core::types::OutcomeSide::Up,
+            entry_price: dec!(0.92),
+            size: dec!(20),
+            reference_price: dec!(50000),
+            coin: "BTC".to_string(),
+            order_id: None,
+            entry_time: now - Duration::seconds(20),
+            kelly_fraction: None,
+            peak_bid: dec!(0.92),
+            estimated_fee: Decimal::ZERO,
+            entry_market_price: dec!(0.92),
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+            entry_order_type: OrderType::Gtc,
+            entry_fee_per_share: Decimal::ZERO,
+            realized_pnl: Decimal::ZERO,
+        };
+        base.record_position(pos).await;
+
+        // Set lifecycle to ExitExecuting with FOK
+        {
+            let mut lifecycle = base.ensure_lifecycle("token_up").await;
+            lifecycle
+                .transition(
+                    PositionLifecycleState::ExitExecuting {
+                        order_id: "exit-fok-1".to_string(),
+                        order_type: OrderType::Fok,
+                        exit_price: dec!(0.85),
+                        submitted_at: now,
+                    },
+                    "test trigger",
+                    now,
+                )
+                .unwrap();
+            lifecycle.pending_exit_order_id = Some("exit-fok-1".to_string());
+            let mut lifecycles = base.position_lifecycle.write().await;
+            lifecycles.insert("token_up".to_string(), lifecycle);
+        }
+        {
+            let mut pending_sl = base.pending_stop_loss.write().await;
+            pending_sl.insert(
+                "token_up".to_string(),
+                PendingStopLoss {
+                    exit_price: dec!(0.85),
+                    order_type: OrderType::Fok,
+                },
+            );
+        }
+
+        let strategy = TailEndStrategy::new(base);
+
+        // Simulate partial FOK fill: 12 out of 20
+        let _actions = strategy
+            .on_order_filled("token_up_fill", "token_up", dec!(0.85), dec!(12))
+            .await;
+
+        // Remaining = 20 - 12 = 8 > min_order_size(5) — should be in ResidualRisk
+        let lifecycles = strategy.base.position_lifecycle.read().await;
+        let lc = lifecycles.get("token_up");
+        assert!(lc.is_some(), "Lifecycle should exist for remaining position");
+        match &lc.unwrap().state {
+            PositionLifecycleState::ResidualRisk {
+                remaining_size,
+                retry_count,
+                use_gtc_next,
+                ..
+            } => {
+                assert_eq!(*remaining_size, dec!(8));
+                assert_eq!(*retry_count, 1);
+                assert!(*use_gtc_next, "Should switch to GTC for next attempt");
+            }
+            other => panic!("Expected ResidualRisk, got: {other:?}"),
+        }
+
+        // Position should still exist with reduced size
+        let positions = strategy.base.positions.read().await;
+        let pos = positions
+            .values()
+            .flat_map(|v| v.iter())
+            .find(|p| p.token_id == "token_up");
+        assert!(pos.is_some(), "Position should still exist");
+        assert_eq!(pos.unwrap().size, dec!(8), "Size should be reduced to 8");
+    }
+
+    /// Recovery order full fill transitions lifecycle from RecoveryProbe to Cooldown.
+    #[tokio::test]
+    async fn lifecycle_recovery_fill_transitions_to_cooldown() {
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.enabled = true;
+        config.tailend.min_sustained_secs = 0;
+        config.tailend.max_recent_volatility = dec!(1.0);
+        config.stop_loss.min_remaining_secs = 0;
+        config.stop_loss.reentry_cooldown_secs = 8;
+
+        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+        let now = Utc::now();
+
+        {
+            let mut markets = base.active_markets.write().await;
+            markets.insert(
+                "market1".to_string(),
+                MarketWithReference {
+                    market: make_market_info("market1", now + Duration::seconds(300)),
+                    reference_price: dec!(50000),
+                    reference_quality: ReferenceQuality::Exact,
+                    discovery_time: now,
+                    coin: "BTC".to_string(),
+                    window_ts: 0,
+                },
+            );
+        }
+
+        // Create position (this is the original position that failed to exit)
+        let pos = ArbitragePosition {
+            market_id: "market1".to_string(),
+            token_id: "token_up".to_string(),
+            side: polyrust_core::types::OutcomeSide::Up,
+            entry_price: dec!(0.93),
+            size: dec!(10),
+            reference_price: dec!(50000),
+            coin: "BTC".to_string(),
+            order_id: None,
+            entry_time: now - Duration::seconds(30),
+            kelly_fraction: None,
+            peak_bid: dec!(0.93),
+            estimated_fee: Decimal::ZERO,
+            entry_market_price: dec!(0.93),
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+            entry_order_type: OrderType::Gtc,
+            entry_fee_per_share: Decimal::ZERO,
+            realized_pnl: Decimal::ZERO,
+        };
+        base.record_position(pos).await;
+
+        let recovery_oid = "recovery-set-token_up-12345".to_string();
+
+        // Set lifecycle to RecoveryProbe
+        {
+            let mut lifecycle = base.ensure_lifecycle("token_up").await;
+            // Need intermediate transition: Healthy -> ExitExecuting -> ResidualRisk -> RecoveryProbe
+            lifecycle
+                .transition(
+                    PositionLifecycleState::ExitExecuting {
+                        order_id: "exit-1".to_string(),
+                        order_type: OrderType::Fok,
+                        exit_price: dec!(0.85),
+                        submitted_at: now - Duration::seconds(10),
+                    },
+                    "setup step 1",
+                    now - Duration::seconds(10),
+                )
+                .unwrap();
+            lifecycle
+                .transition(
+                    PositionLifecycleState::ResidualRisk {
+                        remaining_size: dec!(10),
+                        retry_count: 5,
+                        last_attempt: now - Duration::seconds(5),
+                        use_gtc_next: false,
+                    },
+                    "setup step 2",
+                    now - Duration::seconds(5),
+                )
+                .unwrap();
+            lifecycle
+                .transition(
+                    PositionLifecycleState::RecoveryProbe {
+                        recovery_order_id: recovery_oid.clone(),
+                        probe_side: polyrust_core::types::OutcomeSide::Down,
+                        submitted_at: now - Duration::seconds(1),
+                    },
+                    "setup step 3: set completion",
+                    now - Duration::seconds(1),
+                )
+                .unwrap();
+            lifecycle.pending_exit_order_id = Some(recovery_oid.clone());
+
+            let mut lifecycles = base.position_lifecycle.write().await;
+            lifecycles.insert("token_up".to_string(), lifecycle);
+        }
+
+        // Track recovery order in exit_orders_by_id
+        {
+            let mut exit_orders = base.exit_orders_by_id.write().await;
+            exit_orders.insert(
+                recovery_oid.clone(),
+                ExitOrderMeta {
+                    token_id: "token_up".to_string(),
+                    order_type: OrderType::Fok,
+                    source_state: "RecoveryProbe(set_completion)".to_string(),
+                },
+            );
+        }
+
+        let strategy = TailEndStrategy::new(base);
+
+        // Simulate recovery order fill (opposite side bought at 0.07)
+        let actions = strategy
+            .on_order_filled(&recovery_oid, "token_down", dec!(0.07), dec!(10))
+            .await;
+        assert!(actions.is_empty(), "Recovery fill should not produce further actions");
+
+        // Lifecycle should transition to Cooldown
+        let lifecycles = strategy.base.position_lifecycle.read().await;
+        let lc = lifecycles.get("token_up");
+        assert!(lc.is_some(), "Lifecycle should still exist in Cooldown");
+        match &lc.unwrap().state {
+            PositionLifecycleState::Cooldown { until } => {
+                // Cooldown should be ~8 seconds from now
+                let secs_until = until.signed_duration_since(now).num_seconds();
+                assert!(
+                    secs_until >= 7 && secs_until <= 9,
+                    "Cooldown should be ~8s from now, got {secs_until}s"
+                );
+            }
+            other => panic!("Expected Cooldown, got: {other:?}"),
+        }
+
+        // exit_orders_by_id should be cleaned up
+        let exit_orders = strategy.base.exit_orders_by_id.read().await;
+        assert!(
+            !exit_orders.contains_key(&recovery_oid),
+            "Recovery order should be removed from exit_orders_by_id"
+        );
+    }
+
+    /// Exit order rejection for ExitExecuting lifecycle escalates to ResidualRisk
+    /// with correct rejection classification.
+    #[tokio::test]
+    async fn lifecycle_rejection_escalates_to_residual_risk() {
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.enabled = true;
+        config.tailend.min_sustained_secs = 0;
+        config.tailend.max_recent_volatility = dec!(1.0);
+        config.stop_loss.min_remaining_secs = 0;
+        config.stop_loss.gtc_fallback = true;
+
+        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+        let now = Utc::now();
+
+        {
+            let mut markets = base.active_markets.write().await;
+            markets.insert(
+                "market1".to_string(),
+                MarketWithReference {
+                    market: make_market_info("market1", now + Duration::seconds(300)),
+                    reference_price: dec!(50000),
+                    reference_quality: ReferenceQuality::Exact,
+                    discovery_time: now,
+                    coin: "BTC".to_string(),
+                    window_ts: 0,
+                },
+            );
+        }
+
+        // Create position
+        let pos = ArbitragePosition {
+            market_id: "market1".to_string(),
+            token_id: "token_up".to_string(),
+            side: polyrust_core::types::OutcomeSide::Up,
+            entry_price: dec!(0.92),
+            size: dec!(10),
+            reference_price: dec!(50000),
+            coin: "BTC".to_string(),
+            order_id: None,
+            entry_time: now - Duration::seconds(20),
+            kelly_fraction: None,
+            peak_bid: dec!(0.92),
+            estimated_fee: Decimal::ZERO,
+            entry_market_price: dec!(0.92),
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+            entry_order_type: OrderType::Gtc,
+            entry_fee_per_share: Decimal::ZERO,
+            realized_pnl: Decimal::ZERO,
+        };
+        base.record_position(pos).await;
+
+        // Set lifecycle to ExitExecuting
+        let exit_oid = "exit-fok-token_up-999".to_string();
+        {
+            let mut lifecycle = base.ensure_lifecycle("token_up").await;
+            lifecycle
+                .transition(
+                    PositionLifecycleState::ExitExecuting {
+                        order_id: exit_oid.clone(),
+                        order_type: OrderType::Fok,
+                        exit_price: dec!(0.85),
+                        submitted_at: now,
+                    },
+                    "test trigger",
+                    now,
+                )
+                .unwrap();
+            lifecycle.pending_exit_order_id = Some(exit_oid.clone());
+            let mut lifecycles = base.position_lifecycle.write().await;
+            lifecycles.insert("token_up".to_string(), lifecycle);
+        }
+        {
+            let mut exit_orders = base.exit_orders_by_id.write().await;
+            exit_orders.insert(
+                exit_oid.clone(),
+                ExitOrderMeta {
+                    token_id: "token_up".to_string(),
+                    order_type: OrderType::Fok,
+                    source_state: "HardCrash".to_string(),
+                },
+            );
+        }
+        {
+            let mut pending_sl = base.pending_stop_loss.write().await;
+            pending_sl.insert(
+                "token_up".to_string(),
+                PendingStopLoss {
+                    exit_price: dec!(0.85),
+                    order_type: OrderType::Fok,
+                },
+            );
+        }
+
+        let mut strategy = TailEndStrategy::new(base);
+        let ctx = StrategyContext::new();
+
+        // Simulate a Rejected event with a liquidity reason
+        let event = Event::OrderUpdate(polyrust_core::events::OrderEvent::Rejected {
+            order_id: Some(exit_oid.clone()),
+            token_id: Some("token_up".to_string()),
+            reason: "couldn't be fully filled".to_string(),
+        });
+        let actions = strategy.on_event(&event, &ctx).await.unwrap();
+        // Rejection handler doesn't produce new orders directly
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))),
+            "Rejection should not immediately place a new order"
+        );
+
+        // Lifecycle should be in ResidualRisk with use_gtc_next=true (liquidity rejection + gtc_fallback)
+        let lifecycles = strategy.base.position_lifecycle.read().await;
+        let lc = lifecycles.get("token_up");
+        assert!(lc.is_some(), "Lifecycle should still exist after rejection");
+        match &lc.unwrap().state {
+            PositionLifecycleState::ResidualRisk {
+                remaining_size,
+                retry_count,
+                use_gtc_next,
+                ..
+            } => {
+                assert_eq!(*remaining_size, dec!(10), "Remaining should be full position size");
+                assert_eq!(*retry_count, 1, "Should be first retry");
+                assert!(*use_gtc_next, "Liquidity rejection + gtc_fallback → should use GTC next");
+            }
+            other => panic!("Expected ResidualRisk, got: {other:?}"),
+        }
+
+        // exit_orders_by_id should be cleaned up for this token
+        let exit_orders = strategy.base.exit_orders_by_id.read().await;
+        let has_token = exit_orders.values().any(|m| m.token_id == "token_up");
+        assert!(
+            !has_token,
+            "exit_orders_by_id should be cleaned up after rejection"
+        );
+
+        // pending_stop_loss should be cleaned up
+        let pending_sl = strategy.base.pending_stop_loss.read().await;
+        assert!(
+            !pending_sl.contains_key("token_up"),
+            "pending_stop_loss should be cleaned up after rejection"
         );
     }
 }

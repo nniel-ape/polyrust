@@ -237,19 +237,19 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 16
 
 ### Task 16: Route order events through lifecycle transitions
-- [ ] In `on_order_filled` (tailend.rs): check `exit_orders_by_id` first — if matched, route to lifecycle transition handler
-- [ ] ExitExecuting fill → fully filled: remove position + lifecycle; compute PnL with correct fee model
-- [ ] ExitExecuting fill → partial: update remaining_size, transition to ResidualRisk
-- [ ] RecoveryProbe fill → success: transition to Cooldown
-- [ ] RecoveryProbe fill → partial: keep in RecoveryProbe or fallback to resolve
-- [ ] On `OrderEvent::Rejected` for exit/recovery orders: classify rejection (reuse `StopLossRejectionKind`), apply cooldown escalation, transition state
-- [ ] On `OrderEvent::Cancelled` for exit orders: if market expired → resolve; if stale GTC → re-place in next refresh cycle
-- [ ] Clean up `exit_orders_by_id` entries after order resolution
-- [ ] Write test: exit fill routes correctly through lifecycle
-- [ ] Write test: partial exit fill transitions to ResidualRisk
-- [ ] Write test: recovery fill transitions to Cooldown
-- [ ] Write test: rejection escalates cooldown correctly
-- [ ] Run tests — must pass before task 17
+- [x] In `on_order_filled` (tailend.rs): check `exit_orders_by_id` first — if matched, route to lifecycle transition handler
+- [x] ExitExecuting fill → fully filled: remove position + lifecycle; compute PnL with correct fee model
+- [x] ExitExecuting fill → partial: update remaining_size, transition to ResidualRisk
+- [x] RecoveryProbe fill → success: transition to Cooldown
+- [x] RecoveryProbe fill → partial: keep in RecoveryProbe or fallback to resolve
+- [x] On `OrderEvent::Rejected` for exit/recovery orders: classify rejection (reuse `StopLossRejectionKind`), apply cooldown escalation, transition state
+- [x] On `OrderEvent::Cancelled` for exit orders: if market expired → resolve; if stale GTC → re-place in next refresh cycle
+- [x] Clean up `exit_orders_by_id` entries after order resolution
+- [x] Write test: exit fill routes correctly through lifecycle
+- [x] Write test: partial exit fill transitions to ResidualRisk
+- [x] Write test: recovery fill transitions to Cooldown
+- [x] Write test: rejection escalates cooldown correctly
+- [x] Run tests — must pass before task 17
 
 ### Task 17: Remove old stop-loss HashMaps
 - [ ] Remove `pending_stop_loss: RwLock<HashMap<TokenId, PendingStopLoss>>` from CryptoArbBase — replaced by lifecycle ExitExecuting state
