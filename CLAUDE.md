@@ -312,6 +312,20 @@ Production runs on an ARM VPS (`31.172.70.91`) via [Spot](https://github.com/ump
 
 **Spot gotchas**: `copy` paths must be absolute (`/home/deploy/polyrust/...`), not `~/...`. Use `mkdir: true` on the first copy entry to auto-create the directory.
 
+### Network Tunnel (SSH SOCKS proxy)
+
+All outbound traffic from the polyrust container is routed through a proxy VPS (`79.132.137.31`) via an SSH SOCKS5 tunnel. This is transparent — no code changes needed, WebSocket and HTTPS traffic both go through it.
+
+**Architecture**: `tunnel` sidecar container (Alpine + autossh + redsocks) shares network namespace with polyrust via `network_mode: "service:tunnel"`. iptables redirects all TCP → redsocks → SOCKS5 → SSH tunnel → proxy VPS → internet.
+
+**Files**: `tunnel/Dockerfile`, `tunnel/redsocks.conf`, `tunnel/entrypoint.sh`
+
+**SSH key**: SOPS-encrypted at `secrets/tunnel-key.yaml` (YAML wrapper, extract with `sops -d --extract '["key"]'`). Public key is deployed to `root@79.132.137.31`.
+
+**Tunnel env vars** (in `.env` or docker-compose): `TUNNEL_SSH_USER` (default: root), `TUNNEL_SSH_PORT` (default: 22), `SSH_HOST` (hardcoded: 79.132.137.31).
+
+**Verify tunnel**: `docker exec polyrust wget -qO- https://ifconfig.me` should return `79.132.137.31`.
+
 ## Danger Zones & Approvals
 
 - When adding a new workspace crate, update `Dockerfile` in 3 places: manifest `COPY`, dummy `RUN` source, and `find crates` touch
