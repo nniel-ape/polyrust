@@ -33,6 +33,8 @@ services:
 
       # Logging — polyrust=debug enables pipeline skip-reason diagnostics
       - RUST_LOG=${RUST_LOG:-info,polyrust=info}
+    env_file:
+      - .env
     restart: unless-stopped
     networks:
       - polyrust-net

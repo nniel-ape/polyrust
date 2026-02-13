@@ -2,11 +2,13 @@
 {% block content %}
 <h1 class="bp-page-title">Open Positions</h1>
 
-<div class="mb-4 bp-text-secondary" style="font-size: 0.85rem;">
-  Positions: {{ position_count }} · Unrealized P&amp;L: <span class="{{ total_unrealized_pnl_class }}">{{ total_unrealized_pnl }}</span>
+<div class="mb-4 bp-status-line">
+  <span>Positions: {{ position_count }}</span>
+  <span>Unrealized P&amp;L: <span class="{{ total_unrealized_pnl_class }}">{{ total_unrealized_pnl }}</span></span>
 </div>
 
 <div hx-ext="sse" sse-connect="/events/stream">
+  <div class="bp-table-scroll">
   <table class="bp-table">
     <thead>
       <tr>
@@ -39,6 +41,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
 
   {% if positions.is_empty() %}
   <p class="bp-text-muted mt-4">No open positions.</p>

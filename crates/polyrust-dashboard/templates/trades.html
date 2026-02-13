@@ -2,10 +2,13 @@
 {% block content %}
 <h1 class="bp-page-title">Trade History</h1>
 
-<div class="mb-4 bp-text-secondary" style="font-size: 0.85rem;">
-  Trades: {{ trade_count }} · Realized P&amp;L: <span class="{{ total_realized_pnl_class }}">{{ total_realized_pnl }}</span> · Fees: {{ total_fees }}
+<div class="mb-4 bp-status-line">
+  <span>Trades: {{ trade_count }}</span>
+  <span>Realized P&amp;L: <span class="{{ total_realized_pnl_class }}">{{ total_realized_pnl }}</span></span>
+  <span>Fees: {{ total_fees }}</span>
 </div>
 
+<div class="bp-table-scroll">
 <table class="bp-table">
   <thead>
     <tr>
@@ -42,6 +45,7 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 
 {% if trades.is_empty() %}
 <p class="bp-text-muted mt-4">No trades recorded.</p>

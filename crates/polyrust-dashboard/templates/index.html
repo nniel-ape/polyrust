@@ -2,8 +2,8 @@
 {% block content %}
 <h1 class="bp-page-title">Overview</h1>
 
-<div hx-ext="sse" sse-connect="/events/stream">
-  <div id="pnl-summary" sse-swap="pnl-update" hx-swap="innerHTML">
+<div hx-ext="sse, morph" sse-connect="/events/stream">
+  <div id="pnl-summary" sse-swap="pnl-update" hx-swap="morph:innerHTML">
     <div class="grid grid-cols-2 gap-4">
       <div class="bp-card">
         <div class="bp-metric-label">Unrealized P&amp;L</div>
@@ -31,8 +31,13 @@
     </div>
   </div>
 
-  <div class="mt-6 bp-text-secondary" style="font-size: 0.85rem;">
-    Trades: {{ trade_count }} · Positions: {{ position_count }} · Orders: {{ order_count }} · Locked: {{ locked_usdc }} · Uptime: {{ uptime }} · EventBus: {{ subscriber_count }}
+  <div class="mt-6 bp-status-line">
+    <span>Trades: {{ trade_count }}</span>
+    <span>Positions: {{ position_count }}</span>
+    <span>Orders: {{ order_count }}</span>
+    <span>Locked: {{ locked_usdc }}</span>
+    <span>Uptime: {{ uptime }}</span>
+    <span>EventBus: {{ subscriber_count }}</span>
   </div>
 </div>
 {% endblock %}

@@ -6,6 +6,7 @@
   <title>Polyrust Dashboard</title>
   <script src="https://unpkg.com/htmx.org@2.0.0" integrity="sha384-wS5l5IKJBvK6sPTKa2WZ1js3d947pvWXbPJ1OmWfEuxLgeHcEbjUUA5i9V5ZkpCw" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js" integrity="sha384-fw+eTlCc7suMV/1w/7fr2/PmwElUIt5i82bi+qTiLXvjRXZ2/FkiTNA/w0MhXnGI" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/idiomorph@0.3.0/dist/idiomorph-ext.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
   <style>
     :root {
@@ -75,6 +76,20 @@
       background: var(--bg-card);
       border: var(--border-width) solid var(--border-color);
       padding: 1rem;
+    }
+
+    /* --- Details disclosure marker --- */
+    summary { list-style: none; }
+    summary::-webkit-details-marker { display: none; }
+    summary::before {
+      content: "\25B6";  /* ▶ */
+      display: inline-block;
+      font-size: 0.65em;
+      margin-right: 0.5em;
+      transition: transform 0.15s;
+    }
+    details[open] > summary::before {
+      transform: rotate(90deg);
     }
 
     /* --- Section titles --- */
@@ -205,6 +220,83 @@
     .bp-text-secondary { color: var(--text-secondary); }
     .bp-text-enabled { color: var(--color-enabled); }
     .bp-text-warning { color: var(--color-warning); }
+
+    /* --- Nav toggle (hidden on desktop) --- */
+    .bp-nav-toggle {
+      display: none;
+      font-family: var(--font-data);
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      background: none;
+      border: var(--border-width) solid var(--border-color);
+      padding: 0.2rem 0.5rem;
+      cursor: pointer;
+    }
+    .bp-nav-toggle:hover { color: var(--text-primary); }
+
+    /* --- Nav links wrapper (transparent on desktop) --- */
+    .bp-nav-links { display: contents; }
+
+    /* --- Status line --- */
+    .bp-status-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+    .bp-status-line > span:not(:last-child)::after {
+      content: " · ";
+      color: var(--text-muted);
+    }
+
+    /* --- Table scroll wrapper --- */
+    .bp-table-scroll { overflow-x: auto; }
+
+    /* --- Mobile (max-width: 640px) --- */
+    @media (max-width: 640px) {
+      /* Nav: show toggle, vertical link list */
+      .bp-nav-toggle { display: inline-block; }
+      .bp-nav-links {
+        display: none;
+        flex-direction: column;
+        width: 100%;
+        padding-top: 0.5rem;
+      }
+      .bp-nav-links.open { display: flex; }
+      .bp-nav { flex-wrap: wrap; padding: 0.5rem 1rem; }
+      .bp-nav-link {
+        border-right: none;
+        padding: 0.4rem 0;
+        border-bottom: 1px dashed var(--border-color);
+      }
+      .bp-nav-link:last-child { border-bottom: none; }
+
+      /* Grid: force single column */
+      .grid.grid-cols-2,
+      .grid.grid-cols-3 { grid-template-columns: 1fr !important; }
+
+      /* Cards: allow table overflow */
+      .bp-card { overflow-x: auto; }
+
+      /* Tables: smaller text, tighter padding, no wrap */
+      .bp-table { font-size: 0.8rem; }
+      .bp-table thead th { font-size: 0.7rem; padding: 0.3rem 0.35rem; }
+      .bp-table tbody td { padding: 0.3rem 0.35rem; white-space: nowrap; }
+
+      /* Spacing: tighter main padding */
+      main.bp-grid-bg { padding: 1rem; }
+
+      /* Page title: smaller on mobile */
+      .bp-page-title { font-size: 1.25rem; margin-bottom: 1rem; }
+
+      /* Metric values: smaller on mobile */
+      .bp-metric-value { font-size: 1.15rem; }
+
+      /* Status line: remove dot separators, add gap */
+      .bp-status-line { gap: 0.15rem 0.75rem; }
+      .bp-status-line > span:not(:last-child)::after { content: none; }
+    }
   </style>
 </head>
 <body class="min-h-screen">
@@ -214,12 +306,15 @@
   </div>
   <nav class="bp-nav px-6 py-3 flex items-center gap-1">
     <span class="bp-nav-brand mr-4">Polyrust</span>
-    <a href="/" class="bp-nav-link">Overview</a>
-    <a href="/positions" class="bp-nav-link">Positions</a>
-    <a href="/trades" class="bp-nav-link">Trades</a>
-    {% for name in strategy_names %}
-    <a href="/strategy/{{ name }}" class="bp-nav-link bp-nav-link--strategy">{{ name }}</a>
-    {% endfor %}
+    <button class="bp-nav-toggle" onclick="this.nextElementSibling.classList.toggle('open')">[NAV]</button>
+    <div class="bp-nav-links">
+      <a href="/" class="bp-nav-link">Overview</a>
+      <a href="/positions" class="bp-nav-link">Positions</a>
+      <a href="/trades" class="bp-nav-link">Trades</a>
+      {% for name in strategy_names %}
+      <a href="/strategy/{{ name }}" class="bp-nav-link bp-nav-link--strategy">{{ name }}</a>
+      {% endfor %}
+    </div>
   </nav>
   <main class="bp-grid-bg max-w-6xl mx-auto px-6 py-8">
     {% block content %}{% endblock %}

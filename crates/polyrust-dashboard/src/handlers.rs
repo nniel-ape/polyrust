@@ -165,7 +165,11 @@ pub async fn index(State(state): State<AppState>) -> std::result::Result<Html<St
         (bal_state.available_usdc, bal_state.locked_usdc)
     };
 
-    let realized_pnl = state.store.sum_realized_pnl(None).await.unwrap_or(Decimal::ZERO);
+    let realized_pnl = state
+        .store
+        .sum_realized_pnl(None)
+        .await
+        .unwrap_or(Decimal::ZERO);
     let total_fees = state.store.sum_fees(None).await.unwrap_or(Decimal::ZERO);
     let trade_count = state.store.count_trades(None).await.unwrap_or(0);
 
@@ -251,7 +255,11 @@ pub async fn trades(State(state): State<AppState>) -> std::result::Result<Html<S
     let trade_list = state.store.list_trades(None, 50).await.unwrap_or_default();
 
     let trade_count = state.store.count_trades(None).await.unwrap_or(0);
-    let realized_pnl = state.store.sum_realized_pnl(None).await.unwrap_or(Decimal::ZERO);
+    let realized_pnl = state
+        .store
+        .sum_realized_pnl(None)
+        .await
+        .unwrap_or(Decimal::ZERO);
     let total_fees = state.store.sum_fees(None).await.unwrap_or(Decimal::ZERO);
 
     let (realized_str, realized_class) = fmt::fmt_pnl(realized_pnl);

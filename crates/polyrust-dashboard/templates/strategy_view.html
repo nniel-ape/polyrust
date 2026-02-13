@@ -2,8 +2,8 @@
 {% block content %}
 <h1 class="bp-page-title">Strategy: {{ strategy_name }}</h1>
 
-<div hx-ext="sse" sse-connect="/events/stream">
-  <div id="strategy-content" sse-swap="strategy-{{ strategy_name }}-update" hx-swap="innerHTML">
+<div hx-ext="sse, morph" sse-connect="/events/stream">
+  <div id="strategy-content" sse-swap="strategy-{{ strategy_name }}-update" hx-swap="morph:innerHTML">
     {{ content_html|safe }}
   </div>
 </div>

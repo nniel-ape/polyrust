@@ -42,7 +42,7 @@ async fn render_reference_prices(base: &CryptoArbBase, html: &mut String) {
         html.push_str("<th class=\"text-right\">Ref Price</th>");
         html.push_str("<th class=\"text-right\">Current</th>");
         html.push_str("<th class=\"text-right\">Change</th>");
-        html.push_str("<th class=\"text-right\">Prediction</th>");
+        html.push_str("<th class=\"text-right\">Pred</th>");
         html.push_str("</tr></thead><tbody>");
 
         let mut seen_coins = HashSet::new();
@@ -532,20 +532,116 @@ impl TailEndDashboard {
         html.push_str("</div>");
 
         // Config summary
-        html.push_str(r#"<div class="bp-card mb-4">"#);
-        html.push_str(r#"<h2 class="bp-section-title">Configuration</h2>"#);
+        let te = &self.base.config.tailend;
+        html.push_str(r#"<details class="bp-card mb-4">"#);
+        html.push_str(
+            r#"<summary class="bp-section-title" style="cursor:pointer">Configuration</summary>"#,
+        );
         html.push_str(r#"<div class="grid grid-cols-2 gap-2" style="font-size:0.95rem">"#);
+
+        // — Entry Timing —
+        html.push_str(r#"<div class="bp-text-muted" style="grid-column:1/-1;font-weight:600;margin-top:0.25rem">Entry Timing</div>"#);
         let _ = write!(
             html,
-            r#"<div class="bp-config-label">Time threshold:</div><div class="bp-config-value">&lt; {}s remaining</div>"#,
-            self.base.config.tailend.time_threshold_secs
+            r#"<div class="bp-config-label">Time window:</div><div class="bp-config-value">&lt; {}s</div>"#,
+            te.time_threshold_secs
+        );
+        // Dynamic thresholds as compact list
+        let thresh_str: Vec<String> = te
+            .dynamic_thresholds
+            .iter()
+            .map(|(s, p)| format!("{}s&rarr;{}", s, p))
+            .collect();
+        let _ = write!(
+            html,
+            r#"<div class="bp-config-label">Dynamic thresholds:</div><div class="bp-config-value">{}</div>"#,
+            thresh_str.join(", ")
         );
         let _ = write!(
             html,
-            r#"<div class="bp-config-label">Ask threshold:</div><div class="bp-config-value">&ge; {}</div>"#,
-            self.base.config.tailend.ask_threshold
+            r#"<div class="bp-config-label">Min ref quality:</div><div class="bp-config-value">{:?}</div>"#,
+            te.min_reference_quality
         );
-        html.push_str("</div></div>");
+
+        // — Market Filters —
+        html.push_str(r#"<div class="bp-text-muted" style="grid-column:1/-1;font-weight:600;margin-top:0.5rem">Market Filters</div>"#);
+        let _ = write!(
+            html,
+            r#"<div class="bp-config-label">Max spread:</div><div class="bp-config-value">{} bps</div>"#,
+            te.max_spread_bps
+        );
+        let _ = write!(
+            html,
+            r#"<div class="bp-config-label">Stale OB:</div><div class="bp-config-value">{}s</div>"#,
+            te.stale_ob_secs
+        );
+        let _ = write!(
+            html,
+            r#"<div class="bp-config-label">Sustained:</div><div class="bp-config-value">{}s / {} ticks</div>"#,
+            te.min_sustained_secs, te.min_sustained_ticks
+        );
+        let _ = write!(
+            html,
+            r#"<div class="bp-config-label">Max volatility:</div><div class="bp-config-value">{}%</div>"#,
+            te.max_recent_volatility * Decimal::from(100)
+        );
+        let _ = write!(
+            html,
+            r#"<div class="bp-config-label">Strike distance:</div><div class="bp-config-value">{}%</div>"#,
+            te.min_strike_distance_pct * Decimal::from(100)
+        );
+        let _ = write!(
+            html,
+            r#"<div class="bp-config-label">Rejection cooldown:</div><div class="bp-config-value">{}s</div>"#,
+            te.rejection_cooldown_secs
+        );
+
+        // — Post-Entry / Sell —
+        html.push_str(r#"<div class="bp-text-muted" style="grid-column:1/-1;font-weight:600;margin-top:0.5rem">Post-Entry / Sell</div>"#);
+        let _ = write!(
+            html,
+            r#"<div class="bp-config-label">Post-entry exit:</div><div class="bp-config-value">${} drop in {}s</div>"#,
+            te.post_entry_exit_drop, te.post_entry_window_secs
+        );
+        let _ = write!(
+            html,
+            r#"<div class="bp-config-label">Min sell delay:</div><div class="bp-config-value">{}s</div>"#,
+            te.min_sell_delay_secs
+        );
+        let _ = write!(
+            html,
+            r#"<div class="bp-config-label">Post-only:</div><div class="bp-config-value">{}</div>"#,
+            if te.post_only { "Yes" } else { "No" }
+        );
+
+        // — Composite Price —
+        html.push_str(r#"<div class="bp-text-muted" style="grid-column:1/-1;font-weight:600;margin-top:0.5rem">Composite Price</div>"#);
+        if te.use_composite_price {
+            let _ = write!(
+                html,
+                r#"<div class="bp-config-label">Min sources:</div><div class="bp-config-value">{}</div>"#,
+                te.min_sources
+            );
+            let _ = write!(
+                html,
+                r#"<div class="bp-config-label">Max source stale:</div><div class="bp-config-value">{}s</div>"#,
+                te.max_source_stale_secs
+            );
+            let _ = write!(
+                html,
+                r#"<div class="bp-config-label">Max dispersion:</div><div class="bp-config-value">{} bps</div>"#,
+                te.max_dispersion_bps
+            );
+            let _ = write!(
+                html,
+                r#"<div class="bp-config-label">Feed stale:</div><div class="bp-config-value">{}s</div>"#,
+                te.feed_stale_secs
+            );
+        } else {
+            html.push_str(r#"<div class="bp-config-label" style="grid-column:1/-1"><span class="bp-text-muted">Disabled</span></div>"#);
+        }
+
+        html.push_str("</div></details>");
 
         // Active markets
         {
@@ -654,7 +750,7 @@ impl TailEndDashboard {
                 html.push_str("<th class=\"text-left\">Coin</th>");
                 html.push_str("<th class=\"text-right\">Time Left</th>");
                 html.push_str("<th class=\"text-right\">Ask</th>");
-                html.push_str("<th class=\"text-right\">Confidence</th>");
+                html.push_str("<th class=\"text-right\">Conf</th>");
                 html.push_str("<th class=\"text-right\">Quality</th>");
                 html.push_str("</tr></thead><tbody>");
 
