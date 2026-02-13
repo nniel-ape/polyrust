@@ -50,6 +50,9 @@ pub enum StopLossRejectionKind {
     /// "not enough balance" or "allowance" — token settlement issue.
     /// Uses longer cooldowns.
     BalanceAllowance,
+    /// "invalid amounts" / "must be higher than 0" — dust position too small to sell.
+    /// Position should be removed immediately; no cooldown retry.
+    InvalidSize,
     /// Everything else — treated like balance/allowance (longer cooldowns).
     Transient,
 }
@@ -62,6 +65,8 @@ impl StopLossRejectionKind {
             Self::Liquidity
         } else if lower.contains("not enough balance") || lower.contains("allowance") {
             Self::BalanceAllowance
+        } else if lower.contains("invalid amounts") || lower.contains("must be higher than 0") {
+            Self::InvalidSize
         } else {
             Self::Transient
         }
@@ -71,7 +76,7 @@ impl StopLossRejectionKind {
     pub fn cooldown_schedule<'a>(&self, liquidity: &'a [u64], balance: &'a [u64]) -> &'a [u64] {
         match self {
             Self::Liquidity => liquidity,
-            Self::BalanceAllowance | Self::Transient => balance,
+            Self::BalanceAllowance | Self::Transient | Self::InvalidSize => balance,
         }
     }
 }
@@ -1706,6 +1711,22 @@ impl CryptoArbBase {
             return None;
         }
 
+        // Skip stop-loss for dust positions below min order size (unsellable)
+        {
+            let markets = self.active_markets.read().await;
+            if let Some(active) = markets.get(&pos.market_id)
+                && pos.size < active.market.min_order_size
+            {
+                debug!(
+                    token_id = %pos.token_id,
+                    size = %pos.size,
+                    min = %active.market.min_order_size,
+                    "Stop-loss skipped: dust position below min order size"
+                );
+                return None;
+            }
+        }
+
         // Check crypto price reversal
         let current_crypto = self.get_latest_price(&pos.coin).await;
 
@@ -1920,6 +1941,34 @@ impl CryptoArbBase {
         drop(pending_sl);
 
         let kind = StopLossRejectionKind::classify(reason);
+
+        // InvalidSize: dust position too small to sell — remove immediately, no retry
+        if kind == StopLossRejectionKind::InvalidSize {
+            // Find and remove the dust position
+            let positions = self.positions.read().await;
+            let dust_size = positions
+                .values()
+                .flat_map(|v| v.iter())
+                .find(|p| p.token_id == *token_id)
+                .map(|p| p.size);
+            drop(positions);
+
+            if let Some(size) = dust_size {
+                self.reduce_or_remove_position_by_token(token_id, size).await;
+                warn!(
+                    token_id = %token_id,
+                    mode = mode_name,
+                    dust_size = %size,
+                    reason = %reason,
+                    "Removed unsellable dust position after InvalidSize rejection — will resolve at expiry"
+                );
+            }
+            // Clean up retry state
+            self.stop_loss_retry_counts.write().await.remove(token_id);
+            self.stop_loss_cooldowns.write().await.remove(token_id);
+            self.stop_loss_use_gtc.write().await.remove(token_id);
+            return;
+        }
 
         // Increment retry count for escalating cooldowns
         let retry_count = {

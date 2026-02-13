@@ -951,12 +951,33 @@ impl TailEndStrategy {
                             - (exit_fee * size);
                         self.base.record_trade_pnl(&pos.mode, pnl).await;
                         if !fully_closed {
-                            warn!(
-                                token_id = %token_id,
-                                fill_size = %size,
-                                remaining = %(pos.size - size),
-                                "FOK stop-loss partial fill: residual position kept"
-                            );
+                            let remaining = pos.size - size;
+                            // Check if residual is below minimum order size (unsellable dust)
+                            let is_dust = {
+                                let markets = self.base.active_markets.read().await;
+                                markets
+                                    .get(&pos.market_id)
+                                    .map(|m| remaining < m.market.min_order_size)
+                                    .unwrap_or(true)
+                            };
+                            if is_dust {
+                                // Remove dust — too small to sell, will resolve at expiry
+                                self.base
+                                    .reduce_or_remove_position_by_token(token_id, remaining)
+                                    .await;
+                                warn!(
+                                    token_id = %token_id,
+                                    dust_size = %remaining,
+                                    "Removed unsellable dust after FOK partial fill — will resolve at expiry"
+                                );
+                            } else {
+                                warn!(
+                                    token_id = %token_id,
+                                    fill_size = %size,
+                                    remaining = %remaining,
+                                    "FOK stop-loss partial fill: residual position kept"
+                                );
+                            }
                         }
                         info!(
                             token_id = %token_id,
