@@ -36,7 +36,15 @@ polymarket-client-sdk = { version = "0.4", features = [
 
 # Alloy for on-chain interaction (CTF redemption)
 # Version must match polymarket-client-sdk's alloy dependency (1.5.2)
-alloy = { version = "1.5", features = ["full", "node-bindings", "rpc-types", "signer-local"] }
+alloy = { version = "1.5", features = [
+    "signers",
+    "signer-local",
+    "sol-types",
+    "dyn-abi",
+    "network",
+    "provider-http",
+    "contract",
+] }
 alloy-primitives = "1.1"
 
 # Internal crates
@@ -87,5 +95,3 @@ path = "examples/simple_strategy.rs"
 name = "run_backtest"
 path = "examples/run_backtest.rs"
 
-[patch.crates-io]
-polymarket-client-sdk = { git = "https://github.com/nniel-ape/rs-clob-client.git", branch = "fix/heartbeat-clone-drop" }
