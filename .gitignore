@@ -17,6 +17,9 @@ progress*.txt
 backtest_output.txt
 sweep_results*
 
+# Ralphex (local-only)
+.ralphex/
+
 # Spot deployment artifacts
 .env.deploy
 .tunnel-key.deploy
