@@ -2158,15 +2158,35 @@ impl Strategy for TailEndStrategy {
                 filled_size,
                 remaining_size,
             }) => {
-                let mut limits = self.base.open_limit_orders.write().await;
-                if let Some(lo) = limits.get_mut(order_id) {
-                    lo.size = *remaining_size;
+                // Check exit orders first (GTC exits can partially fill)
+                let exit_meta = {
+                    let exit_orders = self.base.exit_orders_by_id.read().await;
+                    exit_orders.get(order_id).cloned()
+                };
+                if let Some(meta) = exit_meta {
+                    // Reduce position by the filled amount so subsequent
+                    // Cancelled/Filled handlers see the correct remaining size.
+                    self.base
+                        .reduce_or_remove_position_by_token(&meta.token_id, *filled_size)
+                        .await;
                     info!(
                         order_id = %order_id,
+                        token_id = %meta.token_id,
                         filled = %filled_size,
                         remaining = %remaining_size,
-                        "TailEnd GTC order partially filled"
+                        "Exit order partially filled — position reduced"
                     );
+                } else {
+                    let mut limits = self.base.open_limit_orders.write().await;
+                    if let Some(lo) = limits.get_mut(order_id) {
+                        lo.size = *remaining_size;
+                        info!(
+                            order_id = %order_id,
+                            filled = %filled_size,
+                            remaining = %remaining_size,
+                            "TailEnd GTC order partially filled"
+                        );
+                    }
                 }
                 vec![]
             }
@@ -2194,102 +2214,126 @@ impl Strategy for TailEndStrategy {
                         );
                     }
 
-                    // Check if this is a lifecycle-driven exit order rejection
-                    let lifecycle = self.base.ensure_lifecycle(token_id).await;
-                    if matches!(lifecycle.state, PositionLifecycleState::ExitExecuting { .. }) {
-                        let now = self.base.event_time().await;
-                        let kind = StopLossRejectionKind::classify(reason);
+                    // Look up exit order meta by order_token_id to resolve the
+                    // position's token_id (which differs from the event's token_id
+                    // for recovery orders that operate on the opposite token).
+                    let exit_meta = {
+                        let exit_orders = self.base.exit_orders_by_id.read().await;
+                        exit_orders
+                            .iter()
+                            .find(|(_, meta)| meta.order_token_id == *token_id)
+                            .map(|(_, meta)| meta.clone())
+                    };
 
-                        // Get remaining size from position
-                        let remaining_size = {
-                            let positions = self.base.positions.read().await;
-                            positions
-                                .values()
-                                .flat_map(|v| v.iter())
-                                .find(|p| p.token_id == *token_id)
-                                .map(|p| p.size)
-                        };
+                    // Only check lifecycle if we have a tracked exit/recovery order,
+                    // or if a lifecycle already exists for this token. Avoids creating
+                    // orphaned lifecycle entries via ensure_lifecycle for rejected
+                    // BUY orders that have no position.
+                    let position_token = exit_meta
+                        .as_ref()
+                        .map(|m| m.token_id.as_str())
+                        .unwrap_or(token_id);
 
-                        if let Some(remaining) = remaining_size {
-                            // InvalidSize: dust — remove immediately
-                            if kind == StopLossRejectionKind::InvalidSize {
-                                warn!(
-                                    token_id = %token_id,
-                                    remaining = %remaining,
-                                    "Exit order rejected (InvalidSize) — removing dust position"
-                                );
-                                self.base
-                                    .reduce_or_remove_position_by_token(token_id, remaining)
+                    let lifecycle = {
+                        let lifecycles = self.base.position_lifecycle.read().await;
+                        lifecycles.get(position_token).cloned()
+                    };
+
+                    if let Some(lifecycle) = lifecycle {
+                        if matches!(lifecycle.state, PositionLifecycleState::ExitExecuting { .. }) {
+                            let now = self.base.event_time().await;
+                            let kind = StopLossRejectionKind::classify(reason);
+
+                            // Get remaining size from position
+                            let remaining_size = {
+                                let positions = self.base.positions.read().await;
+                                positions
+                                    .values()
+                                    .flat_map(|v| v.iter())
+                                    .find(|p| p.token_id == position_token)
+                                    .map(|p| p.size)
+                            };
+
+                            if let Some(remaining) = remaining_size {
+                                // InvalidSize: dust — remove immediately
+                                if kind == StopLossRejectionKind::InvalidSize {
+                                    warn!(
+                                        token_id = %position_token,
+                                        remaining = %remaining,
+                                        "Exit order rejected (InvalidSize) — removing dust position"
+                                    );
+                                    self.base
+                                        .reduce_or_remove_position_by_token(position_token, remaining)
+                                        .await;
+                                } else {
+                                    // Transition to ResidualRisk
+                                    let use_gtc = kind == StopLossRejectionKind::Liquidity
+                                        && self.base.config.stop_loss.gtc_fallback;
+                                    self.transition_to_residual_risk(
+                                        position_token,
+                                        remaining,
+                                        1, // First retry
+                                        use_gtc,
+                                        &format!("exit rejected: {reason}"),
+                                        now,
+                                    )
                                     .await;
-                            } else {
-                                // Transition to ResidualRisk
-                                let use_gtc = kind == StopLossRejectionKind::Liquidity
-                                    && self.base.config.stop_loss.gtc_fallback;
-                                self.transition_to_residual_risk(
-                                    token_id,
-                                    remaining,
-                                    1, // First retry
-                                    use_gtc,
-                                    &format!("exit rejected: {reason}"),
-                                    now,
-                                )
-                                .await;
-                                warn!(
-                                    token_id = %token_id,
-                                    reason = %reason,
-                                    kind = ?kind,
-                                    use_gtc,
-                                    "Exit order rejected — transitioned to ResidualRisk"
-                                );
+                                    warn!(
+                                        token_id = %position_token,
+                                        reason = %reason,
+                                        kind = ?kind,
+                                        use_gtc,
+                                        "Exit order rejected — transitioned to ResidualRisk"
+                                    );
+                                }
                             }
+
+                            // Clean up exit order tracking
+                            {
+                                let mut exit_orders = self.base.exit_orders_by_id.write().await;
+                                exit_orders.retain(|_, meta| meta.token_id != position_token);
+                            }
+
+                            return Ok(vec![]);
                         }
 
-                        // Clean up exit order tracking
-                        {
-                            let mut exit_orders = self.base.exit_orders_by_id.write().await;
-                            exit_orders.retain(|_, meta| meta.token_id != *token_id);
+                        if matches!(lifecycle.state, PositionLifecycleState::RecoveryProbe { .. }) {
+                            // Recovery failed — accept loss, resolve position
+                            let pos_info = {
+                                let positions = self.base.positions.read().await;
+                                positions
+                                    .values()
+                                    .flat_map(|v| v.iter())
+                                    .find(|p| p.token_id == position_token)
+                                    .map(|p| (p.size, p.market_id.clone()))
+                            };
+
+                            warn!(
+                                token_id = %position_token,
+                                reason = %reason,
+                                remaining = ?pos_info.as_ref().map(|(s, _)| s),
+                                "Recovery order rejected — accepting loss, resolving position"
+                            );
+
+                            if let Some((remaining, market_id)) = pos_info {
+                                // Record recovery exit cooldown for re-entry gating
+                                self.base.record_recovery_exit_cooldown(&market_id).await;
+                                self.base
+                                    .reduce_or_remove_position_by_token(position_token, remaining)
+                                    .await;
+                            }
+
+                            // Clean up
+                            {
+                                let mut exit_orders = self.base.exit_orders_by_id.write().await;
+                                exit_orders.retain(|_, meta| meta.token_id != position_token);
+                            }
+                            // Lifecycle was already cleaned up by reduce_or_remove_position_by_token
+                            // if fully closed. If not, force-remove lifecycle.
+                            self.base.remove_lifecycle(position_token).await;
+
+                            return Ok(vec![]);
                         }
-
-                        return Ok(vec![]);
-                    }
-
-                    // Check if this is a recovery order rejection
-                    if matches!(lifecycle.state, PositionLifecycleState::RecoveryProbe { .. }) {
-                        // Recovery failed — accept loss, resolve position
-                        let pos_info = {
-                            let positions = self.base.positions.read().await;
-                            positions
-                                .values()
-                                .flat_map(|v| v.iter())
-                                .find(|p| p.token_id == *token_id)
-                                .map(|p| (p.size, p.market_id.clone()))
-                        };
-
-                        warn!(
-                            token_id = %token_id,
-                            reason = %reason,
-                            remaining = ?pos_info.as_ref().map(|(s, _)| s),
-                            "Recovery order rejected — accepting loss, resolving position"
-                        );
-
-                        if let Some((remaining, market_id)) = pos_info {
-                            // Record recovery exit cooldown for re-entry gating
-                            self.base.record_recovery_exit_cooldown(&market_id).await;
-                            self.base
-                                .reduce_or_remove_position_by_token(token_id, remaining)
-                                .await;
-                        }
-
-                        // Clean up
-                        {
-                            let mut exit_orders = self.base.exit_orders_by_id.write().await;
-                            exit_orders.retain(|_, meta| meta.token_id != *token_id);
-                        }
-                        // Lifecycle was already cleaned up by reduce_or_remove_position_by_token
-                        // if fully closed. If not, force-remove lifecycle.
-                        self.base.remove_lifecycle(token_id).await;
-
-                        return Ok(vec![]);
                     }
 
                 }

@@ -451,6 +451,24 @@ impl StopLossConfig {
                 self.exit_depth_cap_factor
             ));
         }
+        if self.hard_drop_abs <= Decimal::ZERO {
+            return Err(format!(
+                "hard_drop_abs must be positive, got {}",
+                self.hard_drop_abs
+            ));
+        }
+        if self.hard_reversal_pct <= Decimal::ZERO {
+            return Err(format!(
+                "hard_reversal_pct must be positive, got {}",
+                self.hard_reversal_pct
+            ));
+        }
+        if self.trailing_arm_distance <= Decimal::ZERO {
+            return Err(format!(
+                "trailing_arm_distance must be positive, got {}",
+                self.trailing_arm_distance
+            ));
+        }
         Ok(())
     }
 }
