@@ -233,23 +233,23 @@ This prevents holding unhedged directional risk.
 - [x] Run `cargo clippy --workspace -- -D warnings` — must pass
 
 ### Task 8: Verify acceptance criteria
-- [ ] Verify all requirements from Overview are implemented:
-  - [ ] Market discovery via Gamma API with configurable filters
-  - [ ] Real-time arbitrage detection from orderbook updates
-  - [ ] Paired FOK order execution (buy YES + NO simultaneously)
-  - [ ] Partial fill detection + emergency unwind
-  - [ ] Position tracking (paired positions awaiting resolution)
-  - [ ] Redemption via existing CtfRedeemer (RedeemPosition action)
-  - [ ] Dashboard with opportunities, positions, and execution status
-  - [ ] Configuration via `[dutch_book]` TOML section
-- [ ] Verify edge cases:
-  - [ ] No crash on empty orderbooks
-  - [ ] No crash on markets with one-sided liquidity only
-  - [ ] Position limit enforced
-  - [ ] Emergency unwind fires on partial fills
-- [ ] Run full test suite: `cargo test --workspace`
-- [ ] Run linter: `cargo clippy --workspace -- -D warnings`
-- [ ] Verify `cargo build --release` succeeds
+- [x] Verify all requirements from Overview are implemented:
+  - [x] Market discovery via Gamma API with configurable filters
+  - [x] Real-time arbitrage detection from orderbook updates
+  - [x] Paired FOK order execution (buy YES + NO simultaneously)
+  - [x] Partial fill detection + emergency unwind
+  - [x] Position tracking (paired positions awaiting resolution)
+  - [x] Redemption via existing CtfRedeemer (RedeemPosition action)
+  - [x] Dashboard with opportunities, positions, and execution status
+  - [x] Configuration via `[dutch_book]` TOML section
+- [x] Verify edge cases:
+  - [x] No crash on empty orderbooks
+  - [x] No crash on markets with one-sided liquidity only
+  - [x] Position limit enforced
+  - [x] Emergency unwind fires on partial fills
+- [x] Run full test suite: `cargo test --workspace`
+- [x] Run linter: `cargo clippy --workspace -- -D warnings`
+- [x] Verify `cargo build --release` succeeds
 
 ### Task 9: [Final] Update documentation
 - [ ] Update `config.example.toml` with complete `[dutch_book]` documentation
