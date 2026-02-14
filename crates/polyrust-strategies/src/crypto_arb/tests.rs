@@ -514,6 +514,7 @@ async fn base_can_open_position() {
                 fee_rate_bps: 0,
                 entry_order_type: OrderType::Gtc,
                 entry_fee_per_share: Decimal::ZERO,
+                recovery_cost: Decimal::ZERO,
 
             };
             positions
@@ -1055,6 +1056,7 @@ fn make_position(
         fee_rate_bps: 0,
         entry_order_type: OrderType::Gtc,
         entry_fee_per_share: Decimal::ZERO,
+        recovery_cost: Decimal::ZERO,
 
     }
 }
@@ -3198,6 +3200,8 @@ fn exit_order_meta_fields() {
         order_type: OrderType::Fok,
         source_state: "ExitExecuting".to_string(),
         retry_count: 0,
+        exit_price: dec!(0.85),
+        clip_size: dec!(10),
     };
     assert_eq!(meta.token_id, "token-123");
     assert_eq!(meta.order_type, OrderType::Fok);
@@ -3267,6 +3271,7 @@ fn fok_entry_has_computed_taker_fee_per_share() {
         fee_rate_bps: 315,
         entry_order_type: OrderType::Fok,
         entry_fee_per_share: expected_fee,
+        recovery_cost: Decimal::ZERO,
 
     };
 
@@ -3413,6 +3418,8 @@ async fn remove_lifecycle_also_cleans_exit_orders() {
                 order_type: OrderType::Fok,
                 source_state: "ExitExecuting".to_string(),
                 retry_count: 0,
+                exit_price: dec!(0.85),
+                clip_size: dec!(10),
             },
         );
         // Add an unrelated exit order too
@@ -3424,6 +3431,8 @@ async fn remove_lifecycle_also_cleans_exit_orders() {
                 order_type: OrderType::Gtc,
                 source_state: "ResidualRisk".to_string(),
                 retry_count: 0,
+                exit_price: dec!(0.80),
+                clip_size: dec!(5),
             },
         );
     }

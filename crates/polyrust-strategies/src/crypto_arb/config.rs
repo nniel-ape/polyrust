@@ -444,6 +444,42 @@ impl StopLossConfig {
                 self.trailing_arm_distance
             ));
         }
+        if self.sl_min_sources == 0 {
+            return Err("sl_min_sources must be >= 1".to_string());
+        }
+        if self.sl_max_book_age_ms <= 0 {
+            return Err(format!(
+                "sl_max_book_age_ms must be positive, got {}",
+                self.sl_max_book_age_ms
+            ));
+        }
+        if self.sl_max_external_age_ms <= 0 {
+            return Err(format!(
+                "sl_max_external_age_ms must be positive, got {}",
+                self.sl_max_external_age_ms
+            ));
+        }
+        if self.max_exit_retries == 0 {
+            return Err("max_exit_retries must be >= 1".to_string());
+        }
+        if self.recovery_max_set_cost <= Decimal::ZERO {
+            return Err(format!(
+                "recovery_max_set_cost must be positive, got {}",
+                self.recovery_max_set_cost
+            ));
+        }
+        if self.recovery_max_extra_frac < Decimal::ZERO || self.recovery_max_extra_frac > Decimal::ONE {
+            return Err(format!(
+                "recovery_max_extra_frac must be in [0, 1], got {}",
+                self.recovery_max_extra_frac
+            ));
+        }
+        if self.reentry_cooldown_secs < 0 {
+            return Err(format!(
+                "reentry_cooldown_secs must be non-negative, got {}",
+                self.reentry_cooldown_secs
+            ));
+        }
         Ok(())
     }
 }

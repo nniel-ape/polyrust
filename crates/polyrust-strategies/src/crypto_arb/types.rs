@@ -203,6 +203,9 @@ pub struct ArbitragePosition {
     pub entry_order_type: OrderType,
     /// Actual fee per share at entry: 0 for GTC (maker), `taker_fee(price, rate)` for FOK.
     pub entry_fee_per_share: Decimal,
+    /// Accumulated recovery cost (negative value) from opposite-side buys.
+    /// Included in settlement P&L so win/loss classification reflects true net outcome.
+    pub recovery_cost: Decimal,
 }
 
 impl ArbitragePosition {
@@ -235,6 +238,7 @@ impl ArbitragePosition {
             fee_rate_bps: lo.fee_rate_bps,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
+            recovery_cost: Decimal::ZERO,
         }
     }
 }
@@ -323,6 +327,13 @@ impl ModeStats {
         if self.recent_pnl.len() > self.window_size {
             self.recent_pnl.pop_front();
         }
+    }
+
+    /// Adjust total P&L without counting as a separate trade.
+    /// Used for costs that are part of an existing trade lifecycle
+    /// (e.g., recovery buy cost) to avoid inflating trade count and win rate.
+    pub fn adjust_pnl(&mut self, amount: Decimal) {
+        self.total_pnl += amount;
     }
 
     /// Total completed trades (won + lost).
@@ -916,6 +927,14 @@ pub struct ExitOrderMeta {
     pub source_state: String,
     /// Retry count at time of order submission (for escalation after cancel).
     pub retry_count: u32,
+    /// Limit price the order was placed at. Used to compute P&L when a
+    /// cancel-failed "matched" response indicates the order was filled on the
+    /// CLOB before the cancel arrived.
+    pub exit_price: Decimal,
+    /// Size of the order clip placed. May be smaller than position size due
+    /// to depth-capping. Used for cancel-matched fill accounting since the
+    /// CLOB API does not return the matched size.
+    pub clip_size: Decimal,
 }
 
 /// Compute the exit clip size for a single exit order, capped by available

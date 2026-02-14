@@ -1323,11 +1323,16 @@ impl CryptoArbBase {
                     _ => false,
                 };
                 // Use entry_fee_per_share (0 for GTC entry, actual taker fee for FOK entry)
+                // Include recovery_cost (negative) so win/loss classification reflects
+                // the true net outcome including any opposite-side recovery buys.
                 let pnl = if won {
                     (Decimal::ONE - pos.entry_price) * pos.size
                         - (pos.entry_fee_per_share * pos.size)
+                        + pos.recovery_cost
                 } else {
-                    -(pos.entry_price * pos.size) - (pos.entry_fee_per_share * pos.size)
+                    -(pos.entry_price * pos.size)
+                        - (pos.entry_fee_per_share * pos.size)
+                        + pos.recovery_cost
                 };
                 self.record_trade_pnl(pnl).await;
                 // Clean up lifecycle state for expired positions
@@ -1524,7 +1529,7 @@ impl CryptoArbBase {
         };
 
         if size < market.min_order_size {
-            warn!(
+            debug!(
                 market = %market_id,
                 size = %size,
                 min_order_size = %market.min_order_size,
@@ -1777,6 +1782,25 @@ impl CryptoArbBase {
     pub async fn record_trade_pnl(&self, pnl: Decimal) {
         let mut s = self.stats.write().await;
         s.record(pnl);
+    }
+
+    /// Adjust total P&L without counting as a separate trade in stats.
+    /// Used for costs that are part of an existing trade lifecycle (e.g.,
+    /// recovery buy cost) to avoid inflating trade count and skewing win rate.
+    pub async fn adjust_trade_pnl(&self, amount: Decimal) {
+        let mut s = self.stats.write().await;
+        s.adjust_pnl(amount);
+    }
+
+    /// Accumulate recovery cost on a position so settlement P&L includes it.
+    pub async fn add_recovery_cost(&self, token_id: &str, cost: Decimal) {
+        let mut positions = self.positions.write().await;
+        for pos_list in positions.values_mut() {
+            if let Some(pos) = pos_list.iter_mut().find(|p| p.token_id == token_id) {
+                pos.recovery_cost += cost;
+                return;
+            }
+        }
     }
 
     // -------------------------------------------------------------------------

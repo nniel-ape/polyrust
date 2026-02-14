@@ -87,21 +87,29 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for PbMakeWriter {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Check for CLI flags before tracing init so we can adjust the log filter.
+    let args: Vec<String> = std::env::args().collect();
+    let backtest_mode = args.contains(&"--backtest".to_string());
+    let backtest_sweep_mode = args.contains(&"--backtest-sweep".to_string());
+    let verify_mode = args.contains(&"--verify".to_string());
+
+    // Sweep mode: suppress per-run strategy/engine noise so the progress bar stays visible.
+    // RUST_LOG still overrides if the user wants verbose output.
+    let default_filter = if backtest_sweep_mode {
+        "warn,polyrust_backtest::sweep=info"
+    } else {
+        "info,polyrust=debug"
+    };
+
     // Initialize tracing — route output through PbMakeWriter so log lines
     // print cleanly above any active indicatif progress bar.
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,polyrust=debug")),
+                .unwrap_or_else(|_| EnvFilter::new(default_filter)),
         )
         .with_writer(PbMakeWriter)
         .init();
-
-    // Check for CLI flags
-    let args: Vec<String> = std::env::args().collect();
-    let backtest_mode = args.contains(&"--backtest".to_string());
-    let backtest_sweep_mode = args.contains(&"--backtest-sweep".to_string());
-    let verify_mode = args.contains(&"--verify".to_string());
 
     if verify_mode {
         info!("Starting in verify mode");
@@ -703,6 +711,7 @@ async fn run_backtest() -> anyhow::Result<()> {
     // Backtest can't produce Historical quality (record_price uses wall clock)
     arb_config.tailend.min_reference_quality = ReferenceQualityLevel::Current;
     arb_config.use_chainlink = false; // No RPC in backtest
+    arb_config.tailend.stale_ob_secs = i64::MAX; // Staleness meaningless in backtest
 
     // Instantiate strategy based on strategy_name
     let strategy: Box<dyn Strategy> = match backtest_config.strategy_name.as_str() {

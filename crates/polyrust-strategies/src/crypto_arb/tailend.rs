@@ -545,7 +545,7 @@ impl TailEndStrategy {
             fee_rate_bps: pending.fee_rate_bps,
             entry_order_type: pending.order_type,
             entry_fee_per_share,
-
+            recovery_cost: Decimal::ZERO,
         };
 
         info!(
@@ -1245,6 +1245,8 @@ impl TailEndStrategy {
                     order_type: OrderType::Fok,
                     source_state: format!("{trigger_kind}"),
                     retry_count: 0,
+                    exit_price: current_bid,
+                    clip_size: clip,
                 },
             );
         }
@@ -1478,6 +1480,8 @@ impl TailEndStrategy {
                         order_type: OrderType::Gtc,
                         source_state: format!("ResidualRisk(retry={retry_count})"),
                         retry_count,
+                        exit_price,
+                        clip_size: clip,
                     },
                 );
             }
@@ -1532,6 +1536,8 @@ impl TailEndStrategy {
                     order_type: OrderType::Fok,
                     source_state: format!("ResidualRisk(retry={retry_count})"),
                     retry_count,
+                    exit_price: current_bid,
+                    clip_size: clip,
                 },
             );
         }
@@ -1660,6 +1666,8 @@ impl TailEndStrategy {
                     order_type: OrderType::Fok,
                     source_state: "RecoveryProbe(set_completion)".to_string(),
                     retry_count: 0,
+                    exit_price: other_ask,
+                    clip_size: clip,
                 },
             );
         }
@@ -1812,6 +1820,8 @@ impl TailEndStrategy {
                     order_type: OrderType::Fok,
                     source_state: "RecoveryProbe(opposite_alpha)".to_string(),
                     retry_count: 0,
+                    exit_price: other_ask,
+                    clip_size: clip,
                 },
             );
         }
@@ -1953,6 +1963,19 @@ impl TailEndStrategy {
 
                         self.base.remove_lifecycle(&meta.token_id).await;
                     } else {
+                        // Record the cost of the opposite-side buy on the position.
+                        // Set completion redeems for $1.00/share at expiry; the net
+                        // recovery P&L is (1.0 - entry_price - recovery_price) * size
+                        // minus fees. We store recovery cost on the position so the
+                        // expiry handler's settlement P&L includes it for correct
+                        // win/loss classification and recent_pnl tracking.
+                        let recovery_fee =
+                            taker_fee(price, self.base.config.fee.taker_fee_rate);
+                        let recovery_cost = -(price + recovery_fee) * size;
+                        self.base
+                            .add_recovery_cost(&meta.token_id, recovery_cost)
+                            .await;
+
                         let cooldown_until =
                             now + chrono::Duration::seconds(sl_config.reentry_cooldown_secs);
 
@@ -1978,6 +2001,7 @@ impl TailEndStrategy {
                             source = %meta.source_state,
                             fill_price = %price,
                             fill_size = %size,
+                            recovery_cost = %recovery_cost,
                             cooldown_secs = sl_config.reentry_cooldown_secs,
                             "Recovery order filled — transitioning to Cooldown"
                         );
@@ -2435,8 +2459,231 @@ impl Strategy for TailEndStrategy {
             }
 
             Event::OrderUpdate(OrderEvent::CancelFailed { order_id, reason }) => {
-                let (_found, fill_actions) = self.base.handle_cancel_failed(order_id, reason).await;
-                fill_actions
+                // First check if this is a lifecycle exit/recovery order
+                let exit_meta = {
+                    let exit_orders = self.base.exit_orders_by_id.read().await;
+                    exit_orders.get(order_id).cloned()
+                };
+                if let Some(meta) = exit_meta {
+                    let is_matched = reason.contains("matched");
+                    let is_gone = reason.contains("canceled")
+                        || reason.contains("not found");
+
+                    if is_matched {
+                        // Order was filled on the CLOB before our cancel arrived.
+                        // Treat as a fill using the order's limit price (GTC fills
+                        // at limit price or better; we use the limit price as a
+                        // conservative estimate since actual fill price is unknown).
+                        let fill_price = meta.exit_price;
+                        let now = self.base.event_time().await;
+
+                        if meta.source_state.starts_with("RecoveryProbe") {
+                            // Recovery order matched — handle like recovery fill
+                            // Use clip_size from order meta (recovery orders use full
+                            // remaining size, stored at placement time)
+                            let fill_size = meta.clip_size;
+                            let sl_config = &self.base.config.stop_loss;
+
+                            if fill_size > Decimal::ZERO {
+                                let recovery_fee = taker_fee(
+                                    fill_price,
+                                    self.base.config.fee.taker_fee_rate,
+                                );
+                                let recovery_cost =
+                                    -(fill_price + recovery_fee) * fill_size;
+                                self.base
+                                    .add_recovery_cost(&meta.token_id, recovery_cost)
+                                    .await;
+
+                                let mut lifecycle =
+                                    self.base.ensure_lifecycle(&meta.token_id).await;
+                                let cooldown_until = now
+                                    + chrono::Duration::seconds(
+                                        sl_config.reentry_cooldown_secs,
+                                    );
+                                if let Err(e) = lifecycle.transition(
+                                    PositionLifecycleState::Cooldown {
+                                        until: cooldown_until,
+                                    },
+                                    &format!(
+                                        "cancel-matched recovery: {} at {}",
+                                        meta.source_state, fill_price
+                                    ),
+                                    now,
+                                ) {
+                                    warn!(
+                                        token_id = %meta.token_id,
+                                        error = %e,
+                                        "RecoveryProbe→Cooldown transition failed (cancel-matched)"
+                                    );
+                                }
+                                lifecycle.pending_exit_order_id = None;
+                                self.write_lifecycle(&meta.token_id, &lifecycle).await;
+
+                                info!(
+                                    order_id = %order_id,
+                                    token_id = %meta.token_id,
+                                    fill_price = %fill_price,
+                                    clip_size = %fill_size,
+                                    "Recovery order cancel-failed (matched) — treated as fill, transitioning to Cooldown"
+                                );
+                            } else {
+                                warn!(
+                                    order_id = %order_id,
+                                    token_id = %meta.token_id,
+                                    "Recovery cancel-matched but clip_size is zero — cleaning up lifecycle"
+                                );
+                                let mut lifecycle =
+                                    self.base.ensure_lifecycle(&meta.token_id).await;
+                                lifecycle.pending_exit_order_id = None;
+                                self.write_lifecycle(&meta.token_id, &lifecycle).await;
+                            }
+                        } else {
+                            // Exit order matched — handle like exit fill
+                            let is_gtc_exit = meta.order_type == OrderType::Gtc;
+
+                            // Use the clip size from the order meta (not full position size)
+                            // since exit orders are depth-capped and may be smaller than position
+                            let size = meta.clip_size;
+
+                            if let Some((pos, fully_closed)) = self
+                                .base
+                                .reduce_or_remove_position_by_token(
+                                    &meta.token_id,
+                                    size,
+                                )
+                                .await
+                            {
+                                let exit_fee = if is_gtc_exit {
+                                    Decimal::ZERO
+                                } else {
+                                    taker_fee(
+                                        fill_price,
+                                        self.base.config.fee.taker_fee_rate,
+                                    )
+                                };
+                                let pnl = (fill_price - pos.entry_price) * size
+                                    - (pos.entry_fee_per_share * size)
+                                    - (exit_fee * size);
+                                self.base.record_trade_pnl(pnl).await;
+
+                                if fully_closed {
+                                    self.base
+                                        .remove_lifecycle(&meta.token_id)
+                                        .await;
+                                } else {
+                                    // Partial exit matched — transition remaining to ResidualRisk
+                                    let remaining = pos.size - size;
+                                    let is_dust = {
+                                        let markets = self.base.active_markets.read().await;
+                                        markets
+                                            .get(&pos.market_id)
+                                            .map(|m| remaining < m.market.min_order_size)
+                                            .unwrap_or(true)
+                                    };
+                                    if is_dust {
+                                        self.base
+                                            .reduce_or_remove_position_by_token(&meta.token_id, remaining)
+                                            .await;
+                                        warn!(
+                                            token_id = %meta.token_id,
+                                            dust_size = %remaining,
+                                            "Removed unsellable dust after cancel-matched partial fill"
+                                        );
+                                    } else {
+                                        let now = self.base.event_time().await;
+                                        self.transition_to_residual_risk(
+                                            &meta.token_id,
+                                            remaining,
+                                            meta.retry_count + 1,
+                                            true,
+                                            "cancel-matched partial exit",
+                                            now,
+                                        )
+                                        .await;
+                                    }
+                                }
+
+                                info!(
+                                    order_id = %order_id,
+                                    token_id = %meta.token_id,
+                                    fill_price = %fill_price,
+                                    clip_size = %size,
+                                    pnl = %pnl,
+                                    fully_closed,
+                                    "Exit order cancel-failed (matched) — treated as fill"
+                                );
+                            } else {
+                                warn!(
+                                    order_id = %order_id,
+                                    token_id = %meta.token_id,
+                                    "Exit cancel-matched but position already removed"
+                                );
+                                self.base.remove_lifecycle(&meta.token_id).await;
+                            }
+                        }
+
+                        // Clean up tracking
+                        {
+                            let mut exit_orders =
+                                self.base.exit_orders_by_id.write().await;
+                            exit_orders.remove(order_id);
+                        }
+                    } else if is_gone {
+                        // Order is gone but not filled (canceled/not found) —
+                        // transition back to ResidualRisk to re-place the exit.
+                        let now = self.base.event_time().await;
+                        let remaining_size = {
+                            let positions = self.base.positions.read().await;
+                            positions
+                                .values()
+                                .flat_map(|v| v.iter())
+                                .find(|p| p.token_id == meta.token_id)
+                                .map(|p| p.size)
+                        };
+
+                        if let Some(remaining) = remaining_size {
+                            self.transition_to_residual_risk(
+                                &meta.token_id,
+                                remaining,
+                                meta.retry_count.max(1),
+                                true,
+                                &format!("cancel failed ({}): {}", reason, meta.source_state),
+                                now,
+                            )
+                            .await;
+                        }
+
+                        // Clean up tracking
+                        {
+                            let mut exit_orders = self.base.exit_orders_by_id.write().await;
+                            exit_orders.remove(order_id);
+                        }
+
+                        warn!(
+                            order_id = %order_id,
+                            token_id = %meta.token_id,
+                            reason = %reason,
+                            "Exit order cancel failed (permanently gone) — transitioned to ResidualRisk"
+                        );
+                    } else {
+                        // Transient failure — the order is still live on the CLOB.
+                        // Leave lifecycle in ExitExecuting; the stale GTC check will
+                        // retry the cancel on the next orderbook update.
+                        warn!(
+                            order_id = %order_id,
+                            token_id = %meta.token_id,
+                            reason = %reason,
+                            "Exit order cancel failed (transient), will retry"
+                        );
+                    }
+                    vec![]
+                } else {
+                    // Not an exit order — check entry limit orders
+                    let (_found, fill_actions) =
+                        self.base.handle_cancel_failed(order_id, reason).await;
+                    fill_actions
+                }
             }
 
             Event::System(SystemEvent::OpenOrderSnapshot(ids)) => {
@@ -3099,6 +3346,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
+            recovery_cost: Decimal::ZERO,
 
         };
         base.record_position(pos).await;
@@ -3419,6 +3667,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
+            recovery_cost: Decimal::ZERO,
 
         };
         base.record_position(pos).await;
@@ -3457,6 +3706,8 @@ mod tests {
                     order_type: OrderType::Gtc,
                     source_state: "ResidualRisk(retry=1)".to_string(),
                     retry_count: 1,
+                    exit_price: dec!(0.81),
+                    clip_size: dec!(10),
                 },
             );
         }
@@ -3591,6 +3842,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
+            recovery_cost: Decimal::ZERO,
 
         };
         base.record_position(pos.clone()).await;
@@ -3716,6 +3968,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
+            recovery_cost: Decimal::ZERO,
 
         };
         base.record_position(pos).await;
@@ -3829,6 +4082,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
+            recovery_cost: Decimal::ZERO,
 
         };
         base.record_position(pos).await;
@@ -3956,6 +4210,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
+            recovery_cost: Decimal::ZERO,
 
         };
         base.record_position(pos).await;
@@ -3993,6 +4248,8 @@ mod tests {
                     order_type: exit_order_type,
                     source_state: "HardCrash(bid_drop=0.08, reversal=0.006)".to_string(),
                     retry_count: 0,
+                    exit_price: dec!(0.85),
+                    clip_size: dec!(10),
                 },
             );
         }
@@ -4148,6 +4405,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
+            recovery_cost: Decimal::ZERO,
 
         };
         base.record_position(pos).await;
@@ -4181,6 +4439,8 @@ mod tests {
                     order_type: OrderType::Fok,
                     source_state: "test".to_string(),
                     retry_count: 0,
+                    exit_price: dec!(0.85),
+                    clip_size: dec!(10),
                 },
             );
         }
@@ -4269,6 +4529,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
+            recovery_cost: Decimal::ZERO,
 
         };
         base.record_position(pos).await;
@@ -4331,6 +4592,8 @@ mod tests {
                     order_type: OrderType::Fok,
                     source_state: "RecoveryProbe(set_completion)".to_string(),
                     retry_count: 0,
+                    exit_price: dec!(0.07),
+                    clip_size: dec!(10),
                 },
             );
         }
@@ -4416,6 +4679,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
+            recovery_cost: Decimal::ZERO,
 
         };
         base.record_position(pos).await;
@@ -4450,6 +4714,8 @@ mod tests {
                     order_type: OrderType::Fok,
                     source_state: "HardCrash".to_string(),
                     retry_count: 0,
+                    exit_price: dec!(0.85),
+                    clip_size: dec!(10),
                 },
             );
         }
