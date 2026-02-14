@@ -285,29 +285,95 @@ impl TailEndStrategy {
     }
 
     /// Handle order placement result.
+    ///
+    /// For exit/recovery orders: re-keys `exit_orders_by_id` from the synthetic
+    /// order ID (generated at submission) to the real CLOB order ID returned by
+    /// the backend.  Without this, `on_order_filled` can never match the fill
+    /// event to the exit order, and GTC cancel actions use a stale synthetic ID
+    /// the backend doesn't recognise.
     async fn on_order_placed(&self, result: &OrderResult) -> Vec<Action> {
         // Check if this is a lifecycle exit/recovery order confirmation.
         // Don't remove position here — defer to Filled event to avoid race
         // with the persistence handler (which also needs the position for P&L).
         {
-            let is_exit_order = {
+            let synthetic_key = {
                 let exit_orders = self.base.exit_orders_by_id.read().await;
-                exit_orders.values().any(|meta| meta.token_id == result.token_id)
+                exit_orders
+                    .iter()
+                    .find(|(_, meta)| meta.token_id == result.token_id)
+                    .map(|(k, _)| k.clone())
             };
-            if is_exit_order {
+            if let Some(syn_key) = synthetic_key {
                 if result.success {
-                    if let Some(order_id) = &result.order_id {
+                    if let Some(real_oid) = &result.order_id {
+                        // Re-key exit_orders_by_id: synthetic → real CLOB order ID
+                        {
+                            let mut exit_orders = self.base.exit_orders_by_id.write().await;
+                            if let Some(meta) = exit_orders.remove(&syn_key) {
+                                exit_orders.insert(real_oid.clone(), meta);
+                            }
+                        }
+                        // Update lifecycle state with real order ID
+                        {
+                            let mut lifecycles = self.base.position_lifecycle.write().await;
+                            if let Some(lc) = lifecycles.get_mut(&result.token_id) {
+                                lc.pending_exit_order_id = Some(real_oid.clone());
+                                if let PositionLifecycleState::ExitExecuting {
+                                    ref mut order_id, ..
+                                } = lc.state
+                                {
+                                    *order_id = real_oid.clone();
+                                }
+                            }
+                        }
                         info!(
                             token_id = %result.token_id,
-                            order_id = %order_id,
-                            "TailEnd exit order placed, awaiting fill"
+                            real_order_id = %real_oid,
+                            synthetic_id = %syn_key,
+                            "TailEnd exit order placed, re-keyed to real CLOB ID"
                         );
                     }
                 } else {
+                    // Placement failed — transition to ResidualRisk so the system
+                    // retries on the next orderbook update instead of staying stuck
+                    // in ExitExecuting.
+                    {
+                        let mut exit_orders = self.base.exit_orders_by_id.write().await;
+                        exit_orders.remove(&syn_key);
+                    }
+                    let now = self.base.event_time().await;
+                    let mut lifecycle = self.base.ensure_lifecycle(&result.token_id).await;
+                    // Get remaining size from position
+                    let remaining = {
+                        let positions = self.base.positions.read().await;
+                        positions
+                            .values()
+                            .flat_map(|v| v.iter())
+                            .find(|p| p.token_id == result.token_id)
+                            .map(|p| p.size)
+                            .unwrap_or(Decimal::ZERO)
+                    };
+                    if let Err(e) = lifecycle.transition(
+                        PositionLifecycleState::ResidualRisk {
+                            remaining_size: remaining,
+                            retry_count: 1,
+                            last_attempt: now,
+                            use_gtc_next: false,
+                        },
+                        "exit order placement failed",
+                        now,
+                    ) {
+                        warn!(
+                            token_id = %result.token_id,
+                            error = %e,
+                            "Failed to transition to ResidualRisk after placement failure"
+                        );
+                    }
+                    self.write_lifecycle(&result.token_id, &lifecycle).await;
                     warn!(
                         token_id = %result.token_id,
                         message = %result.message,
-                        "TailEnd exit order placement failed"
+                        "TailEnd exit order placement failed, transitioned to ResidualRisk"
                     );
                 }
                 return vec![];
@@ -784,7 +850,6 @@ impl TailEndStrategy {
 
             // RecoveryProbe: order is in flight, wait for fill/reject events
             if matches!(lifecycle.state, PositionLifecycleState::RecoveryProbe { .. }) {
-                self.handle_recovery_probe(&pos, &mut lifecycle, now).await;
                 continue;
             }
 
@@ -1090,6 +1155,7 @@ impl TailEndStrategy {
                     token_id: pos.token_id.clone(),
                     order_type: OrderType::Fok,
                     source_state: format!("{trigger_kind}"),
+                    retry_count: 0,
                 },
             );
         }
@@ -1306,6 +1372,7 @@ impl TailEndStrategy {
                         token_id: pos.token_id.clone(),
                         order_type: OrderType::Gtc,
                         source_state: format!("ResidualRisk(retry={retry_count})"),
+                        retry_count,
                     },
                 );
             }
@@ -1358,6 +1425,7 @@ impl TailEndStrategy {
                     token_id: pos.token_id.clone(),
                     order_type: OrderType::Fok,
                     source_state: format!("ResidualRisk(retry={retry_count})"),
+                    retry_count,
                 },
             );
         }
@@ -1420,8 +1488,8 @@ impl TailEndStrategy {
             (m.market.neg_risk, m.market.min_order_size)
         };
 
-        // Compute clip size — use remaining_size capped by depth
-        let clip = remaining_size.min(remaining_size); // Simple: buy matching size
+        // Clip size = remaining_size (FOK will reject if liquidity is insufficient)
+        let clip = remaining_size;
         if clip < min_order_size {
             debug!(
                 token_id = %pos.token_id,
@@ -1484,6 +1552,7 @@ impl TailEndStrategy {
                     token_id: pos.token_id.clone(),
                     order_type: OrderType::Fok,
                     source_state: "RecoveryProbe(set_completion)".to_string(),
+                    retry_count: 0,
                 },
             );
         }
@@ -1634,6 +1703,7 @@ impl TailEndStrategy {
                     token_id: pos.token_id.clone(),
                     order_type: OrderType::Fok,
                     source_state: "RecoveryProbe(opposite_alpha)".to_string(),
+                    retry_count: 0,
                 },
             );
         }
@@ -1647,24 +1717,6 @@ impl TailEndStrategy {
         );
 
         Some(Action::PlaceOrder(order))
-    }
-
-    /// Handle a position in RecoveryProbe state during an orderbook update.
-    ///
-    /// RecoveryProbe is a waiting state — the recovery order is in flight.
-    /// This method checks if the order has been pending too long and should be
-    /// cancelled (handled by fill/reject events, not here).
-    /// Currently a no-op since fill/reject routing handles transitions.
-    async fn handle_recovery_probe(
-        &self,
-        _pos: &ArbitragePosition,
-        _lifecycle: &mut PositionLifecycle,
-        _now: DateTime<Utc>,
-    ) -> Option<Action> {
-        // Recovery orders are tracked via exit_orders_by_id.
-        // Fill → Cooldown transition happens in on_order_filled.
-        // Rejection → resolve with loss happens in rejection handler.
-        None
     }
 
     /// Handle a position in Cooldown state during an orderbook update.
@@ -2160,20 +2212,7 @@ impl Strategy for TailEndStrategy {
                     };
                     if let Some(meta) = exit_meta {
                         let now = self.base.event_time().await;
-                        // Get lifecycle state to extract retry info
-                        let lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
-                        let retry_count = if let PositionLifecycleState::ExitExecuting { .. } =
-                            &lifecycle.state
-                        {
-                            // Extract previous retry count from the source_state string
-                            meta.source_state
-                                .split("retry=")
-                                .nth(1)
-                                .and_then(|s| s.trim_end_matches(')').parse::<u32>().ok())
-                                .unwrap_or(1)
-                        } else {
-                            1
-                        };
+                        let retry_count = meta.retry_count.max(1);
 
                         // Get remaining size from position
                         let remaining_size = {
@@ -3246,6 +3285,7 @@ mod tests {
                     token_id: "token_up".to_string(),
                     order_type: OrderType::Gtc,
                     source_state: "ResidualRisk(retry=1)".to_string(),
+                    retry_count: 1,
                 },
             );
         }
@@ -3780,6 +3820,7 @@ mod tests {
                     token_id: "token_up".to_string(),
                     order_type: exit_order_type,
                     source_state: "HardCrash(bid_drop=0.08, reversal=0.006)".to_string(),
+                    retry_count: 0,
                 },
             );
         }
@@ -3966,6 +4007,7 @@ mod tests {
                     token_id: "token_up".to_string(),
                     order_type: OrderType::Fok,
                     source_state: "test".to_string(),
+                    retry_count: 0,
                 },
             );
         }
@@ -4114,6 +4156,7 @@ mod tests {
                     token_id: "token_up".to_string(),
                     order_type: OrderType::Fok,
                     source_state: "RecoveryProbe(set_completion)".to_string(),
+                    retry_count: 0,
                 },
             );
         }
@@ -4231,6 +4274,7 @@ mod tests {
                     token_id: "token_up".to_string(),
                     order_type: OrderType::Fok,
                     source_state: "HardCrash".to_string(),
+                    retry_count: 0,
                 },
             );
         }

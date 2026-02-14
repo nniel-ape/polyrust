@@ -560,7 +560,7 @@ impl fmt::Display for PositionLifecycleState {
 }
 
 impl PositionLifecycleState {
-    /// State name for transition validation and logging.
+    /// State name for logging.
     fn name(&self) -> &'static str {
         match self {
             Self::Healthy => "Healthy",
@@ -573,19 +573,23 @@ impl PositionLifecycleState {
     }
 
     /// Check whether transitioning from `self` to `target` is valid.
+    ///
+    /// Uses enum variant matching for compile-time safety: adding a new variant
+    /// forces updating the match arms.
     fn can_transition_to(&self, target: &PositionLifecycleState) -> bool {
+        use PositionLifecycleState::*;
         matches!(
-            (self.name(), target.name()),
-            ("Healthy", "DeferredExit")
-                | ("Healthy", "ExitExecuting")
-                | ("DeferredExit", "ExitExecuting")
-                | ("DeferredExit", "Healthy")
-                | ("ExitExecuting", "ResidualRisk")
-                | ("ResidualRisk", "ExitExecuting")
-                | ("ResidualRisk", "RecoveryProbe")
-                | ("RecoveryProbe", "ExitExecuting")
-                | ("RecoveryProbe", "Cooldown")
-                | ("Cooldown", "Healthy")
+            (self, target),
+            (Healthy, DeferredExit { .. })
+                | (Healthy, ExitExecuting { .. })
+                | (DeferredExit { .. }, ExitExecuting { .. })
+                | (DeferredExit { .. }, Healthy)
+                | (ExitExecuting { .. }, ResidualRisk { .. })
+                | (ResidualRisk { .. }, ExitExecuting { .. })
+                | (ResidualRisk { .. }, RecoveryProbe { .. })
+                | (RecoveryProbe { .. }, ExitExecuting { .. })
+                | (RecoveryProbe { .. }, Cooldown { .. })
+                | (Cooldown { .. }, Healthy)
         )
     }
 }
@@ -913,6 +917,8 @@ pub struct ExitOrderMeta {
     pub order_type: OrderType,
     /// Lifecycle state that spawned this order (for context in logs).
     pub source_state: String,
+    /// Retry count at time of order submission (for escalation after cancel).
+    pub retry_count: u32,
 }
 
 /// Compute the exit clip size for a single exit order, capped by available

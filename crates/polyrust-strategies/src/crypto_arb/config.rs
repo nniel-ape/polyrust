@@ -328,8 +328,6 @@ pub struct StopLossConfig {
     pub hard_drop_abs: Decimal,
     /// External price reversal percentage for hard crash (default 0.006 = 0.6%).
     pub hard_reversal_pct: Decimal,
-    /// Window in milliseconds for hard crash detection (default 2000ms).
-    pub hard_window_ms: i64,
 
     // ── Freshness gating for stop-loss data ─────────────────────────────
     /// Maximum orderbook age in ms for stop-loss decisions (default 1200ms).
@@ -403,7 +401,6 @@ impl Default for StopLossConfig {
             // Hard crash
             hard_drop_abs: Decimal::new(8, 2),      // 0.08
             hard_reversal_pct: Decimal::new(6, 3),   // 0.006
-            hard_window_ms: 2000,
             // Freshness gating
             sl_max_book_age_ms: 1200,
             sl_max_external_age_ms: 1500,

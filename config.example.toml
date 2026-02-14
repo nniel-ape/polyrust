@@ -166,7 +166,6 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # Hard crash detection — bypasses hysteresis, requires 1 fresh source + fresh book
 # hard_drop_abs = 0.08        # Absolute bid drop from entry to trigger (e.g. 0.95 → 0.87)
 # hard_reversal_pct = 0.006   # External price reversal % for hard crash (0.6%)
-# hard_window_ms = 2000       # Time window for hard crash detection (ms)
 #
 # Freshness gating — stale data suppresses all triggers except hard-crash
 # sl_max_book_age_ms = 1200   # Max orderbook age for stop-loss decisions (ms)

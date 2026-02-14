@@ -2531,7 +2531,6 @@ fn stop_loss_config_lifecycle_field_defaults() {
     // Hard crash
     assert_eq!(config.hard_drop_abs, dec!(0.08));
     assert_eq!(config.hard_reversal_pct, dec!(0.006));
-    assert_eq!(config.hard_window_ms, 2000);
 
     // Freshness gating
     assert_eq!(config.sl_max_book_age_ms, 1200);
@@ -2568,7 +2567,6 @@ fn stop_loss_config_lifecycle_defaults_are_sane() {
     // All numeric values should be positive where required
     assert!(config.hard_drop_abs > Decimal::ZERO, "hard_drop_abs must be positive");
     assert!(config.hard_reversal_pct > Decimal::ZERO, "hard_reversal_pct must be positive");
-    assert!(config.hard_window_ms > 0, "hard_window_ms must be positive");
     assert!(config.sl_max_book_age_ms > 0, "sl_max_book_age_ms must be positive");
     assert!(config.sl_max_external_age_ms > 0, "sl_max_external_age_ms must be positive");
     assert!(config.sl_min_sources > 0, "sl_min_sources must be positive");
@@ -2596,7 +2594,6 @@ fn stop_loss_config_deserialize_with_lifecycle_fields() {
         time_decay = true
         hard_drop_abs = "0.10"
         hard_reversal_pct = "0.008"
-        hard_window_ms = 3000
         sl_max_book_age_ms = 1000
         sl_max_external_age_ms = 2000
         sl_min_sources = 3
@@ -2616,7 +2613,6 @@ fn stop_loss_config_deserialize_with_lifecycle_fields() {
     let config: super::config::StopLossConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.hard_drop_abs, dec!(0.10));
     assert_eq!(config.hard_reversal_pct, dec!(0.008));
-    assert_eq!(config.hard_window_ms, 3000);
     assert_eq!(config.sl_max_book_age_ms, 1000);
     assert_eq!(config.sl_max_external_age_ms, 2000);
     assert_eq!(config.sl_min_sources, 3);
@@ -2648,7 +2644,6 @@ fn stop_loss_config_deserialize_missing_lifecycle_fields_uses_defaults() {
     // All new lifecycle fields should have their defaults
     assert_eq!(config.hard_drop_abs, dec!(0.08));
     assert_eq!(config.hard_reversal_pct, dec!(0.006));
-    assert_eq!(config.hard_window_ms, 2000);
     assert_eq!(config.sl_max_book_age_ms, 1200);
     assert_eq!(config.sl_max_external_age_ms, 1500);
     assert_eq!(config.sl_min_sources, 2);
@@ -3213,10 +3208,12 @@ fn exit_order_meta_fields() {
         token_id: "token-123".to_string(),
         order_type: OrderType::Fok,
         source_state: "ExitExecuting".to_string(),
+        retry_count: 0,
     };
     assert_eq!(meta.token_id, "token-123");
     assert_eq!(meta.order_type, OrderType::Fok);
     assert_eq!(meta.source_state, "ExitExecuting");
+    assert_eq!(meta.retry_count, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -3425,6 +3422,7 @@ async fn remove_lifecycle_also_cleans_exit_orders() {
                 token_id: "token_up".to_string(),
                 order_type: OrderType::Fok,
                 source_state: "ExitExecuting".to_string(),
+                retry_count: 0,
             },
         );
         // Add an unrelated exit order too
@@ -3434,6 +3432,7 @@ async fn remove_lifecycle_also_cleans_exit_orders() {
                 token_id: "other_token".to_string(),
                 order_type: OrderType::Gtc,
                 source_state: "ResidualRisk".to_string(),
+                retry_count: 0,
             },
         );
     }
