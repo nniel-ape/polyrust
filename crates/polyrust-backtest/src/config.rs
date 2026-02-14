@@ -1,8 +1,47 @@
 use chrono::{DateTime, Utc};
+use polyrust_strategies::SizingConfig;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::sweep::config::SweepConfig;
+
+/// Optional backtest-specific sizing overrides.
+/// Fields set to `Some` replace the corresponding `[arbitrage.sizing]` value;
+/// `None` fields fall back to the live config.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BacktestSizingOverride {
+    pub base_size: Option<Decimal>,
+    pub kelly_multiplier: Option<Decimal>,
+    pub min_size: Option<Decimal>,
+    pub max_size: Option<Decimal>,
+    pub use_kelly: Option<bool>,
+    pub depth_cap_factor: Option<Decimal>,
+}
+
+impl BacktestSizingOverride {
+    /// Overwrite only the fields that are `Some` onto the given `SizingConfig`.
+    pub fn apply_to(&self, sizing: &mut SizingConfig) {
+        if let Some(v) = self.base_size {
+            sizing.base_size = v;
+        }
+        if let Some(v) = self.kelly_multiplier {
+            sizing.kelly_multiplier = v;
+        }
+        if let Some(v) = self.min_size {
+            sizing.min_size = v;
+        }
+        if let Some(v) = self.max_size {
+            sizing.max_size = v;
+        }
+        if let Some(v) = self.use_kelly {
+            sizing.use_kelly = v;
+        }
+        if let Some(v) = self.depth_cap_factor {
+            sizing.depth_cap_factor = v;
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BacktestConfig {
@@ -39,6 +78,9 @@ pub struct BacktestConfig {
     /// Realism settings for more accurate simulation (slippage, depth, fees).
     #[serde(default)]
     pub realism: RealismConfig,
+    /// Optional backtest-specific sizing overrides (replaces [arbitrage.sizing] fields).
+    #[serde(default)]
+    pub sizing: Option<BacktestSizingOverride>,
     /// Optional parameter sweep configuration for grid search.
     #[serde(default)]
     pub sweep: Option<SweepConfig>,
@@ -126,6 +168,7 @@ impl Default for BacktestConfig {
             fetch_concurrency: 10,
             offline: false,
             realism: RealismConfig::default(),
+            sizing: None,
             sweep: None,
         }
     }
@@ -253,6 +296,7 @@ mod tests {
             fetch_concurrency: 10,
             offline: false,
             realism: RealismConfig::default(),
+            sizing: None,
             sweep: None,
         };
         assert_eq!(config.strategy_name, "test-strategy");

@@ -107,6 +107,8 @@ pub struct SizingSweepParams {
     pub kelly_multiplier: Option<ParamRange>,
     pub min_size: Option<ParamRange>,
     pub max_size: Option<ParamRange>,
+    /// Depth cap factor: fraction of visible orderbook depth to cap order size.
+    pub depth_cap_factor: Option<ParamRange>,
 }
 
 /// Sweep parameters for stop-loss config fields.
@@ -140,10 +142,10 @@ pub struct StopLossSweepParams {
 pub struct SweepConfig {
     /// Max concurrent backtest runs (default: num_cpus).
     pub parallelism: Option<usize>,
-    /// Path to export CSV results.
-    pub csv_export: Option<String>,
-    /// Path to export JSON results.
-    pub json_export: Option<String>,
+    /// Base directory for sweep output (default: "sweep_results").
+    /// Each run creates a timestamped subfolder with results.csv, results.json,
+    /// sensitivity.csv, and sensitivity.json.
+    pub output_dir: Option<String>,
     /// Metric to rank by: "sharpe" (default), "pnl", "win_rate", "drawdown".
     pub rank_by: Option<String>,
     /// Number of top results to display (default: 20).
@@ -207,7 +209,7 @@ mod tests {
     fn sweep_config_toml_parsing() {
         let toml = r#"
             parallelism = 4
-            csv_export = "sweep_results.csv"
+            output_dir = "sweep_results"
             rank_by = "sharpe"
             top_n = 20
 
@@ -230,7 +232,7 @@ mod tests {
         "#;
         let config: SweepConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.parallelism, Some(4));
-        assert_eq!(config.csv_export, Some("sweep_results.csv".to_string()));
+        assert_eq!(config.output_dir, Some("sweep_results".to_string()));
         assert!(config.tailend.dynamic_thresholds.is_some());
         let dt = config.tailend.dynamic_thresholds.unwrap();
         assert_eq!(dt.len(), 4);

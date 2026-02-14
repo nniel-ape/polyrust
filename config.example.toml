@@ -284,7 +284,7 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # [backtest.sweep]
 # rank_by = "sharpe"
 # top_n = 15
-# csv_export = "sweep_triggers.csv"
+# output_dir = "sweep_results"
 #
 # [backtest.sweep.stop_loss]
 # dual_trigger_consecutive_ticks = [1, 2, 3]
@@ -299,7 +299,7 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # [backtest.sweep]
 # rank_by = "pnl"
 # top_n = 15
-# csv_export = "sweep_trailing.csv"
+# output_dir = "sweep_results"
 #
 # [backtest.sweep.stop_loss]
 # trailing_distance = ["0.03", "0.04", "0.05", "0.07"]
@@ -314,8 +314,7 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # rank_by = "sharpe"
 # top_n = 20
 # force = true
-# csv_export = "sweep_lifecycle.csv"
-# json_export = "sweep_lifecycle.json"
+# output_dir = "sweep_results"
 #
 # [backtest.sweep.stop_loss]
 # dual_trigger_consecutive_ticks = [1, 2, 3]

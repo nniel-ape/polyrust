@@ -87,6 +87,11 @@ impl ParameterCombination {
                         config.sizing.max_size = *v;
                     }
                 }
+                "sizing.depth_cap_factor" => {
+                    if let ParamValue::Decimal(v) = value {
+                        config.sizing.depth_cap_factor = *v;
+                    }
+                }
                 // StopLoss params
                 "stop_loss.reversal_pct" => {
                     if let ParamValue::Decimal(v) = value {
@@ -335,6 +340,16 @@ impl ParameterGrid {
         if let Some(ref range) = config.sizing.max_size {
             axes.push(Axis {
                 name: "sizing.max_size".to_string(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
+            });
+        }
+        if let Some(ref range) = config.sizing.depth_cap_factor {
+            axes.push(Axis {
+                name: "sizing.depth_cap_factor".to_string(),
                 values: range
                     .expand()
                     .into_iter()

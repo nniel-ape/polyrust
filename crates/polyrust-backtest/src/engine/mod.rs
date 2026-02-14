@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use indicatif::{ProgressBar, ProgressStyle};
 use rust_decimal::Decimal;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -49,130 +50,14 @@ pub struct BacktestTrade {
     pub close_reason: Option<CloseReason>,
 }
 
-/// Per-bucket trade aggregation tracking last buy and sell prices.
-struct BucketAgg {
-    token_id: String,
-    last_price: Decimal,
-    last_buy: Option<Decimal>,
-    last_sell: Option<Decimal>,
-}
-
-/// Synthesize PriceChange events from trade data by bucketing trades into N-second windows.
-///
-/// For each token, trades are grouped into time buckets of `fidelity_secs` duration.
-/// The last trade's price in each bucket becomes a PriceChange event, timestamped
-/// at the bucket's end (bucket_start + fidelity_secs).
-///
-/// Produces realistic bid/ask spread from actual buy/sell trade prices within each bucket.
-/// Uses the explicit `side` field from Trade events when available (populated from the
-/// subgraph's historical data). Falls back to price-movement heuristic only when `side`
-/// is `None` (e.g., live feed trades).
-///
-/// Accepts the full event list and filters for Trade events internally
-/// (avoids cloning all trades into a separate Vec).
-fn synthesize_price_events_from_trades(
-    events: &[HistoricalEvent],
-    fidelity_secs: u64,
-) -> Vec<HistoricalEvent> {
-    if events.is_empty() || fidelity_secs == 0 {
-        return Vec::new();
-    }
-
-    let fidelity = fidelity_secs as i64;
-    let default_spread = Decimal::new(1, 2); // 0.01 (1 tick)
-
-    // Single pass: group trades by token_id into time buckets, populating
-    // last_price and last_buy/last_sell using explicit side from the Trade
-    // event. Falls back to price-movement heuristic only when side is None.
-    let mut token_buckets: HashMap<String, BTreeMap<i64, BucketAgg>> = HashMap::new();
-    let mut prev_prices: HashMap<String, Decimal> = HashMap::new();
-
-    for event in events {
-        if let Event::MarketData(MarketDataEvent::Trade {
-            token_id,
-            price,
-            side,
-            ..
-        }) = &event.event
-        {
-            let ts = event.timestamp.timestamp();
-            let bucket_start = (ts / fidelity) * fidelity;
-
-            let bucket = token_buckets
-                .entry(token_id.clone())
-                .or_default()
-                .entry(bucket_start)
-                .or_insert(BucketAgg {
-                    token_id: token_id.clone(),
-                    last_price: *price,
-                    last_buy: None,
-                    last_sell: None,
-                });
-
-            bucket.last_price = *price;
-
-            // Use explicit side when available; fall back to price-movement heuristic
-            let is_buy = match side {
-                Some(OrderSide::Buy) => true,
-                Some(OrderSide::Sell) => false,
-                _ => {
-                    let prev = prev_prices.get(token_id).copied();
-                    prev.is_none_or(|p| *price >= p)
-                }
-            };
-            prev_prices.insert(token_id.clone(), *price);
-
-            if is_buy {
-                bucket.last_buy = Some(*price);
-            } else {
-                bucket.last_sell = Some(*price);
-            }
-        }
-    }
-
-    let mut synthetic_events = Vec::new();
-
-    for buckets in token_buckets.values() {
-        for (&bucket_start, agg) in buckets {
-            let bucket_end = bucket_start + fidelity;
-            let timestamp = DateTime::from_timestamp(bucket_end, 0).unwrap_or_else(|| {
-                Utc::now() // Fallback; shouldn't happen with valid trade timestamps
-            });
-
-            // Derive bid/ask from actual buy/sell sides
-            let (best_bid, best_ask) = match (agg.last_sell, agg.last_buy) {
-                (Some(sell), Some(buy)) => (sell, buy),
-                (Some(sell), None) => (sell, sell + default_spread),
-                (None, Some(buy)) => ((buy - default_spread).max(Decimal::new(1, 2)), buy),
-                (None, None) => (
-                    (agg.last_price - default_spread).max(Decimal::new(1, 2)),
-                    agg.last_price + default_spread,
-                ),
-            };
-
-            synthetic_events.push(HistoricalEvent {
-                timestamp,
-                token_id: agg.token_id.clone(),
-                event: Event::MarketData(MarketDataEvent::PriceChange {
-                    token_id: agg.token_id.clone(),
-                    price: agg.last_price,
-                    side: OrderSide::Buy,
-                    best_bid,
-                    best_ask,
-                }),
-            });
-        }
-    }
-
-    synthetic_events
-}
-
 /// Pre-built maps from load_events() for sharing across sweep engines.
 pub struct TokenMaps {
     pub market_tokens: HashMap<String, (String, String)>,
     pub token_to_market: HashMap<String, String>,
     pub market_end_dates: HashMap<String, DateTime<Utc>>,
     pub market_durations: HashMap<String, i64>,
+    /// market_id -> slug (for deriving coin symbol in synthetic ExternalPrice)
+    pub market_slugs: HashMap<String, String>,
 }
 
 /// Backtesting engine that replays historical events through a strategy.
@@ -207,6 +92,8 @@ pub struct BacktestEngine {
     market_durations: HashMap<String, i64>,
     /// Best ask/bid cache for GTC taker fee heuristic: token_id -> (best_bid, best_ask)
     token_best_prices: HashMap<String, (Decimal, Decimal)>,
+    /// Market slug cache: market_id -> slug (for deriving coin symbol)
+    market_slugs: HashMap<String, String>,
     /// Optional progress bar for event replay (None in sweep mode).
     progress_bar: Option<ProgressBar>,
     // --- Funnel instrumentation counters ---
@@ -278,6 +165,7 @@ impl BacktestEngine {
             market_end_dates: HashMap::new(),
             market_durations: HashMap::new(),
             token_best_prices: HashMap::new(),
+            market_slugs: HashMap::new(),
             progress_bar: None,
             markets_discovered: 0,
             orders_submitted: 0,
@@ -445,10 +333,42 @@ impl BacktestEngine {
             // Execute actions and feed fill events back to strategy
             trades.extend(self.execute_strategy_actions(actions).await?);
 
-            // Emit synthetic OrderbookUpdate so strategy lifecycle logic fires
+            // Emit synthetic ExternalPrice + OrderbookUpdate so stop-loss
+            // freshness gates pass (composite cache refreshed before triggers fire)
             if let Event::MarketData(MarketDataEvent::PriceChange { token_id, .. }) =
                 &historical_event.event
             {
+                // 1. Co-located ExternalPrice events refresh composite cache
+                if let Some(market_id) = self.token_to_market.get(token_id)
+                    && let Some(coin) = self.market_coin(market_id)
+                    && let Some(&ext_price) = self.token_prices.get(&coin)
+                {
+                    for source in &["binance-futures", "binance-spot"] {
+                        let ext_event = Event::MarketData(MarketDataEvent::ExternalPrice {
+                            symbol: coin.clone(),
+                            price: ext_price,
+                            source: source.to_string(),
+                            timestamp: self.current_time,
+                        });
+                        // Update sourced_prices in market data state
+                        {
+                            let mut md = self.ctx.market_data.write().await;
+                            md.external_prices.insert(coin.clone(), ext_price);
+                            md.sourced_prices.entry(coin.clone()).or_default().insert(
+                                source.to_string(),
+                                SourcedPrice {
+                                    price: ext_price,
+                                    source: source.to_string(),
+                                    timestamp: self.current_time,
+                                },
+                            );
+                        }
+                        let ext_actions = self.strategy.on_event(&ext_event, &self.ctx).await?;
+                        trades.extend(self.execute_strategy_actions(ext_actions).await?);
+                    }
+                }
+
+                // 2. Synthetic OrderbookUpdate — lifecycle triggers see fresh composite
                 let snapshot = {
                     let md = self.ctx.market_data.read().await;
                     md.orderbooks.get(token_id).cloned()
@@ -618,6 +538,7 @@ impl BacktestEngine {
             token_to_market: self.token_to_market.clone(),
             market_end_dates: self.market_end_dates.clone(),
             market_durations: self.market_durations.clone(),
+            market_slugs: self.market_slugs.clone(),
         }
     }
 
@@ -627,6 +548,7 @@ impl BacktestEngine {
         self.token_to_market = maps.token_to_market;
         self.market_end_dates = maps.market_end_dates;
         self.market_durations = maps.market_durations;
+        self.market_slugs = maps.market_slugs;
     }
 
     /// Compute effective orderbook depth for a token, applying expiry decay if configured.
@@ -661,15 +583,92 @@ impl BacktestEngine {
         base * factor
     }
 
+    /// Derive coin symbol (e.g. "BTC") from a market's slug.
+    fn market_coin(&self, market_id: &str) -> Option<String> {
+        let slug = self.market_slugs.get(market_id)?;
+        let slug_lower = slug.to_lowercase();
+        for prefix in &["btc", "eth", "sol", "xrp"] {
+            if slug_lower.starts_with(prefix) {
+                return Some(prefix.to_uppercase());
+            }
+        }
+        None
+    }
+
     /// Load historical events from the data store.
+    ///
+    /// Optimized batch-loading pipeline: ~8 total DB queries instead of ~5N+8
+    /// (where N = thousands of markets). Trades are streamed directly into
+    /// bucket synthesis without materializing HistoricalTrade structs.
     ///
     /// Public so sweep runner can call it once and share events across runs.
     pub async fn load_events(&mut self) -> Result<Vec<HistoricalEvent>> {
-        let mut events = Vec::new();
+        let load_start = Instant::now();
 
-        // Pre-load crypto kline data indexed by coin for discovery price lookup.
-        // This replaces hardcoded prices (BTC=$100K, ETH=$3K, SOL=$200) with
-        // actual historical prices at each market's discovery timestamp.
+        // ── Phase 1: Batch-load all market metadata (1 query) ──
+        let phase_start = Instant::now();
+        let markets = self
+            .data_store
+            .get_historical_markets_batch(&self.config.market_ids)
+            .await
+            .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
+
+        // Index markets by ID for quick lookup
+        let markets_by_id: HashMap<String, &crate::data::store::HistoricalMarket> =
+            markets.iter().map(|m| (m.market_id.clone(), m)).collect();
+
+        // Build all maps from market metadata and collect token_ids
+        let mut all_token_ids: Vec<String> = Vec::new();
+        let coin_prefixes = ["btc", "eth", "sol", "xrp"];
+        let mut coins_in_backtest: Vec<String> = Vec::new();
+        // up_token -> coin mapping for ExternalPrice fallback synthesis
+        let mut up_token_to_coin: HashMap<String, String> = HashMap::new();
+
+        for market_id in &self.config.market_ids {
+            if let Some(m) = markets_by_id.get(market_id) {
+                self.market_tokens
+                    .insert(m.market_id.clone(), (m.token_a.clone(), m.token_b.clone()));
+                self.market_slugs
+                    .insert(m.market_id.clone(), m.slug.clone());
+                self.token_to_market
+                    .insert(m.token_a.clone(), m.market_id.clone());
+                self.token_to_market
+                    .insert(m.token_b.clone(), m.market_id.clone());
+                self.market_end_dates
+                    .insert(m.market_id.clone(), m.end_date);
+                let duration = (m.end_date - m.start_date).num_seconds();
+                self.market_durations.insert(m.market_id.clone(), duration);
+                all_token_ids.push(m.token_a.clone());
+                all_token_ids.push(m.token_b.clone());
+
+                // Determine coin from slug
+                let slug_lower = m.slug.to_lowercase();
+                for prefix in &coin_prefixes {
+                    if slug_lower.starts_with(prefix) {
+                        let coin = prefix.to_uppercase();
+                        up_token_to_coin.insert(m.token_a.clone(), coin.clone());
+                        if !coins_in_backtest.contains(&coin) {
+                            coins_in_backtest.push(coin);
+                        }
+                        break;
+                    }
+                }
+            } else {
+                // Market not found in cache — assume market_id IS a token_id (backwards compat)
+                warn!(market_id, "Market not found in cache, treating as token_id");
+                all_token_ids.push(market_id.clone());
+            }
+        }
+        info!(
+            markets_found = markets.len(),
+            tokens = all_token_ids.len(),
+            coins = ?coins_in_backtest,
+            elapsed_ms = phase_start.elapsed().as_millis(),
+            "Phase 1: Market metadata loaded"
+        );
+
+        // ── Phase 2: Load crypto klines (4 queries, unchanged) ──
+        let phase_start = Instant::now();
         let mut coin_klines: HashMap<String, Vec<(i64, Decimal)>> = HashMap::new();
         for coin in &["BTC", "ETH", "SOL", "XRP"] {
             let prices = self
@@ -683,14 +682,14 @@ impl BacktestEngine {
                     .map(|p| (p.timestamp.timestamp(), p.close))
                     .collect();
                 sorted.sort_by_key(|(ts, _)| *ts);
-                info!(
-                    coin,
-                    count = sorted.len(),
-                    "Pre-loaded klines for discovery price lookup"
-                );
                 coin_klines.insert(coin.to_string(), sorted);
             }
         }
+        info!(
+            coins_with_klines = coin_klines.len(),
+            elapsed_ms = phase_start.elapsed().as_millis(),
+            "Phase 2: Crypto klines loaded"
+        );
 
         // Helper closure: find closest kline price at a given timestamp
         let find_kline_price = |coin: &str, target_ts: i64| -> Option<Decimal> {
@@ -699,7 +698,6 @@ impl BacktestEngine {
                 return None;
             }
             let idx = klines.partition_point(|(ts, _)| *ts <= target_ts);
-            // Check both the entry at idx-1 (last <= target) and idx (first > target)
             let candidates: Vec<_> = [idx.checked_sub(1), Some(idx)]
                 .into_iter()
                 .flatten()
@@ -711,39 +709,56 @@ impl BacktestEngine {
                 .map(|i| klines[i].1)
         };
 
-        // For each market_id, load prices and trades for both tokens,
-        // and inject MarketDiscovered/MarketExpired lifecycle events.
+        // ── Phase 3: Batch-load all prices (1-2 queries) ──
+        let phase_start = Instant::now();
+        let prices = self
+            .data_store
+            .get_historical_prices_batch(
+                &all_token_ids,
+                self.config.start_date,
+                self.config.end_date,
+            )
+            .await
+            .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
+
+        let price_event_count = prices.len();
+        info!(
+            price_events = price_event_count,
+            elapsed_ms = phase_start.elapsed().as_millis(),
+            "Phase 3: Prices batch-loaded"
+        );
+
+        // ── Phase 4: Inject lifecycle events from cached metadata (0 queries) ──
+        let phase_start = Instant::now();
+        let mut lifecycle_count = 0usize;
+
+        // Estimate capacity: prices + lifecycle + synthesis + crypto
+        let estimated_capacity = price_event_count
+            + markets.len() * 3 // MarketDiscovered + ExternalPrice + MarketExpired
+            + price_event_count  // rough synthesis estimate
+            + coin_klines.values().map(|v| v.len()).sum::<usize>();
+        let mut events = Vec::with_capacity(estimated_capacity);
+
+        // Convert prices to PriceChange events
+        for price in prices {
+            let best_bid = (price.price - Decimal::new(1, 2)).max(Decimal::new(1, 2));
+            let best_ask = price.price + Decimal::new(1, 2);
+            events.push(HistoricalEvent {
+                timestamp: price.timestamp,
+                token_id: price.token_id.clone(),
+                event: Event::MarketData(MarketDataEvent::PriceChange {
+                    token_id: price.token_id,
+                    price: price.price,
+                    side: OrderSide::Buy,
+                    best_bid,
+                    best_ask,
+                }),
+            });
+        }
+
+        // Inject MarketDiscovered, discovery ExternalPrice, and MarketExpired
         for market_id in &self.config.market_ids {
-            // Query the historical_markets table to get both token IDs
-            let market = self
-                .data_store
-                .get_historical_market(market_id)
-                .await
-                .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
-
-            let token_ids = if let Some(ref m) = market {
-                // Build market_id -> (token_a, token_b) mapping for settlement
-                self.market_tokens
-                    .insert(m.market_id.clone(), (m.token_a.clone(), m.token_b.clone()));
-                // Build reverse mapping: token_id -> market_id (for fill events)
-                self.token_to_market
-                    .insert(m.token_a.clone(), m.market_id.clone());
-                self.token_to_market
-                    .insert(m.token_b.clone(), m.market_id.clone());
-                // Store end_date and duration for depth decay
-                self.market_end_dates
-                    .insert(m.market_id.clone(), m.end_date);
-                let duration = (m.end_date - m.start_date).num_seconds();
-                self.market_durations.insert(m.market_id.clone(), duration);
-                vec![m.token_a.clone(), m.token_b.clone()]
-            } else {
-                // Market not found in cache - assume market_id IS a token_id for backwards compatibility
-                warn!(market_id, "Market not found in cache, treating as token_id");
-                vec![market_id.clone()]
-            };
-
-            // Inject MarketDiscovered event at market start_date (or backtest start if earlier)
-            if let Some(ref m) = market {
+            if let Some(m) = markets_by_id.get(market_id) {
                 let discover_ts = m.start_date.max(self.config.start_date);
                 let market_info = MarketInfo {
                     id: m.market_id.clone(),
@@ -766,10 +781,9 @@ impl BacktestEngine {
                     token_id: m.token_a.clone(),
                     event: Event::MarketData(MarketDataEvent::MarketDiscovered(market_info)),
                 });
+                lifecycle_count += 1;
 
-                // Inject an immediate ExternalPrice event right after discovery so
-                // the pending market gets promoted. Uses actual kline price at
-                // discover_ts when available, falls back to hardcoded base prices.
+                // Discovery ExternalPrice from klines or fallback
                 let slug_lower = m.slug.to_lowercase();
                 let coin_symbol = if slug_lower.starts_with("btc") {
                     Some("BTC")
@@ -797,7 +811,6 @@ impl BacktestEngine {
                         );
                         fallback
                     });
-                    // Use discover_ts + 1ns to sort after the MarketDiscovered event
                     let price_ts = discover_ts + chrono::Duration::nanoseconds(1);
                     events.push(HistoricalEvent {
                         timestamp: price_ts,
@@ -809,9 +822,9 @@ impl BacktestEngine {
                             timestamp: price_ts,
                         }),
                     });
+                    lifecycle_count += 1;
                 }
 
-                // Inject MarketExpired event at market end_date
                 if m.end_date <= self.config.end_date {
                     events.push(HistoricalEvent {
                         timestamp: m.end_date,
@@ -820,227 +833,138 @@ impl BacktestEngine {
                             m.market_id.clone(),
                         )),
                     });
+                    lifecycle_count += 1;
                 }
             }
+        }
+        info!(
+            lifecycle_events = lifecycle_count,
+            elapsed_ms = phase_start.elapsed().as_millis(),
+            "Phase 4: Lifecycle events injected"
+        );
 
-            // Load data for each token in the market
-            for token_id in token_ids {
-                // Load price history
-                let prices = self
-                    .data_store
-                    .get_historical_prices(&token_id, self.config.start_date, self.config.end_date)
-                    .await
-                    .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
+        // ── Phase 5: Streaming trade synthesis (1-2 queries) ──
+        let phase_start = Instant::now();
+        let synthesized_buckets = self
+            .data_store
+            .stream_trades_into_synthesis(
+                &all_token_ids,
+                self.config.start_date,
+                self.config.end_date,
+                self.config.data_fidelity_secs,
+            )
+            .await
+            .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
 
-                for price in prices {
-                    // Apply realistic spread (1 tick = 0.01) to cached prices,
-                    // matching the synthesizer's spread logic
-                    let best_bid = (price.price - Decimal::new(1, 2)).max(Decimal::new(1, 2));
-                    let best_ask = price.price + Decimal::new(1, 2);
+        let synthetic_count = synthesized_buckets.len();
+        for bucket in &synthesized_buckets {
+            let timestamp = DateTime::from_timestamp(bucket.bucket_end, 0).unwrap_or_else(Utc::now);
+            events.push(HistoricalEvent {
+                timestamp,
+                token_id: bucket.token_id.clone(),
+                event: Event::MarketData(MarketDataEvent::PriceChange {
+                    token_id: bucket.token_id.clone(),
+                    price: bucket.last_price,
+                    side: OrderSide::Buy,
+                    best_bid: bucket.best_bid,
+                    best_ask: bucket.best_ask,
+                }),
+            });
+        }
+        info!(
+            synthetic_prices = synthetic_count,
+            fidelity_secs = self.config.data_fidelity_secs,
+            elapsed_ms = phase_start.elapsed().as_millis(),
+            "Phase 5: Trade synthesis streamed"
+        );
+
+        // ── Phase 6: ExternalPrice events from klines or fallback (0 queries) ──
+        let phase_start = Instant::now();
+        let mut total_crypto_events = 0usize;
+
+        for coin in &coins_in_backtest {
+            if coin_klines.contains_key(coin) {
+                // Real Binance klines available
+                let klines = &coin_klines[coin];
+                info!(
+                    coin,
+                    count = klines.len(),
+                    "Loaded real Binance klines for ExternalPrice events"
+                );
+                for &(ts, close) in klines {
+                    let timestamp = DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now);
                     events.push(HistoricalEvent {
-                        timestamp: price.timestamp,
-                        token_id: price.token_id.clone(),
-                        event: Event::MarketData(MarketDataEvent::PriceChange {
-                            token_id: price.token_id,
-                            price: price.price,
-                            side: OrderSide::Buy,
-                            best_bid,
-                            best_ask,
+                        timestamp,
+                        token_id: coin.clone(),
+                        event: Event::MarketData(MarketDataEvent::ExternalPrice {
+                            symbol: coin.clone(),
+                            price: close,
+                            source: "binance-spot".to_string(),
+                            timestamp,
                         }),
                     });
+                    total_crypto_events += 1;
                 }
+            } else {
+                // Fallback: derive from synthesized buckets for this coin's up_tokens
+                warn!(
+                    coin,
+                    "No Binance klines found, falling back to synthetic ExternalPrice from trade buckets"
+                );
 
-                // Load trade history for this token
-                let trades = self
-                    .data_store
-                    .get_historical_trades(&token_id, self.config.start_date, self.config.end_date)
-                    .await
-                    .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
+                let nominal_bases: HashMap<&str, Decimal> = [
+                    ("BTC", Decimal::new(100_000, 0)),
+                    ("ETH", Decimal::new(3_000, 0)),
+                    ("SOL", Decimal::new(200, 0)),
+                    ("XRP", Decimal::new(1, 0)),
+                ]
+                .into();
 
-                for trade in trades {
-                    let side = match trade.side.as_str() {
-                        "buy" => Some(OrderSide::Buy),
-                        "sell" => Some(OrderSide::Sell),
-                        _ => None,
-                    };
-                    events.push(HistoricalEvent {
-                        timestamp: trade.timestamp,
-                        token_id: trade.token_id.clone(),
-                        event: Event::MarketData(MarketDataEvent::Trade {
-                            token_id: trade.token_id,
-                            price: trade.price,
-                            size: trade.size,
-                            timestamp: trade.timestamp,
-                            side,
-                        }),
-                    });
-                }
-            } // end token_ids loop
-        } // end market_ids loop
+                let base = nominal_bases
+                    .get(coin.as_str())
+                    .copied()
+                    .unwrap_or(Decimal::new(100, 0));
+                let scale = Decimal::new(1, 1); // 0.1
+                let half = Decimal::new(5, 1); // 0.5
 
-        // Load real crypto prices from Binance klines (historical_crypto_prices table).
-        // If no klines are available, fall back to synthetic prices from market probability.
-        {
-            // Determine which coins are in the backtest from market slugs
-            let coin_prefixes = ["btc", "eth", "sol", "xrp"];
-            let mut coins_in_backtest: Vec<String> = Vec::new();
-            for market_id in &self.config.market_ids {
-                if let Ok(Some(m)) = self
-                    .data_store
-                    .get_historical_market(market_id)
-                    .await
-                    .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))
-                {
-                    let slug_lower = m.slug.to_lowercase();
-                    for prefix in &coin_prefixes {
-                        if slug_lower.starts_with(prefix) {
-                            let coin = prefix.to_uppercase();
-                            if !coins_in_backtest.contains(&coin) {
-                                coins_in_backtest.push(coin);
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-
-            let mut total_crypto_events = 0usize;
-
-            for coin in &coins_in_backtest {
-                // Try loading real Binance klines first
-                let prices = self
-                    .data_store
-                    .get_crypto_prices(coin, self.config.start_date, self.config.end_date)
-                    .await
-                    .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))?;
-
-                if !prices.is_empty() {
-                    info!(
-                        coin,
-                        count = prices.len(),
-                        "Loaded real Binance klines for ExternalPrice events"
-                    );
-                    for p in prices {
+                // Use synthesized buckets for up_tokens of this coin
+                for bucket in &synthesized_buckets {
+                    if up_token_to_coin.get(&bucket.token_id).map(String::as_str) == Some(coin) {
+                        let prob = bucket.last_price;
+                        let synthetic_price = base * (Decimal::ONE + scale * (prob - half));
+                        let timestamp =
+                            DateTime::from_timestamp(bucket.bucket_end, 0).unwrap_or_else(Utc::now);
                         events.push(HistoricalEvent {
-                            timestamp: p.timestamp,
+                            timestamp,
                             token_id: coin.clone(),
                             event: Event::MarketData(MarketDataEvent::ExternalPrice {
                                 symbol: coin.clone(),
-                                price: p.close,
-                                source: p.source,
-                                timestamp: p.timestamp,
-                            }),
-                        });
-                        total_crypto_events += 1;
-                    }
-                } else {
-                    // Fallback: synthesize from market probability (original behavior)
-                    warn!(
-                        coin,
-                        "No Binance klines found, falling back to synthetic ExternalPrice from market probability"
-                    );
-
-                    let nominal_bases: HashMap<&str, Decimal> = [
-                        ("BTC", Decimal::new(100_000, 0)),
-                        ("ETH", Decimal::new(3_000, 0)),
-                        ("SOL", Decimal::new(200, 0)),
-                        ("XRP", Decimal::new(1, 0)),
-                    ]
-                    .into();
-
-                    let base = nominal_bases
-                        .get(coin.as_str())
-                        .copied()
-                        .unwrap_or(Decimal::new(100, 0));
-                    let scale = Decimal::new(1, 1); // 0.1
-                    let half = Decimal::new(5, 1); // 0.5
-
-                    // Build up_token -> coin map for this coin
-                    let mut up_tokens: Vec<String> = Vec::new();
-                    for market_id in &self.config.market_ids {
-                        if let Ok(Some(m)) = self
-                            .data_store
-                            .get_historical_market(market_id)
-                            .await
-                            .map_err(|e| polyrust_core::error::PolyError::Config(e.to_string()))
-                            && m.slug.to_lowercase().starts_with(&coin.to_lowercase())
-                        {
-                            up_tokens.push(m.token_a.clone());
-                        }
-                    }
-
-                    let trade_events: Vec<_> = events
-                        .iter()
-                        .filter_map(|e| {
-                            if let Event::MarketData(MarketDataEvent::Trade {
-                                token_id,
-                                price,
-                                ..
-                            }) = &e.event
-                            {
-                                if up_tokens.contains(token_id) {
-                                    let synthetic_price =
-                                        base * (Decimal::ONE + scale * (*price - half));
-                                    Some((e.timestamp, coin.clone(), synthetic_price))
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    for (ts, sym, price) in trade_events {
-                        events.push(HistoricalEvent {
-                            timestamp: ts,
-                            token_id: sym.clone(),
-                            event: Event::MarketData(MarketDataEvent::ExternalPrice {
-                                symbol: sym,
-                                price,
+                                price: synthetic_price,
                                 source: "backtest-synthetic".to_string(),
-                                timestamp: ts,
+                                timestamp,
                             }),
                         });
                         total_crypto_events += 1;
                     }
                 }
             }
-
-            info!(
-                coins = ?coins_in_backtest,
-                total_crypto_events,
-                "ExternalPrice events loaded for backtest"
-            );
         }
-
-        // Synthesize PriceChange events from trades at configured fidelity
-        {
-            let synthetic =
-                synthesize_price_events_from_trades(&events, self.config.data_fidelity_secs);
-            info!(
-                synthetic_prices = synthetic.len(),
-                fidelity_secs = self.config.data_fidelity_secs,
-                "Synthesized PriceChange events from trade data"
-            );
-            events.extend(synthetic);
-        }
-
-        // Remove raw Trade events — they've already been consumed by ExternalPrice
-        // and PriceChange synthesis above. Replaying them through the strategy is
-        // wasteful (the engine's token_prices cache gets the same data from synthesized
-        // events). This typically cuts event count by ~65% (e.g. 9.7M -> 3.4M).
-        let before = events.len();
-        events.retain(|e| !matches!(&e.event, Event::MarketData(MarketDataEvent::Trade { .. })));
         info!(
-            before = before,
-            after = events.len(),
-            removed = before - events.len(),
-            "Filtered raw Trade events (consumed by synthesis)"
+            coins = ?coins_in_backtest,
+            total_crypto_events,
+            elapsed_ms = phase_start.elapsed().as_millis(),
+            "Phase 6: ExternalPrice events loaded"
         );
 
-        // Sort events chronologically
+        // ── Phase 7: Sort events chronologically ──
+        let phase_start = Instant::now();
         events.sort_by_key(|e| e.timestamp);
+        info!(
+            total_events = events.len(),
+            sort_ms = phase_start.elapsed().as_millis(),
+            total_load_ms = load_start.elapsed().as_millis(),
+            "Phase 7: Events sorted — load_events complete"
+        );
 
         Ok(events)
     }
@@ -1523,6 +1447,106 @@ mod tests {
     use super::*;
     use crate::config::{FeeConfig, RealismConfig};
     use async_trait::async_trait;
+    use std::collections::BTreeMap;
+
+    /// Per-bucket trade aggregation (test-only, mirrors store.rs BucketAgg).
+    struct BucketAgg {
+        token_id: String,
+        last_price: Decimal,
+        last_buy: Option<Decimal>,
+        last_sell: Option<Decimal>,
+    }
+
+    /// Legacy in-memory synthesis function retained for unit tests.
+    fn synthesize_price_events_from_trades(
+        events: &[HistoricalEvent],
+        fidelity_secs: u64,
+    ) -> Vec<HistoricalEvent> {
+        if events.is_empty() || fidelity_secs == 0 {
+            return Vec::new();
+        }
+
+        let fidelity = fidelity_secs as i64;
+        let default_spread = Decimal::new(1, 2);
+
+        let mut token_buckets: HashMap<String, BTreeMap<i64, BucketAgg>> = HashMap::new();
+        let mut prev_prices: HashMap<String, Decimal> = HashMap::new();
+
+        for event in events {
+            if let Event::MarketData(MarketDataEvent::Trade {
+                token_id,
+                price,
+                side,
+                ..
+            }) = &event.event
+            {
+                let ts = event.timestamp.timestamp();
+                let bucket_start = (ts / fidelity) * fidelity;
+
+                let bucket = token_buckets
+                    .entry(token_id.clone())
+                    .or_default()
+                    .entry(bucket_start)
+                    .or_insert(BucketAgg {
+                        token_id: token_id.clone(),
+                        last_price: *price,
+                        last_buy: None,
+                        last_sell: None,
+                    });
+
+                bucket.last_price = *price;
+
+                let is_buy = match side {
+                    Some(OrderSide::Buy) => true,
+                    Some(OrderSide::Sell) => false,
+                    _ => {
+                        let prev = prev_prices.get(token_id).copied();
+                        prev.is_none_or(|p| *price >= p)
+                    }
+                };
+                prev_prices.insert(token_id.clone(), *price);
+
+                if is_buy {
+                    bucket.last_buy = Some(*price);
+                } else {
+                    bucket.last_sell = Some(*price);
+                }
+            }
+        }
+
+        let mut synthetic_events = Vec::new();
+
+        for buckets in token_buckets.values() {
+            for (&bucket_start, agg) in buckets {
+                let bucket_end = bucket_start + fidelity;
+                let timestamp = DateTime::from_timestamp(bucket_end, 0).unwrap_or_else(Utc::now);
+
+                let (best_bid, best_ask) = match (agg.last_sell, agg.last_buy) {
+                    (Some(sell), Some(buy)) => (sell, buy),
+                    (Some(sell), None) => (sell, sell + default_spread),
+                    (None, Some(buy)) => ((buy - default_spread).max(Decimal::new(1, 2)), buy),
+                    (None, None) => (
+                        (agg.last_price - default_spread).max(Decimal::new(1, 2)),
+                        agg.last_price + default_spread,
+                    ),
+                };
+
+                synthetic_events.push(HistoricalEvent {
+                    timestamp,
+                    token_id: agg.token_id.clone(),
+                    event: Event::MarketData(MarketDataEvent::PriceChange {
+                        token_id: agg.token_id.clone(),
+                        price: agg.last_price,
+                        side: OrderSide::Buy,
+                        best_bid,
+                        best_ask,
+                    }),
+                });
+            }
+        }
+
+        synthetic_events
+    }
     use polyrust_core::actions::Action;
     use polyrust_core::context::StrategyContext;
     use polyrust_core::error::Result;
@@ -1622,6 +1646,7 @@ mod tests {
             fetch_concurrency: 10,
             offline: false,
             realism: RealismConfig::default(),
+            sizing: None,
             sweep: None,
         };
 
@@ -1706,6 +1731,7 @@ mod tests {
             fetch_concurrency: 10,
             offline: false,
             realism: RealismConfig::default(),
+            sizing: None,
             sweep: None,
         };
 
@@ -1756,6 +1782,7 @@ mod tests {
             fetch_concurrency: 10,
             offline: false,
             realism: RealismConfig::default(),
+            sizing: None,
             sweep: None,
         };
 
@@ -1959,6 +1986,7 @@ mod tests {
             fetch_concurrency: 10,
             offline: false,
             realism: RealismConfig::default(),
+            sizing: None,
             sweep: None,
         };
 
@@ -2025,6 +2053,7 @@ mod tests {
                 slippage_ticks: 2, // 2 ticks = 0.02 slippage
                 ..Default::default()
             },
+            sizing: None,
             sweep: None,
         };
 
@@ -2147,6 +2176,7 @@ mod tests {
                 gtc_taker_fee_heuristic: false,
                 ..Default::default()
             },
+            sizing: None,
             sweep: None,
         };
 
@@ -2179,6 +2209,7 @@ mod tests {
                 gtc_taker_fee_heuristic: true,
                 ..Default::default()
             },
+            sizing: None,
             sweep: None,
         };
 
@@ -2233,6 +2264,7 @@ mod tests {
                 typical_depth: dec!(150),
                 ..Default::default()
             },
+            sizing: None,
             sweep: None,
         };
 
@@ -2269,6 +2301,7 @@ mod tests {
                 depth_decay_near_expiry: true,
                 ..Default::default()
             },
+            sizing: None,
             sweep: None,
         };
 
@@ -2295,6 +2328,7 @@ mod tests {
             .into_iter()
             .collect(),
             market_durations: [("market1".to_string(), 900i64)].into_iter().collect(),
+            market_slugs: HashMap::new(),
         });
 
         // At start (900s remaining): full depth

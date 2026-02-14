@@ -87,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
         fetch_concurrency: 10,
         offline: false,
         realism: Default::default(),
+        sizing: None,
         sweep: None,
     };
 

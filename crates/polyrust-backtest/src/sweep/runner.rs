@@ -102,6 +102,12 @@ impl SweepRunner {
         pb.set_message("N/A");
         let _pb_guard = crate::progress::ProgressBarGuard::register(&pb);
 
+        // Apply backtest sizing override to base arb_config so all combos start from it
+        let mut base_arb_config = self.arb_config.clone();
+        if let Some(ref sizing_override) = self.backtest_config.sizing {
+            sizing_override.apply_to(&mut base_arb_config.sizing);
+        }
+
         let mut results: Vec<SweepResult> = Vec::with_capacity(total);
         let mut join_set: tokio::task::JoinSet<BacktestResult<SweepResult>> =
             tokio::task::JoinSet::new();
@@ -136,7 +142,7 @@ impl SweepRunner {
             let events = Arc::clone(&events);
             let token_maps = Arc::clone(&token_maps);
             let backtest_config = self.backtest_config.clone();
-            let mut arb_config = self.arb_config.clone();
+            let mut arb_config = base_arb_config.clone();
             let data_store = Arc::clone(&self.data_store);
             let params_map = combo.params_map();
 
@@ -147,6 +153,8 @@ impl SweepRunner {
             arb_config.tailend.min_reference_quality = ReferenceQualityLevel::Current;
             arb_config.use_chainlink = false; // No RPC in backtest
             arb_config.tailend.stale_ob_secs = i64::MAX; // Staleness meaningless in backtest
+            arb_config.tailend.use_composite_price = false; // Composite price gating meaningless with deterministic data
+            arb_config.stop_loss.sl_max_dispersion_bps = rust_decimal::Decimal::new(10000, 0); // Dispersion check disabled in backtest
 
             let combo_index = combo.index;
 
@@ -236,6 +244,7 @@ async fn run_single(
         token_to_market: token_maps.token_to_market.clone(),
         market_end_dates: token_maps.market_end_dates.clone(),
         market_durations: token_maps.market_durations.clone(),
+        market_slugs: token_maps.market_slugs.clone(),
     });
 
     // Call on_start before replay

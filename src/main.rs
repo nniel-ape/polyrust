@@ -708,6 +708,13 @@ async fn run_backtest() -> anyhow::Result<()> {
     arb_config.tailend.min_reference_quality = ReferenceQualityLevel::Current;
     arb_config.use_chainlink = false; // No RPC in backtest
     arb_config.tailend.stale_ob_secs = i64::MAX; // Staleness meaningless in backtest
+    arb_config.tailend.use_composite_price = false; // Composite price gating meaningless with deterministic data
+    arb_config.stop_loss.sl_max_dispersion_bps = Decimal::new(10000, 0); // Dispersion check disabled in backtest
+
+    // Apply backtest-specific sizing overrides (if configured)
+    if let Some(ref sizing_override) = backtest_config.sizing {
+        sizing_override.apply_to(&mut arb_config.sizing);
+    }
 
     // Instantiate strategy based on strategy_name
     let strategy: Box<dyn Strategy> = match backtest_config.strategy_name.as_str() {
@@ -882,6 +889,8 @@ async fn run_backtest_sweep() -> anyhow::Result<()> {
 
     // Backtest can't produce Historical quality
     arb_config.tailend.min_reference_quality = ReferenceQualityLevel::Current;
+    arb_config.tailend.use_composite_price = false; // Composite price gating meaningless with deterministic data
+    arb_config.stop_loss.sl_max_dispersion_bps = Decimal::new(10000, 0); // Dispersion check disabled in backtest
 
     // Run sweep
     let rank_by = sweep_config
@@ -889,8 +898,10 @@ async fn run_backtest_sweep() -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| "sharpe".to_string());
     let top_n = sweep_config.top_n.unwrap_or(20);
-    let csv_path = sweep_config.csv_export.clone();
-    let json_path = sweep_config.json_export.clone();
+    let output_dir = sweep_config
+        .output_dir
+        .clone()
+        .unwrap_or_else(|| "sweep_results".to_string());
 
     let runner = SweepRunner::new(sweep_config, backtest_config, arb_config, data_store);
     let mut report = runner.run().await?;
@@ -903,18 +914,16 @@ async fn run_backtest_sweep() -> anyhow::Result<()> {
     let sensitivity = report.sensitivity_analysis();
     sensitivity.print_table();
 
-    // Export if configured
-    if let Some(ref path) = csv_path {
-        report.export_csv(path)?;
-        let sens_path = path.replace(".csv", "_sensitivity.csv");
-        sensitivity.export_csv(&sens_path)?;
-    }
-    if let Some(ref path) = json_path {
-        report.export_json(path)?;
-        let sens_path = path.replace(".json", "_sensitivity.json");
-        sensitivity.export_json(&sens_path)?;
-    }
+    // Export to timestamped subdirectory
+    let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+    let run_dir = format!("{}/{}", output_dir, timestamp);
+    std::fs::create_dir_all(&run_dir)?;
 
-    info!("Backtest sweep complete");
+    report.export_csv(&format!("{}/results.csv", run_dir))?;
+    report.export_json(&format!("{}/results.json", run_dir))?;
+    sensitivity.export_csv(&format!("{}/sensitivity.csv", run_dir))?;
+    sensitivity.export_json(&format!("{}/sensitivity.json", run_dir))?;
+
+    info!("Sweep results exported to {}", run_dir);
     Ok(())
 }
