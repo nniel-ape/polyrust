@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -11,6 +11,9 @@ use tracing::{debug, info, warn};
 /// it is cleaned up to prevent permanently blocking the market slot.
 /// FOK orders should resolve within seconds; 120s is very generous.
 const EXECUTION_TIMEOUT_SECS: i64 = 120;
+
+/// Minimum interval between stale execution cleanup runs (seconds).
+const CLEANUP_INTERVAL_SECS: i64 = 30;
 
 use polyrust_core::prelude::*;
 
@@ -39,8 +42,24 @@ pub struct DutchBookStrategy {
     pub(crate) open_positions: HashMap<MarketId, PairedPosition>,
     /// Reverse lookup: order_id → market_id (for routing fill/cancel events).
     pub(crate) order_to_market: HashMap<OrderId, MarketId>,
+    /// Markets where an unwind PlaceOrder was dispatched but the execution was removed
+    /// (e.g., by a stale fill) before the Placed event arrived. When handle_order_placed
+    /// sees a SELL for one of these markets, it emits CancelOrder immediately.
+    pub(crate) cancel_on_placed: HashSet<MarketId>,
+    /// Token → market mapping for cancel_on_placed flow. When a market is removed from
+    /// the analyzer (e.g., on expiry) while cancel_on_placed is pending, the normal
+    /// token→market resolution via `analyzer.market_for_token()` fails. This map
+    /// preserves the mapping so handle_order_placed can still resolve the market_id.
+    pub(crate) cancel_token_to_market: HashMap<TokenId, MarketId>,
+    /// Sell orders that were cancelled but may still fill (cancel could race with fill).
+    /// Maps order_id → market_id so late fills can be detected and accounted for rather
+    /// than silently dropped. Populated when cancel_on_placed cancels a SELL, or when
+    /// a stale-fill cleanup cancels the active unwind order.
+    pub(crate) orphaned_sells: HashMap<OrderId, MarketId>,
     /// Handle to the background scanner task.
     scanner_handle: Option<JoinHandle<()>>,
+    /// Last time cleanup_stale_executions was run (rate-limited to avoid hot-path overhead).
+    pub(crate) last_cleanup: DateTime<Utc>,
     /// Shared dashboard state (read by DutchBookDashboard).
     pub(crate) shared_state: Arc<RwLock<DutchBookState>>,
 }
@@ -62,7 +81,11 @@ impl DutchBookStrategy {
             active_executions: HashMap::new(),
             open_positions: HashMap::new(),
             order_to_market: HashMap::new(),
+            cancel_on_placed: HashSet::new(),
+            cancel_token_to_market: HashMap::new(),
+            orphaned_sells: HashMap::new(),
             scanner_handle: None,
+            last_cleanup: DateTime::<Utc>::MIN_UTC,
             shared_state,
         }
     }
@@ -209,6 +232,8 @@ impl DutchBookStrategy {
             state: ExecutionState::new(),
             yes_fill_price: None,
             no_fill_price: None,
+            unwind_retries: 0,
+            stale_unwind_ids: Vec::new(),
         };
 
         self.active_executions.insert(opp.market_id.clone(), paired);
@@ -227,12 +252,74 @@ impl DutchBookStrategy {
             None => return vec![],
         };
 
-        // Find which market this token belongs to, then check if we have an active execution
-        let entry = match self.analyzer.market_for_token(&result.token_id) {
-            Some(e) => e.clone(),
+        // Resolve market_id from the token_id. Primary path uses the analyzer;
+        // fallback uses cancel_token_to_market for markets already removed from
+        // the analyzer (e.g., after expiry) but with pending cancel_on_placed.
+        let (entry, market_id) =
+            if let Some(e) = self.analyzer.market_for_token(&result.token_id) {
+                let mid = e.market_id.clone();
+                (Some(e.clone()), mid)
+            } else if let Some(mid) = self.cancel_token_to_market.get(&result.token_id) {
+                (None, mid.clone())
+            } else {
+                return vec![];
+            };
+
+        // Check cancel_on_placed — an orphaned unwind SELL from a previous execution
+        // must be cancelled even if a new execution already exists for this market.
+        // Only consume the flag on SELL side; BUY events from a new execution must not clear it.
+        //
+        // Always cancel unconditionally when the flag is set: we cannot distinguish
+        // orphaned SELLs from legitimate new-execution SELLs by order attributes alone.
+        // If a new execution was awaiting its SELL, re-dispatch the unwind after consuming
+        // the flag so the re-dispatched SELL arrives with cancel_on_placed already cleared.
+        if result.side == OrderSide::Sell && self.cancel_on_placed.contains(&market_id) {
+            self.cancel_on_placed.remove(&market_id);
+            // Clean up the fallback token mappings for this market
+            self.cancel_token_to_market
+                .retain(|_, mid| mid != &market_id);
+
+            // Track the cancelled order so late fills (if cancel races with fill) are
+            // detected and accounted for rather than silently dropped.
+            self.orphaned_sells
+                .insert(order_id.clone(), market_id.clone());
+
+            let mut actions = vec![Action::CancelOrder(order_id.clone())];
+
+            let needs_redispatch = self
+                .active_executions
+                .get(&market_id)
+                .is_some_and(|exec| {
+                    matches!(
+                        &exec.state,
+                        ExecutionState::Unwinding { sell_order_id } if sell_order_id.is_empty()
+                    )
+                });
+
+            if needs_redispatch {
+                warn!(
+                    %market_id, %order_id,
+                    "Cancelling ambiguous SELL (cancel_on_placed) — re-dispatching unwind for active execution"
+                );
+                actions.extend(self.start_unwind_redispatch(&market_id));
+            } else {
+                warn!(
+                    %market_id, %order_id,
+                    "Cancelling orphaned unwind order (execution removed before Placed event)"
+                );
+            }
+
+            return actions;
+        }
+
+        // Past this point we need the full MarketEntry from the analyzer.
+        // If entry is None (resolved via cancel_token_to_market fallback only),
+        // there's no active execution to track — the market was already removed.
+        let entry = match entry {
+            Some(e) => e,
             None => return vec![],
         };
-        let market_id = entry.market_id.clone();
+
         if !self.active_executions.contains_key(&market_id) {
             return vec![];
         }
@@ -256,6 +343,21 @@ impl DutchBookStrategy {
                     state = ?exec.state,
                     "Unwind sell order placed"
                 );
+            } else if matches!(&exec.state, ExecutionState::Unwinding { sell_order_id } if !sell_order_id.is_empty())
+                && result.side == OrderSide::Sell
+            {
+                // Stale SELL from a previous cancel_on_placed re-dispatch cycle.
+                // The execution already has its sell tracked — cancel this one to
+                // prevent an unmanaged live order on the exchange.
+                // Track the order for late-fill handling so it isn't silently dropped.
+                exec.stale_unwind_ids.push(order_id.clone());
+                self.order_to_market
+                    .insert(order_id.clone(), market_id.clone());
+                warn!(
+                    %market_id, %order_id,
+                    "Cancelling late SELL Placed — execution already tracking a sell order"
+                );
+                return vec![Action::CancelOrder(order_id)];
             } else {
                 // Normal batch order placement
                 if result.token_id == entry.token_a {
@@ -271,6 +373,42 @@ impl DutchBookStrategy {
         vec![]
     }
 
+    /// Re-dispatch the unwind for an execution that had its SELL cancelled by
+    /// cancel_on_placed. Generates a new PlaceOrder SELL without changing the
+    /// execution state (it remains Unwinding with empty sell_order_id).
+    fn start_unwind_redispatch(&self, market_id: &str) -> Vec<Action> {
+        let exec = match self.active_executions.get(market_id) {
+            Some(e) => e,
+            None => return vec![],
+        };
+
+        let entry = match self.analyzer.market_for_market_id(market_id) {
+            Some(e) => e.clone(),
+            None => return vec![],
+        };
+
+        let (filled_token_id, fill_price) = match (&exec.yes_fill_price, &exec.no_fill_price) {
+            (Some(p), None) => (entry.token_a.clone(), *p),
+            (None, Some(p)) => (entry.token_b.clone(), *p),
+            _ => return vec![],
+        };
+
+        let sell_price = fill_price * (Decimal::ONE - self.config.unwind_discount);
+
+        let sell_order = OrderRequest::new(
+            filled_token_id,
+            sell_price,
+            exec.size,
+            OrderSide::Sell,
+            OrderType::Gtc,
+            entry.neg_risk,
+        )
+        .with_tick_size(entry.tick_size)
+        .with_fee_rate_bps(entry.fee_rate_bps);
+
+        vec![Action::PlaceOrder(sell_order)]
+    }
+
     /// Handle an order fill event — update execution state.
     pub(crate) async fn handle_order_filled(
         &mut self,
@@ -282,6 +420,21 @@ impl DutchBookStrategy {
         // Check if this is an unwind order fill
         if let Some(actions) = self.handle_unwind_order_event(order_id, true).await {
             return actions;
+        }
+
+        // Check if this is a late fill from an orphaned sell (cancel raced with fill).
+        // Log the double-sell for accounting — we can't undo the fill, but we can track it.
+        if let Some(market_id) = self.orphaned_sells.remove(order_id) {
+            warn!(
+                %market_id, %order_id, %price, %size,
+                "Late fill from orphaned sell order (cancel failed) — double-sell detected"
+            );
+            return vec![Action::Log {
+                level: LogLevel::Error,
+                message: format!(
+                    "Dutch Book DOUBLE-SELL for market {market_id}: orphaned sell {order_id} filled at {price} (size {size}) after cancel failed"
+                ),
+            }];
         }
 
         let market_id = match self.order_to_market.get(order_id) {
@@ -408,6 +561,9 @@ impl DutchBookStrategy {
             return actions;
         }
 
+        // Clean up orphaned sell tracking on successful cancel (no late fill risk)
+        self.orphaned_sells.remove(order_id);
+
         let market_id = match self.order_to_market.get(order_id) {
             Some(mid) => mid.clone(),
             None => return vec![],
@@ -454,6 +610,39 @@ impl DutchBookStrategy {
             }
             _ => vec![],
         }
+    }
+
+    /// Handle a CancelFailed event -- the cancel we requested did not succeed,
+    /// meaning the order is still live on the exchange. Re-insert tracking if we
+    /// had removed it (e.g., orphaned_sells removed on Cancelled, but cancel failed
+    /// means the order is still live).
+    async fn handle_cancel_failed(&mut self, order_id: &str, reason: &str) -> Vec<Action> {
+        // Check if this was an orphaned sell we thought was cancelled.
+        // Since the cancel failed, the order is still live -- re-insert into orphaned_sells
+        // so late fills are still tracked.
+        if let Some(market_id) = self.order_to_market.get(order_id) {
+            let market_id = market_id.clone();
+            warn!(
+                %market_id, %order_id, %reason,
+                "CancelFailed for Dutch Book order — order is still live"
+            );
+
+            // If this was a cancel_on_placed cancellation that failed, the sell order
+            // is still live. Track it in orphaned_sells for late-fill detection.
+            if !self.orphaned_sells.contains_key(order_id)
+                && !self.active_executions.values().any(|exec| {
+                    matches!(&exec.state, ExecutionState::Unwinding { sell_order_id } if sell_order_id == order_id)
+                })
+            {
+                self.orphaned_sells
+                    .insert(order_id.to_string(), market_id);
+            }
+        } else {
+            // Order not tracked by us -- likely already cleaned up
+            debug!(%order_id, %reason, "CancelFailed for unknown order — ignoring");
+        }
+
+        vec![]
     }
 
     /// Handle a batch rejection where order_id is None.
@@ -578,18 +767,101 @@ impl DutchBookStrategy {
 
     /// Handle a fill or cancel event for an unwind order.
     /// Returns Some(actions) if the order_id matched an unwinding execution, None otherwise.
+    ///
+    /// Checks both the current unwind sell_order_id and stale_unwind_ids (from previous
+    /// retry attempts) to handle late fills that arrive after an unwind was cancelled.
     async fn handle_unwind_order_event(&mut self, order_id: &str, is_fill: bool) -> Option<Vec<Action>> {
-        // Find which execution is in Unwinding state with this sell_order_id
-        let market_id = {
+        // Find which execution this unwind order belongs to.
+        // Check both the active sell_order_id and stale IDs from previous retries.
+        let (market_id, is_stale) = {
             let mut found = None;
             for (mid, exec) in &self.active_executions {
-                if let ExecutionState::Unwinding { sell_order_id } = &exec.state && sell_order_id == order_id {
-                    found = Some(mid.clone());
+                if let ExecutionState::Unwinding { sell_order_id } = &exec.state
+                    && sell_order_id == order_id
+                {
+                    found = Some((mid.clone(), false));
+                    break;
+                }
+                if exec.stale_unwind_ids.iter().any(|id| id == order_id) {
+                    found = Some((mid.clone(), true));
                     break;
                 }
             }
             found?
         };
+
+        if is_fill && is_stale {
+            // Late fill from a previously-cancelled unwind order. The tokens were sold
+            // by the old order, so the current retry unwind is now redundant.
+            // Cancel the active unwind order and complete the execution.
+            let exec = self.active_executions.remove(&market_id)?;
+            self.order_to_market.remove(&exec.yes_order_id);
+            self.order_to_market.remove(&exec.no_order_id);
+            self.order_to_market.remove(order_id);
+            for stale_id in &exec.stale_unwind_ids {
+                self.order_to_market.remove(stale_id.as_str());
+            }
+
+            // Cancel the current active unwind order (it's now redundant).
+            // If sell_order_id is empty, a PlaceOrder was dispatched but the Placed event
+            // hasn't arrived yet — mark for cancellation when it does.
+            let mut actions = Vec::new();
+            if let ExecutionState::Unwinding { sell_order_id } = &exec.state {
+                if !sell_order_id.is_empty() {
+                    self.order_to_market.remove(sell_order_id.as_str());
+                    // Track in orphaned_sells: if the cancel races with a fill,
+                    // the late fill will be detected rather than silently dropped.
+                    self.orphaned_sells
+                        .insert(sell_order_id.clone(), market_id.clone());
+                    actions.push(Action::CancelOrder(sell_order_id.clone()));
+                } else {
+                    // PlaceOrder dispatched but Placed event pending — cancel on arrival
+                    self.cancel_on_placed.insert(market_id.clone());
+                }
+            }
+
+            let fee_rate = polyrust_core::fees::default_taker_fee_rate();
+            let loss = match (&exec.yes_fill_price, &exec.no_fill_price) {
+                (Some(p), None) => {
+                    let buy_cost = (*p + taker_fee_per_share(*p, fee_rate)) * exec.size;
+                    let sell_proceeds = *p * (Decimal::ONE - self.config.unwind_discount) * exec.size;
+                    buy_cost - sell_proceeds
+                }
+                (None, Some(p)) => {
+                    let buy_cost = (*p + taker_fee_per_share(*p, fee_rate)) * exec.size;
+                    let sell_proceeds = *p * (Decimal::ONE - self.config.unwind_discount) * exec.size;
+                    buy_cost - sell_proceeds
+                }
+                _ => Decimal::ZERO,
+            };
+
+            warn!(
+                %market_id, %order_id,
+                "Late fill from stale unwind order — completing unwind, cancelling active retry"
+            );
+
+            {
+                let mut state = self.shared_state.write().await;
+                state.total_unwind_losses += loss;
+            }
+
+            actions.push(Action::Log {
+                level: LogLevel::Warn,
+                message: format!(
+                    "Dutch Book unwind for market {market_id} (late fill from stale order): ~{loss} USDC loss"
+                ),
+            });
+            return Some(actions);
+        }
+
+        if is_stale && !is_fill {
+            // Cancel event for an already-stale unwind order — just clean up the stale ID
+            if let Some(exec) = self.active_executions.get_mut(&market_id) {
+                exec.stale_unwind_ids.retain(|id| id != order_id);
+            }
+            self.order_to_market.remove(order_id);
+            return Some(vec![]);
+        }
 
         if is_fill {
             // Unwind complete — clean up
@@ -597,6 +869,9 @@ impl DutchBookStrategy {
             self.order_to_market.remove(&exec.yes_order_id);
             self.order_to_market.remove(&exec.no_order_id);
             self.order_to_market.remove(order_id);
+            for stale_id in &exec.stale_unwind_ids {
+                self.order_to_market.remove(stale_id.as_str());
+            }
 
             // Loss = buy cost (price + taker fee) - sell proceeds (price * (1 - discount))
             // The sell is GTC (maker, 0% fee), so sell proceeds = price * (1 - discount) * size
@@ -634,12 +909,82 @@ impl DutchBookStrategy {
                 ),
             }])
         } else {
-            // Unwind order cancelled/rejected — log error, keep tracking
-            warn!(
-                %market_id, %order_id,
-                "Emergency unwind order cancelled — manual intervention may be needed"
-            );
-            Some(vec![])
+            // Unwind order cancelled/rejected — retry or give up
+            let exec = self.active_executions.get_mut(&market_id)?;
+            exec.unwind_retries += 1;
+
+            if exec.unwind_retries >= super::types::MAX_UNWIND_RETRIES {
+                // Max retries exceeded — give up, clean up, and record estimated loss
+                warn!(
+                    %market_id, %order_id,
+                    retries = exec.unwind_retries,
+                    "Emergency unwind failed after max retries — cleaning up execution"
+                );
+
+                let exec = self.active_executions.remove(&market_id)?;
+                self.order_to_market.remove(&exec.yes_order_id);
+                self.order_to_market.remove(&exec.no_order_id);
+                self.order_to_market.remove(order_id);
+                for stale_id in &exec.stale_unwind_ids {
+                    self.order_to_market.remove(stale_id.as_str());
+                }
+
+                // Estimate worst-case loss as the full buy cost (position becomes worthless)
+                let fee_rate = polyrust_core::fees::default_taker_fee_rate();
+                let loss = match (&exec.yes_fill_price, &exec.no_fill_price) {
+                    (Some(p), None) => (*p + taker_fee_per_share(*p, fee_rate)) * exec.size,
+                    (None, Some(p)) => (*p + taker_fee_per_share(*p, fee_rate)) * exec.size,
+                    _ => Decimal::ZERO,
+                };
+
+                {
+                    let mut state = self.shared_state.write().await;
+                    state.total_unwind_losses += loss;
+                }
+
+                Some(vec![Action::Log {
+                    level: LogLevel::Error,
+                    message: format!(
+                        "Dutch Book unwind FAILED for market {market_id} after {} retries: ~{loss} USDC estimated loss (position stranded)",
+                        exec.unwind_retries
+                    ),
+                }])
+            } else {
+                // Retry: track the old sell_order_id as stale (for late fill handling),
+                // transition back to PartialFill and re-trigger unwind.
+                exec.stale_unwind_ids.push(order_id.to_string());
+
+                let (filled_side, filled_order_id) = match (&exec.yes_fill_price, &exec.no_fill_price) {
+                    (Some(_), None) => (FilledSide::Yes, exec.yes_order_id.clone()),
+                    (None, Some(_)) => (FilledSide::No, exec.no_order_id.clone()),
+                    _ => {
+                        // Should not happen — clean up defensively
+                        let exec = self.active_executions.remove(&market_id)?;
+                        self.order_to_market.remove(&exec.yes_order_id);
+                        self.order_to_market.remove(&exec.no_order_id);
+                        self.order_to_market.remove(order_id);
+                        for stale_id in &exec.stale_unwind_ids {
+                            self.order_to_market.remove(stale_id.as_str());
+                        }
+                        return Some(vec![]);
+                    }
+                };
+
+                warn!(
+                    %market_id, %order_id,
+                    retry = exec.unwind_retries,
+                    ?filled_side,
+                    "Emergency unwind order cancelled — retrying"
+                );
+
+                exec.state = ExecutionState::PartialFill {
+                    filled_side,
+                    filled_order_id,
+                };
+
+                let actions = self.start_emergency_unwind(&market_id);
+                Some(actions)
+            }
         }
     }
 
@@ -669,12 +1014,37 @@ impl DutchBookStrategy {
                 neg_risk: pos.neg_risk,
             })]
         } else {
-            // Clean up any active execution for this market
+            // Clean up any active execution for this market (including unwind mappings)
+            let mut cleanup_actions = Vec::new();
             if let Some(exec) = self.active_executions.remove(market_id) {
                 self.order_to_market.remove(&exec.yes_order_id);
                 self.order_to_market.remove(&exec.no_order_id);
+                if let ExecutionState::Unwinding { ref sell_order_id } = exec.state {
+                    if !sell_order_id.is_empty() {
+                        self.order_to_market.remove(sell_order_id);
+                        // Track in orphaned_sells for late-fill detection
+                        self.orphaned_sells
+                            .insert(sell_order_id.clone(), market_id.to_string());
+                        cleanup_actions.push(Action::CancelOrder(sell_order_id.clone()));
+                    } else {
+                        // PlaceOrder SELL was dispatched but Placed event hasn't arrived.
+                        // Track for cancellation when it does.
+                        self.cancel_on_placed.insert(market_id.to_string());
+                        // Preserve token→market mapping so handle_order_placed can
+                        // resolve the market_id after the analyzer removes this market.
+                        if let Some(entry) = self.analyzer.market_for_market_id(market_id) {
+                            self.cancel_token_to_market
+                                .insert(entry.token_a.clone(), market_id.to_string());
+                            self.cancel_token_to_market
+                                .insert(entry.token_b.clone(), market_id.to_string());
+                        }
+                    }
+                }
+                for stale_id in &exec.stale_unwind_ids {
+                    self.order_to_market.remove(stale_id.as_str());
+                }
             }
-            vec![]
+            cleanup_actions
         };
 
         // Remove market from analyzer after extracting any needed data
@@ -701,8 +1071,13 @@ impl DutchBookStrategy {
     /// Clean up stale executions that have exceeded the timeout.
     /// For partial fills, triggers emergency unwind to sell the filled side.
     /// For executions with no fills, removes them cleanly.
-    fn cleanup_stale_executions(&mut self) -> Vec<Action> {
+    /// Rate-limited to run at most once every CLEANUP_INTERVAL_SECS.
+    async fn cleanup_stale_executions(&mut self) -> Vec<Action> {
         let now = Utc::now();
+        if now - self.last_cleanup < Duration::seconds(CLEANUP_INTERVAL_SECS) {
+            return vec![];
+        }
+        self.last_cleanup = now;
         let timeout = Duration::seconds(EXECUTION_TIMEOUT_SECS);
         let stale_ids: Vec<MarketId> = self
             .active_executions
@@ -715,8 +1090,56 @@ impl DutchBookStrategy {
         for market_id in stale_ids {
             let exec = self.active_executions.get(&market_id).unwrap();
 
-            // Skip executions already in Unwinding state — don't place duplicate sell orders
-            if matches!(exec.state, ExecutionState::Unwinding { .. }) {
+            // For Unwinding executions, allow extra time but eventually clean up
+            // to prevent permanent resource leaks (e.g., sell order event was lost).
+            if let ExecutionState::Unwinding { ref sell_order_id } = exec.state {
+                let extended_timeout = Duration::seconds(EXECUTION_TIMEOUT_SECS * 3);
+                if now - exec.submitted_at > extended_timeout {
+                    let sell_id = sell_order_id.clone();
+                    warn!(
+                        %market_id,
+                        age_secs = (now - exec.submitted_at).num_seconds(),
+                        "Unwinding execution stuck beyond extended timeout — forcing cleanup"
+                    );
+                    let exec = self.active_executions.remove(&market_id).unwrap();
+                    self.order_to_market.remove(&exec.yes_order_id);
+                    self.order_to_market.remove(&exec.no_order_id);
+                    // Cancel the live sell order so it doesn't become unmanaged
+                    if !sell_id.is_empty() {
+                        self.order_to_market.remove(&sell_id);
+                        // Track in orphaned_sells for late-fill detection
+                        self.orphaned_sells
+                            .insert(sell_id.clone(), market_id.clone());
+                        actions.push(Action::CancelOrder(sell_id));
+                    } else {
+                        // PlaceOrder was dispatched but Placed event never arrived (or is
+                        // still in flight). Track for cancellation if it arrives later.
+                        self.cancel_on_placed.insert(market_id.clone());
+                        // Preserve token→market mapping so handle_order_placed can
+                        // resolve the market_id after the analyzer removes this market.
+                        if let Some(entry) = self.analyzer.market_for_market_id(&market_id) {
+                            self.cancel_token_to_market
+                                .insert(entry.token_a.clone(), market_id.clone());
+                            self.cancel_token_to_market
+                                .insert(entry.token_b.clone(), market_id.clone());
+                        }
+                    }
+                    for stale_id in &exec.stale_unwind_ids {
+                        self.order_to_market.remove(stale_id.as_str());
+                    }
+
+                    // Record estimated worst-case loss (full buy cost, position may be stranded)
+                    let fee_rate = polyrust_core::fees::default_taker_fee_rate();
+                    let loss = match (&exec.yes_fill_price, &exec.no_fill_price) {
+                        (Some(p), None) => (*p + taker_fee_per_share(*p, fee_rate)) * exec.size,
+                        (None, Some(p)) => (*p + taker_fee_per_share(*p, fee_rate)) * exec.size,
+                        _ => Decimal::ZERO,
+                    };
+                    if loss > Decimal::ZERO {
+                        let mut state = self.shared_state.write().await;
+                        state.total_unwind_losses += loss;
+                    }
+                }
                 continue;
             }
 
@@ -810,7 +1233,7 @@ impl Strategy for DutchBookStrategy {
         let mut actions = self.drain_pending_subscriptions().await;
 
         // Periodically clean up stale executions
-        actions.extend(self.cleanup_stale_executions());
+        actions.extend(self.cleanup_stale_executions().await);
 
         let event_actions = match event {
             Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot)) => {
@@ -829,6 +1252,10 @@ impl Strategy for DutchBookStrategy {
 
             Event::OrderUpdate(OrderEvent::Cancelled(order_id)) => {
                 self.handle_order_cancelled(order_id).await
+            }
+
+            Event::OrderUpdate(OrderEvent::CancelFailed { order_id, reason }) => {
+                self.handle_cancel_failed(order_id, reason).await
             }
 
             Event::OrderUpdate(OrderEvent::Rejected { order_id, reason, token_id }) => {

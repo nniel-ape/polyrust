@@ -570,23 +570,24 @@ async fn run_backtest() -> anyhow::Result<()> {
     use polyrust_backtest::DataFetchConfig;
 
     // Load backtest configuration — parse errors are fatal
-    let (mut backtest_config, mut arb_config) = match std::fs::read_to_string("config.toml") {
-        Ok(contents) => {
-            let wrapper: ConfigWrapper = toml::from_str(&contents)
-                .map_err(|e| anyhow::anyhow!("failed to parse config.toml: {e}"))?;
-            let backtest_config = wrapper
-                .backtest
-                .ok_or_else(|| anyhow::anyhow!("Missing [backtest] section in config.toml"))?
-                .with_env_overrides()?;
-            (backtest_config, wrapper.arbitrage)
-        }
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "Cannot run backtest without config.toml: {}",
-                e
-            ));
-        }
-    };
+    let (mut backtest_config, mut arb_config, dutch_book_config) =
+        match std::fs::read_to_string("config.toml") {
+            Ok(contents) => {
+                let wrapper: ConfigWrapper = toml::from_str(&contents)
+                    .map_err(|e| anyhow::anyhow!("failed to parse config.toml: {e}"))?;
+                let backtest_config = wrapper
+                    .backtest
+                    .ok_or_else(|| anyhow::anyhow!("Missing [backtest] section in config.toml"))?
+                    .with_env_overrides()?;
+                (backtest_config, wrapper.arbitrage, wrapper.dutch_book)
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Cannot run backtest without config.toml: {}",
+                    e
+                ));
+            }
+        };
 
     info!(
         strategy = %backtest_config.strategy_name,
@@ -746,14 +747,7 @@ async fn run_backtest() -> anyhow::Result<()> {
             let base = Arc::new(CryptoArbBase::new(arb_config.clone(), vec![]));
             Box::new(TailEndStrategy::new(base))
         }
-        "dutch-book" => {
-            let wrapper: ConfigWrapper = toml::from_str(
-                &std::fs::read_to_string("config.toml")
-                    .map_err(|e| anyhow::anyhow!("config.toml read error: {e}"))?,
-            )
-            .map_err(|e| anyhow::anyhow!("config.toml parse error: {e}"))?;
-            Box::new(DutchBookStrategy::new(wrapper.dutch_book))
-        }
+        "dutch-book" => Box::new(DutchBookStrategy::new(dutch_book_config)),
         other => {
             return Err(anyhow::anyhow!("Unknown strategy name: {}", other));
         }

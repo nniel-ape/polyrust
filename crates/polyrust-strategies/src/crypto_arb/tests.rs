@@ -2695,6 +2695,33 @@ fn stop_loss_validate_short_limit_refresh_zero_errors() {
 }
 
 #[test]
+fn sizing_validate_depth_cap_factor_bounds() {
+    // Zero is invalid
+    let mut config = super::config::SizingConfig::default();
+    config.depth_cap_factor = Decimal::ZERO;
+    assert!(config.validate().is_err());
+
+    // Negative is invalid
+    let mut config = super::config::SizingConfig::default();
+    config.depth_cap_factor = dec!(-0.5);
+    assert!(config.validate().is_err());
+
+    // > 1 is invalid
+    let mut config = super::config::SizingConfig::default();
+    config.depth_cap_factor = dec!(1.5);
+    assert!(config.validate().is_err());
+
+    // Exactly 1.0 is valid
+    let mut config = super::config::SizingConfig::default();
+    config.depth_cap_factor = Decimal::ONE;
+    assert!(config.validate().is_ok());
+
+    // Default 0.50 is valid
+    let config = super::config::SizingConfig::default();
+    assert!(config.validate().is_ok());
+}
+
+#[test]
 fn stop_loss_validate_exit_depth_cap_factor_bounds() {
     // Zero is invalid
     let mut config = super::config::StopLossConfig::default();

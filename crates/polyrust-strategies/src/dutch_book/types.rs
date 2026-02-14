@@ -24,6 +24,9 @@ pub struct ArbitrageOpportunity {
     pub detected_at: DateTime<Utc>,
 }
 
+/// Maximum number of unwind retries before giving up and cleaning up the execution.
+pub const MAX_UNWIND_RETRIES: u32 = 3;
+
 /// Tracks a pair of orders submitted for a Dutch Book trade.
 #[derive(Debug, Clone)]
 pub struct PairedOrder {
@@ -43,6 +46,12 @@ pub struct PairedOrder {
     pub yes_fill_price: Option<Decimal>,
     /// Fill price for the NO side (set when filled)
     pub no_fill_price: Option<Decimal>,
+    /// Number of unwind attempts (incremented on each cancelled unwind order)
+    pub unwind_retries: u32,
+    /// Order IDs from previous unwind attempts that were cancelled and retried.
+    /// Tracked to handle late fills that arrive after an unwind order was cancelled
+    /// but before the cancellation was fully settled at the exchange.
+    pub stale_unwind_ids: Vec<OrderId>,
 }
 
 /// A fully filled paired position awaiting market resolution.

@@ -2098,7 +2098,7 @@ async fn lifecycle_unwind_fill_completes_execution() {
 }
 
 #[tokio::test]
-async fn lifecycle_unwind_cancel_keeps_tracking() {
+async fn lifecycle_unwind_cancel_retries_then_gives_up() {
     let (mut strategy, ctx, _market) =
         setup_strategy_with_market(dec!(0.40), dec!(200), dec!(0.40), dec!(150)).await;
 
@@ -2124,14 +2124,47 @@ async fn lifecycle_unwind_cancel_keeps_tracking() {
     };
     strategy.handle_order_placed(&unwind_result);
 
-    // Unwind sell order gets cancelled (e.g. timeout)
+    // First cancel: should retry (returns PlaceOrder action for retry)
     let actions = strategy.handle_order_cancelled("unwind_sell_1").await;
-
-    // Should return empty (logged warning internally)
-    assert!(actions.is_empty());
-
-    // Execution should still be tracked (manual intervention needed)
+    assert_eq!(actions.len(), 1, "first cancel should retry with PlaceOrder");
     assert_eq!(strategy.active_execution_count(), 1);
+
+    // Simulate the retry sell order being placed
+    let retry1_result = OrderResult {
+        success: true,
+        order_id: Some("unwind_sell_2".to_string()),
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    strategy.handle_order_placed(&retry1_result);
+
+    // Second cancel: should retry again
+    let actions = strategy.handle_order_cancelled("unwind_sell_2").await;
+    assert_eq!(actions.len(), 1, "second cancel should retry");
+
+    let retry2_result = OrderResult {
+        success: true,
+        order_id: Some("unwind_sell_3".to_string()),
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    strategy.handle_order_placed(&retry2_result);
+
+    // Third cancel: max retries reached, should give up and clean up
+    let actions = strategy.handle_order_cancelled("unwind_sell_3").await;
+    assert_eq!(actions.len(), 1, "third cancel should produce a log action");
+    assert!(matches!(&actions[0], Action::Log { level: LogLevel::Error, .. }));
+
+    // Execution should be cleaned up after max retries
+    assert_eq!(strategy.active_execution_count(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2391,6 +2424,8 @@ fn make_test_state() -> DutchBookState {
         },
         yes_fill_price: Some(dec!(0.45)),
         no_fill_price: None,
+        unwind_retries: 0,
+        stale_unwind_ids: Vec::new(),
     });
 
     state
@@ -2511,6 +2546,8 @@ async fn dashboard_renders_unwinding_execution_state() {
         },
         yes_fill_price: Some(dec!(0.45)),
         no_fill_price: None,
+        unwind_retries: 0,
+        stale_unwind_ids: Vec::new(),
     });
     let state = Arc::new(RwLock::new(test_state));
     let dashboard = DutchBookDashboard::new(state);
@@ -2698,4 +2735,1024 @@ fn integration_strategy_name_matches_expected() {
     let config = DutchBookConfig::default();
     let strategy = DutchBookStrategy::new(config);
     assert_eq!(strategy.name(), "dutch-book");
+}
+
+// ---------------------------------------------------------------------------
+// Orphaned unwind order race condition tests (Finding 1 & 2)
+// ---------------------------------------------------------------------------
+
+/// Finding 1: An orphaned unwind SELL Placed event must be cancelled even if a
+/// new execution already exists for the same market. cancel_on_placed is checked
+/// BEFORE looking at the active execution.
+#[tokio::test]
+async fn orphaned_unwind_sell_cancelled_even_with_new_execution() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.40), dec!(200), dec!(0.40), dec!(150)).await;
+
+    // 1. Trigger an opportunity → creates active execution for m1
+    let snapshot = make_orderbook("tok_yes", dec!(0.40), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+
+    // 2. Partial fill: YES fills, NO cancels → triggers unwind
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
+    let unwind_actions = strategy.handle_order_cancelled(&no_oid).await;
+    assert!(!unwind_actions.is_empty()); // PlaceOrder for unwind
+
+    // Execution is now Unwinding with empty sell_order_id (Placed not yet received)
+    assert!(matches!(
+        strategy.active_executions.get("m1").unwrap().state,
+        ExecutionState::Unwinding { ref sell_order_id } if sell_order_id.is_empty()
+    ));
+
+    // 3. Simulate a stale fill from a previous unwind attempt that removes the execution
+    //    and sets cancel_on_placed. We manually set up this state since the normal flow
+    //    requires a stale_unwind_id match.
+    strategy.active_executions.remove("m1");
+    strategy.order_to_market.remove(&yes_oid);
+    strategy.order_to_market.remove(&no_oid);
+    strategy.cancel_on_placed.insert("m1".to_string());
+
+    // 4. A new opportunity arrives for the SAME market → creates a NEW execution
+    let snapshot2 = make_orderbook("tok_yes", dec!(0.40), dec!(200));
+    let event2 = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot2));
+    strategy.on_event(&event2, &ctx).await.unwrap();
+    assert!(strategy.active_executions.contains_key("m1"));
+
+    // 5. Now the orphaned SELL Placed event arrives
+    let orphaned_sell = OrderResult {
+        success: true,
+        order_id: Some("orphan_sell_123".to_string()),
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    let actions = strategy.handle_order_placed(&orphaned_sell);
+
+    // Must emit CancelOrder for the orphaned sell, NOT corrupt the new execution
+    assert_eq!(actions.len(), 1);
+    match &actions[0] {
+        Action::CancelOrder(oid) => assert_eq!(oid, "orphan_sell_123"),
+        other => panic!("Expected CancelOrder, got {:?}", other),
+    }
+
+    // cancel_on_placed should be consumed
+    assert!(!strategy.cancel_on_placed.contains("m1"));
+
+    // New execution should be untouched (still AwaitingFills with empty order IDs)
+    let exec = strategy.active_executions.get("m1").unwrap();
+    assert!(matches!(
+        exec.state,
+        ExecutionState::AwaitingFills { yes_filled: false, no_filled: false }
+    ));
+}
+
+/// Finding 2: Extended-timeout cleanup of Unwinding executions with empty sell_order_id
+/// must add the market to cancel_on_placed so a later Placed event gets cancelled.
+#[tokio::test]
+async fn extended_timeout_cleanup_tracks_cancel_on_placed_for_empty_sell_id() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.40), dec!(200), dec!(0.40), dec!(150)).await;
+
+    // 1. Trigger opportunity
+    let snapshot = make_orderbook("tok_yes", dec!(0.40), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+
+    // 2. Partial fill: YES fills, NO cancels → triggers unwind
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
+    strategy.handle_order_cancelled(&no_oid).await;
+
+    // Execution is Unwinding with empty sell_order_id
+    assert!(matches!(
+        strategy.active_executions.get("m1").unwrap().state,
+        ExecutionState::Unwinding { ref sell_order_id } if sell_order_id.is_empty()
+    ));
+
+    // 3. Force the submitted_at far into the past to trigger extended timeout (3x 120s = 360s)
+    strategy
+        .active_executions
+        .get_mut("m1")
+        .unwrap()
+        .submitted_at = Utc::now() - Duration::seconds(500);
+
+    // Reset cleanup rate limiter so the next on_event runs cleanup immediately
+    strategy.last_cleanup = chrono::DateTime::<Utc>::MIN_UTC;
+
+    // 4. Trigger cleanup via on_event
+    let dummy_event = Event::MarketData(MarketDataEvent::OrderbookUpdate(
+        make_empty_orderbook("tok_unknown"),
+    ));
+    let actions = strategy.on_event(&dummy_event, &ctx).await.unwrap();
+
+    // Execution should be removed
+    assert!(!strategy.active_executions.contains_key("m1"));
+
+    // No CancelOrder emitted (sell_order_id was empty)
+    assert!(!actions.iter().any(|a| matches!(a, Action::CancelOrder(_))));
+
+    // But cancel_on_placed MUST be set so a later Placed event is caught
+    assert!(strategy.cancel_on_placed.contains("m1"));
+
+    // Loss should be recorded in shared state (worst-case: full buy cost)
+    let state = strategy.shared_state.read().await;
+    assert!(
+        state.total_unwind_losses > Decimal::ZERO,
+        "Extended timeout cleanup must record estimated loss, got: {}",
+        state.total_unwind_losses
+    );
+    drop(state);
+
+    // 5. Verify: if the Placed event arrives later, it gets cancelled
+    let late_sell = OrderResult {
+        success: true,
+        order_id: Some("late_sell_456".to_string()),
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    let cancel_actions = strategy.handle_order_placed(&late_sell);
+    assert_eq!(cancel_actions.len(), 1);
+    match &cancel_actions[0] {
+        Action::CancelOrder(oid) => assert_eq!(oid, "late_sell_456"),
+        other => panic!("Expected CancelOrder, got {:?}", other),
+    }
+}
+
+/// Regression: new execution's BUY Placed events must NOT clear cancel_on_placed.
+/// If the orphaned SELL arrives after the new execution's BUY, it must still be cancelled.
+#[tokio::test]
+async fn buy_placed_does_not_clear_cancel_on_placed_for_orphaned_sell() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.40), dec!(200), dec!(0.40), dec!(150)).await;
+
+    // 1. Trigger opportunity → creates execution for m1
+    let snapshot = make_orderbook("tok_yes", dec!(0.40), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+
+    // 2. Partial fill → unwind
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
+    strategy.handle_order_cancelled(&no_oid).await;
+
+    // 3. Manually simulate stale cleanup: execution removed, cancel_on_placed set
+    strategy.active_executions.remove("m1");
+    strategy.order_to_market.remove(&yes_oid);
+    strategy.order_to_market.remove(&no_oid);
+    strategy.cancel_on_placed.insert("m1".to_string());
+
+    // 4. New opportunity → new execution for same market
+    let snapshot2 = make_orderbook("tok_yes", dec!(0.40), dec!(200));
+    let event2 = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot2));
+    strategy.on_event(&event2, &ctx).await.unwrap();
+    assert!(strategy.active_executions.contains_key("m1"));
+
+    // 5. New execution's BUY Placed events arrive FIRST (the race scenario)
+    let new_buy_yes = OrderResult {
+        success: true,
+        order_id: Some("new_buy_yes".to_string()),
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.40),
+        size: dec!(100),
+        side: OrderSide::Buy,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    let new_buy_no = OrderResult {
+        success: true,
+        order_id: Some("new_buy_no".to_string()),
+        token_id: "tok_no".to_string(),
+        price: dec!(0.40),
+        size: dec!(100),
+        side: OrderSide::Buy,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    let actions_yes = strategy.handle_order_placed(&new_buy_yes);
+    let actions_no = strategy.handle_order_placed(&new_buy_no);
+
+    // BUY events should NOT emit cancels and should NOT clear the flag
+    assert!(actions_yes.is_empty());
+    assert!(actions_no.is_empty());
+    assert!(
+        strategy.cancel_on_placed.contains("m1"),
+        "cancel_on_placed must survive BUY Placed events"
+    );
+
+    // New execution's order IDs should be recorded normally
+    let exec = strategy.active_executions.get("m1").unwrap();
+    assert_eq!(exec.yes_order_id, "new_buy_yes");
+    assert_eq!(exec.no_order_id, "new_buy_no");
+
+    // 6. Now the orphaned SELL Placed finally arrives
+    let orphaned_sell = OrderResult {
+        success: true,
+        order_id: Some("orphan_sell_race".to_string()),
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    let cancel_actions = strategy.handle_order_placed(&orphaned_sell);
+
+    // Must cancel the orphaned sell
+    assert_eq!(cancel_actions.len(), 1);
+    match &cancel_actions[0] {
+        Action::CancelOrder(oid) => assert_eq!(oid, "orphan_sell_race"),
+        other => panic!("Expected CancelOrder, got {:?}", other),
+    }
+
+    // cancel_on_placed consumed
+    assert!(!strategy.cancel_on_placed.contains("m1"));
+
+    // New execution untouched
+    let exec = strategy.active_executions.get("m1").unwrap();
+    assert_eq!(exec.yes_order_id, "new_buy_yes");
+    assert_eq!(exec.no_order_id, "new_buy_no");
+}
+
+/// Race: new execution enters Unwinding and cancel_on_placed is set from a
+/// previous cleanup. Any SELL Placed while the flag is set must be cancelled
+/// unconditionally (we can't tell orphan from new-execution SELLs apart).
+/// The unwind is re-dispatched so the re-dispatched SELL arrives after
+/// cancel_on_placed is consumed and gets assigned normally.
+#[tokio::test]
+async fn cancel_on_placed_cancels_ambiguous_sell_and_redispatches() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.40), dec!(200), dec!(0.40), dec!(150)).await;
+
+    // 1. Create and fill first execution, trigger unwind
+    let snapshot = make_orderbook("tok_yes", dec!(0.40), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
+    strategy.handle_order_cancelled(&no_oid).await;
+
+    // 2. Simulate cleanup: execution removed, cancel_on_placed set
+    //    (mimics late-fill stale cleanup or extended timeout)
+    strategy.active_executions.remove("m1");
+    strategy.order_to_market.remove(&yes_oid);
+    strategy.order_to_market.remove(&no_oid);
+    strategy.cancel_on_placed.insert("m1".to_string());
+
+    // 3. New opportunity → new execution for same market
+    let snapshot2 = make_orderbook("tok_yes", dec!(0.40), dec!(200));
+    let event2 = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot2));
+    strategy.on_event(&event2, &ctx).await.unwrap();
+    assert!(strategy.active_executions.contains_key("m1"));
+
+    // 4. New execution: BUY placed, partial fill, enters Unwinding
+    let (new_yes_oid, new_no_oid) = {
+        let yes_r = OrderResult {
+            success: true,
+            order_id: Some("new_yes_2".into()),
+            token_id: "tok_yes".into(),
+            price: dec!(0.40),
+            size: dec!(100),
+            side: OrderSide::Buy,
+            status: Some("Placed".into()),
+            message: "OK".into(),
+        };
+        let no_r = OrderResult {
+            success: true,
+            order_id: Some("new_no_2".into()),
+            token_id: "tok_no".into(),
+            price: dec!(0.40),
+            size: dec!(100),
+            side: OrderSide::Buy,
+            status: Some("Placed".into()),
+            message: "OK".into(),
+        };
+        strategy.handle_order_placed(&yes_r);
+        strategy.handle_order_placed(&no_r);
+        ("new_yes_2".to_string(), "new_no_2".to_string())
+    };
+
+    // Partial fill on new execution: YES fills, NO cancels → triggers unwind
+    strategy
+        .handle_order_filled(&new_yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
+    let unwind_actions = strategy.handle_order_cancelled(&new_no_oid).await;
+
+    // Should have triggered a PlaceOrder SELL for the unwind
+    assert!(
+        unwind_actions
+            .iter()
+            .any(|a| matches!(a, Action::PlaceOrder(_))),
+        "Expected unwind PlaceOrder SELL, got: {:?}",
+        unwind_actions
+    );
+
+    // Execution should be in Unwinding with empty sell_order_id (pending Placed)
+    let exec = strategy.active_executions.get("m1").unwrap();
+    assert!(
+        matches!(&exec.state, ExecutionState::Unwinding { sell_order_id } if sell_order_id.is_empty()),
+        "Expected Unwinding with empty sell_order_id, got: {:?}",
+        exec.state
+    );
+
+    // 5. First SELL Placed arrives (could be orphan or new — doesn't matter)
+    let first_sell = OrderResult {
+        success: true,
+        order_id: Some("first_sell".into()),
+        token_id: "tok_yes".into(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".into()),
+        message: "OK".into(),
+    };
+    let actions = strategy.handle_order_placed(&first_sell);
+
+    // Must cancel this SELL (ambiguous) and re-dispatch a new unwind
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::CancelOrder(oid) if oid == "first_sell")),
+        "First SELL must be cancelled, got: {:?}",
+        actions
+    );
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))),
+        "Must re-dispatch unwind PlaceOrder, got: {:?}",
+        actions
+    );
+
+    // cancel_on_placed consumed
+    assert!(
+        !strategy.cancel_on_placed.contains("m1"),
+        "cancel_on_placed must be consumed after cancellation"
+    );
+
+    // Execution still Unwinding with empty sell_order_id (awaiting re-dispatched SELL)
+    let exec = strategy.active_executions.get("m1").unwrap();
+    assert!(
+        matches!(&exec.state, ExecutionState::Unwinding { sell_order_id } if sell_order_id.is_empty()),
+        "Execution must remain awaiting sell, got: {:?}",
+        exec.state
+    );
+
+    // 6. Re-dispatched SELL Placed arrives (cancel_on_placed cleared, assigned normally)
+    let redispatched_sell = OrderResult {
+        success: true,
+        order_id: Some("redispatched_sell".into()),
+        token_id: "tok_yes".into(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".into()),
+        message: "OK".into(),
+    };
+    let actions = strategy.handle_order_placed(&redispatched_sell);
+
+    // No cancel — assigned to execution
+    assert!(
+        actions.is_empty(),
+        "Re-dispatched SELL must not be cancelled, got: {:?}",
+        actions
+    );
+
+    let exec = strategy.active_executions.get("m1").unwrap();
+    assert_eq!(
+        exec.state,
+        ExecutionState::Unwinding {
+            sell_order_id: "redispatched_sell".to_string()
+        },
+        "Re-dispatched SELL should be assigned to execution"
+    );
+
+    // 7. Second original SELL arrives late (orphan or new execution's original)
+    //    Execution already has sell_order_id — this must be cancelled (not left unmanaged)
+    let late_sell = OrderResult {
+        success: true,
+        order_id: Some("late_stale_sell".into()),
+        token_id: "tok_yes".into(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".into()),
+        message: "OK".into(),
+    };
+    let actions = strategy.handle_order_placed(&late_sell);
+    assert_eq!(
+        actions.len(),
+        1,
+        "Late SELL must be cancelled (not left unmanaged), got: {:?}",
+        actions
+    );
+    match &actions[0] {
+        Action::CancelOrder(oid) => assert_eq!(oid, "late_stale_sell"),
+        other => panic!("Expected CancelOrder for late SELL, got {:?}", other),
+    }
+
+    // Execution state unchanged
+    let exec = strategy.active_executions.get("m1").unwrap();
+    assert_eq!(
+        exec.state,
+        ExecutionState::Unwinding {
+            sell_order_id: "redispatched_sell".to_string()
+        },
+    );
+}
+
+/// Codex Finding 1: When handle_market_expired sets cancel_on_placed and then
+/// removes the market from the analyzer, a late SELL Placed event could not
+/// resolve the token→market mapping. The cancel_token_to_market fallback now
+/// preserves this mapping so the late SELL is properly cancelled.
+#[tokio::test]
+async fn market_expired_cancel_on_placed_works_after_analyzer_removal() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.40), dec!(200), dec!(0.40), dec!(150)).await;
+
+    // 1. Trigger opportunity → creates active execution for m1
+    let snapshot = make_orderbook("tok_yes", dec!(0.40), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+
+    // 2. Partial fill: YES fills, NO cancels → triggers unwind
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
+    let unwind_actions = strategy.handle_order_cancelled(&no_oid).await;
+    assert!(!unwind_actions.is_empty());
+
+    // Execution is Unwinding with empty sell_order_id (SELL dispatched, Placed pending)
+    assert!(matches!(
+        strategy.active_executions.get("m1").unwrap().state,
+        ExecutionState::Unwinding { ref sell_order_id } if sell_order_id.is_empty()
+    ));
+
+    // 3. Market expires before SELL Placed arrives
+    let expire_event = Event::MarketData(MarketDataEvent::MarketExpired("m1".to_string()));
+    strategy.on_event(&expire_event, &ctx).await.unwrap();
+
+    // Market is removed from analyzer
+    assert_eq!(strategy.tracked_market_count(), 0);
+    // But cancel_on_placed is set
+    assert!(
+        strategy.cancel_on_placed.contains("m1"),
+        "cancel_on_placed must be set for market with pending SELL"
+    );
+    // And cancel_token_to_market preserves the token→market mapping
+    assert_eq!(
+        strategy.cancel_token_to_market.get("tok_yes"),
+        Some(&"m1".to_string()),
+        "cancel_token_to_market must preserve YES token mapping"
+    );
+    assert_eq!(
+        strategy.cancel_token_to_market.get("tok_no"),
+        Some(&"m1".to_string()),
+        "cancel_token_to_market must preserve NO token mapping"
+    );
+
+    // 4. Late SELL Placed event arrives — must be cancelled despite analyzer removal
+    let late_sell = OrderResult {
+        success: true,
+        order_id: Some("late_sell_after_expiry".to_string()),
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    let actions = strategy.handle_order_placed(&late_sell);
+
+    // Must emit CancelOrder
+    assert_eq!(
+        actions.len(),
+        1,
+        "Late SELL after market expiry must be cancelled, got: {:?}",
+        actions
+    );
+    match &actions[0] {
+        Action::CancelOrder(oid) => assert_eq!(oid, "late_sell_after_expiry"),
+        other => panic!("Expected CancelOrder, got {:?}", other),
+    }
+
+    // cancel_on_placed and cancel_token_to_market cleaned up
+    assert!(
+        !strategy.cancel_on_placed.contains("m1"),
+        "cancel_on_placed must be consumed"
+    );
+    assert!(
+        strategy.cancel_token_to_market.is_empty(),
+        "cancel_token_to_market must be cleaned up after consumption"
+    );
+}
+
+/// Codex Finding 2: When a late SELL Placed event arrives for an execution that
+/// already has a tracked sell_order_id, the cancelled order must be tracked in
+/// stale_unwind_ids so that a subsequent fill (if the cancel fails) can be handled
+/// instead of silently dropped.
+#[tokio::test]
+async fn late_sell_placed_tracked_in_stale_unwind_ids() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.40), dec!(200), dec!(0.40), dec!(150)).await;
+
+    // 1. Trigger opportunity → creates active execution
+    let snapshot = make_orderbook("tok_yes", dec!(0.40), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+
+    // 2. Partial fill: YES fills, NO cancels → triggers unwind
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
+    strategy.handle_order_cancelled(&no_oid).await;
+
+    // 3. Unwind SELL Placed → tracked as sell_order_id
+    let sell_placed = OrderResult {
+        success: true,
+        order_id: Some("sell_001".to_string()),
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    strategy.handle_order_placed(&sell_placed);
+    assert_eq!(
+        strategy.active_executions.get("m1").unwrap().state,
+        ExecutionState::Unwinding {
+            sell_order_id: "sell_001".to_string()
+        }
+    );
+
+    // 4. A second (late/stale) SELL Placed arrives → must be cancelled AND tracked
+    let late_sell = OrderResult {
+        success: true,
+        order_id: Some("sell_002_late".to_string()),
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    let actions = strategy.handle_order_placed(&late_sell);
+
+    // Must cancel the late SELL
+    assert_eq!(actions.len(), 1);
+    match &actions[0] {
+        Action::CancelOrder(oid) => assert_eq!(oid, "sell_002_late"),
+        other => panic!("Expected CancelOrder, got {:?}", other),
+    }
+
+    // The late order must be tracked in stale_unwind_ids for late-fill handling
+    let exec = strategy.active_executions.get("m1").unwrap();
+    assert!(
+        exec.stale_unwind_ids.contains(&"sell_002_late".to_string()),
+        "Late SELL must be tracked in stale_unwind_ids, got: {:?}",
+        exec.stale_unwind_ids
+    );
+
+    // And in order_to_market for event routing
+    assert_eq!(
+        strategy.order_to_market.get("sell_002_late"),
+        Some(&"m1".to_string()),
+        "Late SELL must be in order_to_market for fill/cancel routing"
+    );
+
+    // 5. If the cancel fails and a fill arrives for sell_002_late, it should be handled
+    //    as a stale fill (not silently dropped)
+    let fill_actions = strategy
+        .handle_order_filled("sell_002_late", "tok_yes", dec!(0.388), dec!(100))
+        .await;
+    // Stale fill handling should complete the unwind and cancel the active sell
+    assert!(
+        fill_actions.iter().any(|a| matches!(a, Action::CancelOrder(oid) if oid == "sell_001")),
+        "Stale fill from late SELL must cancel the active sell_001, got: {:?}",
+        fill_actions
+    );
+    // Execution should be cleaned up
+    assert!(
+        !strategy.active_executions.contains_key("m1"),
+        "Execution must be removed after stale fill completes unwind"
+    );
+}
+
+/// Codex Finding 1: cancel_on_placed cancels a SELL but the cancelled order's ID
+/// was not tracked, so a late fill (cancel raced with fill) was silently dropped.
+/// Now the cancelled order is tracked in orphaned_sells, and a late fill produces
+/// a diagnostic log rather than being silently ignored.
+#[tokio::test]
+async fn cancel_on_placed_tracks_orphaned_sell_for_late_fill() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.40), dec!(200), dec!(0.40), dec!(150)).await;
+
+    // 1. Trigger opportunity → active execution
+    let snapshot = make_orderbook("tok_yes", dec!(0.40), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+
+    // 2. Partial fill: YES fills, NO cancels → triggers unwind
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
+    strategy.handle_order_cancelled(&no_oid).await;
+
+    // Execution is now Unwinding with empty sell_order_id
+    assert!(matches!(
+        strategy.active_executions.get("m1").unwrap().state,
+        ExecutionState::Unwinding { ref sell_order_id } if sell_order_id.is_empty()
+    ));
+
+    // 3. Simulate: execution removed, cancel_on_placed set (mimics stale cleanup)
+    strategy.active_executions.remove("m1");
+    strategy.order_to_market.remove(&yes_oid);
+    strategy.order_to_market.remove(&no_oid);
+    strategy.cancel_on_placed.insert("m1".to_string());
+
+    // 4. SELL Placed arrives → gets cancelled and tracked in orphaned_sells
+    let sell_placed = OrderResult {
+        success: true,
+        order_id: Some("orphan_sell_late".to_string()),
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    let actions = strategy.handle_order_placed(&sell_placed);
+
+    // Cancel emitted
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::CancelOrder(oid) if oid == "orphan_sell_late")),
+        "Orphaned SELL must be cancelled, got: {:?}",
+        actions
+    );
+
+    // Order tracked in orphaned_sells
+    assert_eq!(
+        strategy.orphaned_sells.get("orphan_sell_late"),
+        Some(&"m1".to_string()),
+        "Cancelled order must be tracked in orphaned_sells"
+    );
+
+    // 5. Cancel fails, order fills → detected as double-sell (not silently dropped)
+    let fill_actions = strategy
+        .handle_order_filled("orphan_sell_late", "tok_yes", dec!(0.388), dec!(100))
+        .await;
+
+    // Must produce a diagnostic log
+    assert!(
+        fill_actions.iter().any(|a| matches!(a, Action::Log { level: LogLevel::Error, .. })),
+        "Late fill from orphaned sell must produce error log, got: {:?}",
+        fill_actions
+    );
+
+    // Orphaned sell cleaned up
+    assert!(
+        !strategy.orphaned_sells.contains_key("orphan_sell_late"),
+        "Orphaned sell must be removed after handling"
+    );
+}
+
+/// Codex Finding 1 (redispatch case): cancel_on_placed with needs_redispatch tracks
+/// the cancelled order in orphaned_sells. If the original order fills AND the
+/// re-dispatched order fills, the double-sell is detected.
+#[tokio::test]
+async fn cancel_on_placed_redispatch_tracks_orphaned_sell() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.40), dec!(200), dec!(0.40), dec!(150)).await;
+
+    // 1. Create execution, partial fill, trigger unwind
+    let snapshot = make_orderbook("tok_yes", dec!(0.40), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
+    strategy.handle_order_cancelled(&no_oid).await;
+
+    // 2. Simulate cleanup: execution removed, cancel_on_placed set
+    strategy.active_executions.remove("m1");
+    strategy.order_to_market.remove(&yes_oid);
+    strategy.order_to_market.remove(&no_oid);
+    strategy.cancel_on_placed.insert("m1".to_string());
+
+    // 3. New execution for same market, enters Unwinding with empty sell_order_id
+    let snapshot2 = make_orderbook("tok_yes", dec!(0.40), dec!(200));
+    let event2 = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot2));
+    strategy.on_event(&event2, &ctx).await.unwrap();
+    let (new_yes, new_no) = {
+        let y = OrderResult {
+            success: true,
+            order_id: Some("new_yes".into()),
+            token_id: "tok_yes".into(),
+            price: dec!(0.40),
+            size: dec!(100),
+            side: OrderSide::Buy,
+            status: Some("Placed".into()),
+            message: "OK".into(),
+        };
+        let n = OrderResult {
+            success: true,
+            order_id: Some("new_no".into()),
+            token_id: "tok_no".into(),
+            price: dec!(0.40),
+            size: dec!(100),
+            side: OrderSide::Buy,
+            status: Some("Placed".into()),
+            message: "OK".into(),
+        };
+        strategy.handle_order_placed(&y);
+        strategy.handle_order_placed(&n);
+        ("new_yes".to_string(), "new_no".to_string())
+    };
+
+    // Partial fill on new execution
+    strategy
+        .handle_order_filled(&new_yes, "tok_yes", dec!(0.40), dec!(100))
+        .await;
+    strategy.handle_order_cancelled(&new_no).await;
+
+    // Now Unwinding with empty sell_order_id and cancel_on_placed is set
+    assert!(matches!(
+        strategy.active_executions.get("m1").unwrap().state,
+        ExecutionState::Unwinding { ref sell_order_id } if sell_order_id.is_empty()
+    ));
+
+    // 4. Ambiguous SELL Placed → cancelled + redispatched + tracked in orphaned_sells
+    let first_sell = OrderResult {
+        success: true,
+        order_id: Some("ambiguous_sell".into()),
+        token_id: "tok_yes".into(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".into()),
+        message: "OK".into(),
+    };
+    let actions = strategy.handle_order_placed(&first_sell);
+
+    // Cancel + redispatch
+    assert!(actions.iter().any(|a| matches!(a, Action::CancelOrder(oid) if oid == "ambiguous_sell")));
+    assert!(actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))));
+
+    // Orphaned sell tracked
+    assert_eq!(
+        strategy.orphaned_sells.get("ambiguous_sell"),
+        Some(&"m1".to_string()),
+        "Ambiguous SELL must be tracked in orphaned_sells after cancel"
+    );
+
+    // 5. If the ambiguous sell fills (cancel failed), it's detected
+    let fill_actions = strategy
+        .handle_order_filled("ambiguous_sell", "tok_yes", dec!(0.388), dec!(100))
+        .await;
+
+    assert!(
+        fill_actions.iter().any(|a| matches!(a, Action::Log { level: LogLevel::Error, .. })),
+        "Late fill from ambiguous sell must produce error log, got: {:?}",
+        fill_actions
+    );
+}
+
+/// Codex Finding 3: When a stale fill removes the execution and cancels the active
+/// unwind order, the cancelled order must be tracked in orphaned_sells so a late
+/// fill (if the cancel fails) is detected rather than silently dropped.
+#[tokio::test]
+async fn stale_fill_tracks_active_sell_in_orphaned_sells() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.40), dec!(200), dec!(0.40), dec!(150)).await;
+
+    // 1. Trigger opportunity, place, partial fill, unwind
+    let snapshot = make_orderbook("tok_yes", dec!(0.40), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
+    strategy.handle_order_cancelled(&no_oid).await;
+
+    // 2. SELL Placed → tracked as sell_order_id
+    let sell_placed = OrderResult {
+        success: true,
+        order_id: Some("sell_active".to_string()),
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    strategy.handle_order_placed(&sell_placed);
+    assert_eq!(
+        strategy.active_executions.get("m1").unwrap().state,
+        ExecutionState::Unwinding {
+            sell_order_id: "sell_active".to_string()
+        }
+    );
+
+    // 3. Unwind cancelled → retry creates stale_unwind_id
+    let retry_actions = strategy.handle_order_cancelled("sell_active").await;
+    assert!(retry_actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))));
+    assert!(strategy
+        .active_executions
+        .get("m1")
+        .unwrap()
+        .stale_unwind_ids
+        .contains(&"sell_active".to_string()));
+
+    // 4. New SELL Placed for retry
+    let retry_sell = OrderResult {
+        success: true,
+        order_id: Some("sell_retry".to_string()),
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    strategy.handle_order_placed(&retry_sell);
+    assert_eq!(
+        strategy.active_executions.get("m1").unwrap().state,
+        ExecutionState::Unwinding {
+            sell_order_id: "sell_retry".to_string()
+        }
+    );
+
+    // 5. Stale fill: "sell_active" (the previously-cancelled order) fills
+    let stale_fill_actions = strategy
+        .handle_order_filled("sell_active", "tok_yes", dec!(0.388), dec!(100))
+        .await;
+
+    // Should cancel the active retry and clean up execution
+    assert!(
+        stale_fill_actions
+            .iter()
+            .any(|a| matches!(a, Action::CancelOrder(oid) if oid == "sell_retry")),
+        "Stale fill must cancel active retry, got: {:?}",
+        stale_fill_actions
+    );
+    assert!(!strategy.active_executions.contains_key("m1"));
+
+    // The cancelled "sell_retry" must be tracked in orphaned_sells
+    assert_eq!(
+        strategy.orphaned_sells.get("sell_retry"),
+        Some(&"m1".to_string()),
+        "Active sell cancelled by stale fill must be tracked in orphaned_sells"
+    );
+
+    // 6. If sell_retry also fills (cancel failed) → detected as double-sell
+    let double_fill = strategy
+        .handle_order_filled("sell_retry", "tok_yes", dec!(0.388), dec!(100))
+        .await;
+
+    assert!(
+        double_fill.iter().any(|a| matches!(a, Action::Log { level: LogLevel::Error, .. })),
+        "Double-sell from cancelled active order must produce error log, got: {:?}",
+        double_fill
+    );
+    assert!(
+        !strategy.orphaned_sells.contains_key("sell_retry"),
+        "Orphaned sell must be cleaned up after detection"
+    );
+}
+
+/// Codex Finding 2: Extended-timeout cleanup with cancel_on_placed must populate
+/// cancel_token_to_market so a late Placed event can be resolved even after the
+/// analyzer removes the market.
+#[tokio::test]
+async fn extended_timeout_cancel_on_placed_populates_token_to_market() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.40), dec!(200), dec!(0.40), dec!(150)).await;
+
+    // 1. Trigger opportunity
+    let snapshot = make_orderbook("tok_yes", dec!(0.40), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+
+    // 2. Partial fill: YES fills, NO cancels → triggers unwind
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
+    strategy.handle_order_cancelled(&no_oid).await;
+
+    // Execution is Unwinding with empty sell_order_id
+    assert!(matches!(
+        strategy.active_executions.get("m1").unwrap().state,
+        ExecutionState::Unwinding { ref sell_order_id } if sell_order_id.is_empty()
+    ));
+
+    // 3. Force extended timeout (360s+)
+    strategy
+        .active_executions
+        .get_mut("m1")
+        .unwrap()
+        .submitted_at = Utc::now() - Duration::seconds(500);
+
+    // Reset cleanup rate limiter so the next on_event runs cleanup immediately
+    strategy.last_cleanup = chrono::DateTime::<Utc>::MIN_UTC;
+
+    // 4. Trigger cleanup
+    let dummy_event = Event::MarketData(MarketDataEvent::OrderbookUpdate(
+        make_empty_orderbook("tok_unknown"),
+    ));
+    strategy.on_event(&dummy_event, &ctx).await.unwrap();
+
+    // Execution removed
+    assert!(!strategy.active_executions.contains_key("m1"));
+
+    // cancel_on_placed set
+    assert!(strategy.cancel_on_placed.contains("m1"));
+
+    // cancel_token_to_market must be populated (this was the bug)
+    assert_eq!(
+        strategy.cancel_token_to_market.get("tok_yes"),
+        Some(&"m1".to_string()),
+        "Extended timeout must populate cancel_token_to_market for YES token"
+    );
+    assert_eq!(
+        strategy.cancel_token_to_market.get("tok_no"),
+        Some(&"m1".to_string()),
+        "Extended timeout must populate cancel_token_to_market for NO token"
+    );
+
+    // 5. Now simulate market expiry (removes from analyzer)
+    let expire_event = Event::MarketData(MarketDataEvent::MarketExpired("m1".to_string()));
+    strategy.on_event(&expire_event, &ctx).await.unwrap();
+
+    assert_eq!(strategy.tracked_market_count(), 0);
+    // cancel_on_placed still set (no execution to clean up in handle_market_expired)
+    assert!(strategy.cancel_on_placed.contains("m1"));
+
+    // 6. Late SELL Placed arrives — must resolve via cancel_token_to_market
+    let late_sell = OrderResult {
+        success: true,
+        order_id: Some("late_timeout_sell".to_string()),
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.388),
+        size: dec!(100),
+        side: OrderSide::Sell,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    let actions = strategy.handle_order_placed(&late_sell);
+
+    assert_eq!(
+        actions.len(),
+        1,
+        "Late SELL after timeout+expiry must be cancelled, got: {:?}",
+        actions
+    );
+    match &actions[0] {
+        Action::CancelOrder(oid) => assert_eq!(oid, "late_timeout_sell"),
+        other => panic!("Expected CancelOrder, got {:?}", other),
+    }
+
+    // Cleanup verified
+    assert!(!strategy.cancel_on_placed.contains("m1"));
+    assert!(strategy.cancel_token_to_market.is_empty());
+}
+
+/// Verify that a successful cancel of an orphaned sell cleans it from orphaned_sells.
+#[tokio::test]
+async fn orphaned_sell_cleaned_up_on_successful_cancel() {
+    let (mut strategy, _ctx, _market) =
+        setup_strategy_with_market(dec!(0.40), dec!(200), dec!(0.40), dec!(150)).await;
+
+    // Manually insert an orphaned sell
+    strategy
+        .orphaned_sells
+        .insert("orphan_123".to_string(), "m1".to_string());
+
+    // Cancel event for the orphaned sell → should clean up
+    strategy.handle_order_cancelled("orphan_123").await;
+
+    assert!(
+        !strategy.orphaned_sells.contains_key("orphan_123"),
+        "Successful cancel must remove from orphaned_sells"
+    );
 }
