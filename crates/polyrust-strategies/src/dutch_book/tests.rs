@@ -9,6 +9,7 @@ use polyrust_core::prelude::*;
 use super::analyzer::ArbitrageAnalyzer;
 use super::config::DutchBookConfig;
 use super::scanner::{GammaMarketResponse, GammaScanner};
+use super::strategy::DutchBookStrategy;
 use super::types::{ExecutionState, FilledSide, MarketEntry, PairedPosition};
 
 // ---------------------------------------------------------------------------
@@ -1080,4 +1081,618 @@ fn analyzer_check_after_remove_returns_none() {
     // After removal, same token should return None
     analyzer.remove_market("m1");
     assert!(analyzer.check_arbitrage("tok_yes", &orderbooks, &config).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Strategy tests — helpers
+// ---------------------------------------------------------------------------
+
+/// Create a strategy with default config and populate the StrategyContext with
+/// orderbooks for two tokens of a market.
+async fn setup_strategy_with_market(
+    yes_ask: Decimal,
+    yes_size: Decimal,
+    no_ask: Decimal,
+    no_size: Decimal,
+) -> (DutchBookStrategy, StrategyContext, MarketInfo) {
+    let config = DutchBookConfig {
+        max_combined_cost: dec!(0.99),
+        min_profit_threshold: dec!(0.005),
+        max_position_size: dec!(100),
+        max_concurrent_positions: 2,
+        ..DutchBookConfig::default()
+    };
+    let mut strategy = DutchBookStrategy::new(config);
+
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    strategy.analyzer.add_market(&market);
+
+    let ctx = StrategyContext::new();
+
+    // Populate orderbooks in the shared context
+    {
+        let mut md = ctx.market_data.write().await;
+        md.orderbooks.insert(
+            "tok_yes".to_string(),
+            make_orderbook("tok_yes", yes_ask, yes_size),
+        );
+        md.orderbooks.insert(
+            "tok_no".to_string(),
+            make_orderbook("tok_no", no_ask, no_size),
+        );
+    }
+
+    (strategy, ctx, market)
+}
+
+/// Simulate Placed events for a batch order, returning order IDs assigned.
+fn simulate_placed_events(
+    strategy: &mut DutchBookStrategy,
+    yes_token: &str,
+    no_token: &str,
+) -> (String, String) {
+    let yes_oid = "order_yes_1".to_string();
+    let no_oid = "order_no_1".to_string();
+
+    let yes_result = OrderResult {
+        success: true,
+        order_id: Some(yes_oid.clone()),
+        token_id: yes_token.to_string(),
+        price: dec!(0.48),
+        size: dec!(100),
+        side: OrderSide::Buy,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+    let no_result = OrderResult {
+        success: true,
+        order_id: Some(no_oid.clone()),
+        token_id: no_token.to_string(),
+        price: dec!(0.49),
+        size: dec!(100),
+        side: OrderSide::Buy,
+        status: Some("Placed".to_string()),
+        message: "OK".to_string(),
+    };
+
+    strategy.handle_order_placed(&yes_result);
+    strategy.handle_order_placed(&no_result);
+
+    (yes_oid, no_oid)
+}
+
+// ---------------------------------------------------------------------------
+// Strategy tests — construction and trait basics
+// ---------------------------------------------------------------------------
+
+#[test]
+fn strategy_construction() {
+    let config = DutchBookConfig::default();
+    let strategy = DutchBookStrategy::new(config);
+    assert_eq!(strategy.name(), "dutch-book");
+    assert_eq!(strategy.tracked_market_count(), 0);
+    assert_eq!(strategy.open_position_count(), 0);
+    assert_eq!(strategy.active_execution_count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Strategy tests — orderbook update → PlaceBatchOrder
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strategy_emits_batch_order_on_opportunity() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.48), dec!(200), dec!(0.49), dec!(150)).await;
+
+    // Trigger via orderbook update
+    let snapshot = make_orderbook("tok_yes", dec!(0.48), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    let actions = strategy.on_event(&event, &ctx).await.unwrap();
+
+    // Should emit exactly one PlaceBatchOrder with 2 orders
+    assert_eq!(actions.len(), 1);
+    match &actions[0] {
+        Action::PlaceBatchOrder(orders) => {
+            assert_eq!(orders.len(), 2);
+
+            // YES order
+            assert_eq!(orders[0].token_id, "tok_yes");
+            assert_eq!(orders[0].price, dec!(0.48));
+            assert_eq!(orders[0].side, OrderSide::Buy);
+            assert_eq!(orders[0].order_type, OrderType::Fok);
+
+            // NO order
+            assert_eq!(orders[1].token_id, "tok_no");
+            assert_eq!(orders[1].price, dec!(0.49));
+            assert_eq!(orders[1].side, OrderSide::Buy);
+            assert_eq!(orders[1].order_type, OrderType::Fok);
+
+            // Size = min(200, 150, 100) = 100 (config limit)
+            assert_eq!(orders[0].size, dec!(100));
+            assert_eq!(orders[1].size, dec!(100));
+        }
+        other => panic!("Expected PlaceBatchOrder, got {:?}", other),
+    }
+
+    // Active execution should be tracked
+    assert_eq!(strategy.active_execution_count(), 1);
+}
+
+#[tokio::test]
+async fn strategy_no_action_when_no_opportunity() {
+    // combined = 0.52 + 0.49 = 1.01 — no opportunity
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.52), dec!(200), dec!(0.49), dec!(150)).await;
+
+    let snapshot = make_orderbook("tok_yes", dec!(0.52), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    let actions = strategy.on_event(&event, &ctx).await.unwrap();
+
+    assert!(actions.is_empty());
+    assert_eq!(strategy.active_execution_count(), 0);
+}
+
+#[tokio::test]
+async fn strategy_no_action_for_unknown_token() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.48), dec!(200), dec!(0.49), dec!(150)).await;
+
+    let snapshot = make_orderbook("unknown_token", dec!(0.10), dec!(500));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    let actions = strategy.on_event(&event, &ctx).await.unwrap();
+
+    assert!(actions.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Strategy tests — position limit enforcement
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strategy_enforces_position_limit() {
+    let config = DutchBookConfig {
+        max_combined_cost: dec!(0.99),
+        min_profit_threshold: dec!(0.005),
+        max_position_size: dec!(100),
+        max_concurrent_positions: 1, // Only allow 1
+        ..DutchBookConfig::default()
+    };
+    let mut strategy = DutchBookStrategy::new(config);
+
+    let market1 = make_market_info("m1", "t1a", "t1b");
+    let market2 = make_market_info("m2", "t2a", "t2b");
+    strategy.analyzer.add_market(&market1);
+    strategy.analyzer.add_market(&market2);
+
+    let ctx = StrategyContext::new();
+    {
+        let mut md = ctx.market_data.write().await;
+        // Market 1: opportunity exists
+        md.orderbooks
+            .insert("t1a".to_string(), make_orderbook("t1a", dec!(0.45), dec!(200)));
+        md.orderbooks
+            .insert("t1b".to_string(), make_orderbook("t1b", dec!(0.45), dec!(200)));
+        // Market 2: opportunity also exists
+        md.orderbooks
+            .insert("t2a".to_string(), make_orderbook("t2a", dec!(0.44), dec!(200)));
+        md.orderbooks
+            .insert("t2b".to_string(), make_orderbook("t2b", dec!(0.44), dec!(200)));
+    }
+
+    // First opportunity triggers
+    let snapshot1 = make_orderbook("t1a", dec!(0.45), dec!(200));
+    let event1 = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot1));
+    let actions1 = strategy.on_event(&event1, &ctx).await.unwrap();
+    assert_eq!(actions1.len(), 1); // PlaceBatchOrder
+
+    // Second opportunity should be blocked (limit = 1)
+    let snapshot2 = make_orderbook("t2a", dec!(0.44), dec!(200));
+    let event2 = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot2));
+    let actions2 = strategy.on_event(&event2, &ctx).await.unwrap();
+    assert!(actions2.is_empty(), "Position limit should block second opportunity");
+}
+
+#[tokio::test]
+async fn strategy_skips_market_with_active_execution() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.48), dec!(200), dec!(0.49), dec!(150)).await;
+
+    // First orderbook update triggers
+    let snapshot = make_orderbook("tok_yes", dec!(0.48), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot.clone()));
+    let actions1 = strategy.on_event(&event, &ctx).await.unwrap();
+    assert_eq!(actions1.len(), 1);
+    assert_eq!(strategy.active_execution_count(), 1);
+
+    // Same market again — should skip (already executing)
+    let actions2 = strategy.on_event(&event, &ctx).await.unwrap();
+    assert!(actions2.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Strategy tests — paired order construction
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strategy_paired_orders_use_fok_type() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.48), dec!(200), dec!(0.49), dec!(150)).await;
+
+    let snapshot = make_orderbook("tok_yes", dec!(0.48), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    let actions = strategy.on_event(&event, &ctx).await.unwrap();
+
+    if let Action::PlaceBatchOrder(orders) = &actions[0] {
+        for order in orders {
+            assert_eq!(order.order_type, OrderType::Fok);
+            assert_eq!(order.side, OrderSide::Buy);
+        }
+    }
+}
+
+#[tokio::test]
+async fn strategy_paired_orders_respect_neg_risk() {
+    let config = DutchBookConfig::default();
+    let mut strategy = DutchBookStrategy::new(config);
+
+    // Create a neg_risk market
+    let mut market = make_market_info("m1", "tok_yes", "tok_no");
+    market.neg_risk = true;
+    strategy.analyzer.add_market(&market);
+
+    let ctx = StrategyContext::new();
+    {
+        let mut md = ctx.market_data.write().await;
+        md.orderbooks
+            .insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.48), dec!(200)));
+        md.orderbooks
+            .insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.49), dec!(150)));
+    }
+
+    let snapshot = make_orderbook("tok_yes", dec!(0.48), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    let actions = strategy.on_event(&event, &ctx).await.unwrap();
+
+    if let Action::PlaceBatchOrder(orders) = &actions[0] {
+        assert!(orders[0].neg_risk);
+        assert!(orders[1].neg_risk);
+    }
+}
+
+#[tokio::test]
+async fn strategy_paired_order_sizes_match() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.45), dec!(60), dec!(0.45), dec!(80)).await;
+
+    let snapshot = make_orderbook("tok_yes", dec!(0.45), dec!(60));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    let actions = strategy.on_event(&event, &ctx).await.unwrap();
+
+    if let Action::PlaceBatchOrder(orders) = &actions[0] {
+        // Both should have the same size: min(60, 80, 100) = 60
+        assert_eq!(orders[0].size, dec!(60));
+        assert_eq!(orders[1].size, dec!(60));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Strategy tests — order placed event routing
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strategy_tracks_placed_order_ids() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.48), dec!(200), dec!(0.49), dec!(150)).await;
+
+    // Trigger batch order
+    let snapshot = make_orderbook("tok_yes", dec!(0.48), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+
+    // Simulate Placed events
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+
+    // Verify order_to_market mappings exist
+    assert!(strategy.order_to_market.contains_key(&yes_oid));
+    assert!(strategy.order_to_market.contains_key(&no_oid));
+}
+
+#[tokio::test]
+async fn strategy_ignores_failed_placement() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.48), dec!(200), dec!(0.49), dec!(150)).await;
+
+    // Trigger batch order
+    let snapshot = make_orderbook("tok_yes", dec!(0.48), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+
+    // Failed placement
+    let failed_result = OrderResult {
+        success: false,
+        order_id: Some("failed_oid".to_string()),
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.48),
+        size: dec!(100),
+        side: OrderSide::Buy,
+        status: Some("Failed".to_string()),
+        message: "Rejected".to_string(),
+    };
+    let actions = strategy.handle_order_placed(&failed_result);
+    assert!(actions.is_empty());
+    assert!(!strategy.order_to_market.contains_key("failed_oid"));
+}
+
+// ---------------------------------------------------------------------------
+// Strategy tests — fill events
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strategy_both_filled_promotes_to_log() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.48), dec!(200), dec!(0.49), dec!(150)).await;
+
+    // Trigger batch order
+    let snapshot = make_orderbook("tok_yes", dec!(0.48), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    assert_eq!(strategy.active_execution_count(), 1);
+
+    // Simulate placed
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+
+    // Fill YES
+    let actions_yes = strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.48), dec!(100));
+    assert!(actions_yes.is_empty()); // Not complete yet
+
+    // Fill NO — should trigger promotion
+    let actions_no = strategy.handle_order_filled(&no_oid, "tok_no", dec!(0.49), dec!(100));
+    assert!(!actions_no.is_empty()); // Should have a Log action
+
+    // Active execution removed
+    assert_eq!(strategy.active_execution_count(), 0);
+}
+
+#[tokio::test]
+async fn strategy_fill_unknown_order_is_noop() {
+    let config = DutchBookConfig::default();
+    let mut strategy = DutchBookStrategy::new(config);
+
+    let actions = strategy.handle_order_filled("unknown_order", "tok_yes", dec!(0.50), dec!(10));
+    assert!(actions.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Strategy tests — cancellation events
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strategy_both_cancelled_cleans_up() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.48), dec!(200), dec!(0.49), dec!(150)).await;
+
+    // Trigger + place
+    let snapshot = make_orderbook("tok_yes", dec!(0.48), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+
+    // Cancel both (neither filled)
+    strategy.handle_order_cancelled(&yes_oid);
+    // After first cancel (neither side was filled), state goes to Complete
+    assert_eq!(strategy.active_execution_count(), 0);
+
+    // Order mappings cleaned up
+    assert!(!strategy.order_to_market.contains_key(&yes_oid));
+    assert!(!strategy.order_to_market.contains_key(&no_oid));
+}
+
+#[tokio::test]
+async fn strategy_partial_fill_detected() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.48), dec!(200), dec!(0.49), dec!(150)).await;
+
+    // Trigger + place
+    let snapshot = make_orderbook("tok_yes", dec!(0.48), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+
+    // Fill YES first
+    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.48), dec!(100));
+
+    // Cancel NO — partial fill
+    strategy.handle_order_cancelled(&no_oid);
+
+    // Should still have active execution (needs unwind, handled in Task 5)
+    assert_eq!(strategy.active_execution_count(), 1);
+}
+
+#[tokio::test]
+async fn strategy_cancel_unknown_order_is_noop() {
+    let config = DutchBookConfig::default();
+    let mut strategy = DutchBookStrategy::new(config);
+
+    let actions = strategy.handle_order_cancelled("unknown_order");
+    assert!(actions.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Strategy tests — market expiration
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strategy_market_expired_removes_from_analyzer() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.48), dec!(200), dec!(0.49), dec!(150)).await;
+
+    assert_eq!(strategy.tracked_market_count(), 1);
+
+    let event = Event::MarketData(MarketDataEvent::MarketExpired("m1".to_string()));
+    strategy.on_event(&event, &ctx).await.unwrap();
+
+    assert_eq!(strategy.tracked_market_count(), 0);
+}
+
+#[tokio::test]
+async fn strategy_market_expired_with_position_emits_redeem() {
+    let config = DutchBookConfig::default();
+    let mut strategy = DutchBookStrategy::new(config);
+
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    strategy.analyzer.add_market(&market);
+
+    // Manually insert an open position
+    let pos = PairedPosition {
+        market_id: "m1".to_string(),
+        yes_entry_price: dec!(0.48),
+        no_entry_price: dec!(0.49),
+        size: dec!(100),
+        combined_cost: dec!(97),
+        expected_profit: dec!(3),
+        opened_at: Utc::now(),
+    };
+    strategy.open_positions.insert("m1".to_string(), pos);
+    assert_eq!(strategy.open_position_count(), 1);
+
+    let ctx = StrategyContext::new();
+    let event = Event::MarketData(MarketDataEvent::MarketExpired("m1".to_string()));
+    let actions = strategy.on_event(&event, &ctx).await.unwrap();
+
+    // Should emit RedeemPosition
+    assert_eq!(actions.len(), 1);
+    match &actions[0] {
+        Action::RedeemPosition(req) => {
+            assert_eq!(req.market_id, "m1");
+        }
+        other => panic!("Expected RedeemPosition, got {:?}", other),
+    }
+
+    assert_eq!(strategy.open_position_count(), 0);
+}
+
+#[tokio::test]
+async fn strategy_market_expired_cleans_up_active_execution() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.48), dec!(200), dec!(0.49), dec!(150)).await;
+
+    // Trigger execution
+    let snapshot = make_orderbook("tok_yes", dec!(0.48), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    assert_eq!(strategy.active_execution_count(), 1);
+
+    // Market expires
+    let event = Event::MarketData(MarketDataEvent::MarketExpired("m1".to_string()));
+    strategy.on_event(&event, &ctx).await.unwrap();
+
+    assert_eq!(strategy.active_execution_count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Strategy tests — pending subscriptions drain
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strategy_drains_pending_subscriptions() {
+    let config = DutchBookConfig::default();
+    let mut strategy = DutchBookStrategy::new(config);
+
+    // Add markets to pending queue
+    {
+        let mut pending = strategy.pending_subscriptions.lock().await;
+        pending.push(make_market_info("m1", "t1a", "t1b"));
+        pending.push(make_market_info("m2", "t2a", "t2b"));
+    }
+
+    let ctx = StrategyContext::new();
+    // Any event should drain the queue
+    let event = Event::System(SystemEvent::EngineStarted);
+    let actions = strategy.on_event(&event, &ctx).await.unwrap();
+
+    // Should emit SubscribeMarket for each pending market
+    assert_eq!(actions.len(), 2);
+    let subscribe_count = actions
+        .iter()
+        .filter(|a| matches!(a, Action::SubscribeMarket(_)))
+        .count();
+    assert_eq!(subscribe_count, 2);
+
+    // Markets should be registered in analyzer
+    assert_eq!(strategy.tracked_market_count(), 2);
+
+    // Queue should be empty now
+    let pending = strategy.pending_subscriptions.lock().await;
+    assert!(pending.is_empty());
+}
+
+#[tokio::test]
+async fn strategy_empty_pending_no_actions() {
+    let config = DutchBookConfig::default();
+    let mut strategy = DutchBookStrategy::new(config);
+
+    let ctx = StrategyContext::new();
+    let event = Event::System(SystemEvent::EngineStarted);
+    let actions = strategy.on_event(&event, &ctx).await.unwrap();
+    assert!(actions.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Strategy tests — rejected order handling
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strategy_rejected_order_treated_as_cancel() {
+    let (mut strategy, ctx, _market) =
+        setup_strategy_with_market(dec!(0.48), dec!(200), dec!(0.49), dec!(150)).await;
+
+    // Trigger + place
+    let snapshot = make_orderbook("tok_yes", dec!(0.48), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    strategy.on_event(&event, &ctx).await.unwrap();
+    let (yes_oid, _no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+
+    // Reject the YES order
+    let reject_event = Event::OrderUpdate(OrderEvent::Rejected {
+        order_id: Some(yes_oid.clone()),
+        reason: "Insufficient funds".to_string(),
+        token_id: Some("tok_yes".to_string()),
+    });
+    let actions = strategy.on_event(&reject_event, &ctx).await.unwrap();
+
+    // Should be handled (neither side was filled, so Complete → cleanup)
+    assert!(actions.is_empty()); // cleanup happens internally
+    assert_eq!(strategy.active_execution_count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Strategy tests — event routing coverage
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strategy_ignores_irrelevant_events() {
+    let config = DutchBookConfig::default();
+    let mut strategy = DutchBookStrategy::new(config);
+    let ctx = StrategyContext::new();
+
+    // PriceChange event — should not crash
+    let event = Event::MarketData(MarketDataEvent::PriceChange {
+        token_id: "tok_yes".to_string(),
+        price: dec!(0.50),
+        side: OrderSide::Buy,
+        best_bid: dec!(0.49),
+        best_ask: dec!(0.51),
+    });
+    let actions = strategy.on_event(&event, &ctx).await.unwrap();
+    assert!(actions.is_empty());
+
+    // ExternalPrice event
+    let event = Event::MarketData(MarketDataEvent::ExternalPrice {
+        symbol: "BTC".to_string(),
+        price: dec!(60000),
+        source: "binance".to_string(),
+        timestamp: Utc::now(),
+    });
+    let actions = strategy.on_event(&event, &ctx).await.unwrap();
+    assert!(actions.is_empty());
 }

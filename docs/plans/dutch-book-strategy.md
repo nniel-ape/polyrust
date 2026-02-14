@@ -168,21 +168,21 @@ This prevents holding unhedged directional risk.
 - [x] Run `cargo test -p polyrust-strategies` — must pass before next task
 
 ### Task 4: Strategy core (event handling + order placement)
-- [ ] Create `crates/polyrust-strategies/src/dutch_book/strategy.rs` with `DutchBookStrategy`:
+- [x] Create `crates/polyrust-strategies/src/dutch_book/strategy.rs` with `DutchBookStrategy`:
   - Fields: `config: DutchBookConfig`, `analyzer: ArbitrageAnalyzer`, `pending_subscriptions: Arc<Mutex<Vec<MarketInfo>>>`, `active_executions: HashMap<MarketId, PairedOrder>`, `open_positions: HashMap<MarketId, PairedPosition>`, `scanner_handle: Option<JoinHandle<()>>`
-- [ ] Implement `Strategy::on_start`: spawn background scanner task via `GammaScanner::start_scanner()`
-- [ ] Implement `Strategy::on_event` event routing:
+- [x] Implement `Strategy::on_start`: spawn background scanner task via `GammaScanner::start_scanner()`
+- [x] Implement `Strategy::on_event` event routing:
   - **Any event**: drain `pending_subscriptions` queue → emit `SubscribeMarket` actions for new markets
   - **OrderbookUpdate**: call `analyzer.check_arbitrage()` → if opportunity found AND not already executing on this market AND under max concurrent positions → emit `PlaceBatchOrder` with paired FOK BUY orders, track in `active_executions`
   - **OrderEvent::Filled**: update execution state for the order's market, check if both sides filled
   - **OrderEvent::Cancelled / Rejected**: update execution state, trigger emergency unwind if other side filled
   - **MarketExpired**: remove from analyzer, check if positions need redemption → emit `RedeemPosition`
-- [ ] Implement paired order creation: build two `OrderRequest` (FOK, BUY, best ask price, computed size) — one for each token
-- [ ] Implement position limit check: reject new opportunities if `open_positions.len() >= max_concurrent_positions`
-- [ ] Write tests for event routing (correct actions emitted for each event type)
-- [ ] Write tests for position limit enforcement
-- [ ] Write tests for paired order construction (correct prices, sizes, order type)
-- [ ] Run `cargo test -p polyrust-strategies` — must pass before next task
+- [x] Implement paired order creation: build two `OrderRequest` (FOK, BUY, best ask price, computed size) — one for each token
+- [x] Implement position limit check: reject new opportunities if `open_positions.len() >= max_concurrent_positions`
+- [x] Write tests for event routing (correct actions emitted for each event type)
+- [x] Write tests for position limit enforcement
+- [x] Write tests for paired order construction (correct prices, sizes, order type)
+- [x] Run `cargo test -p polyrust-strategies` — must pass before next task
 
 ### Task 5: Paired execution tracking and emergency unwind
 - [ ] Implement execution state machine in strategy:
