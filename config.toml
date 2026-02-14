@@ -119,9 +119,18 @@ csv_export = "sweep_results.csv"
 json_export = "sweep_results.json"
 rank_by = "sharpe"
 top_n = 20
+force = true
 
-# Sweep 11: min_strike_distance_pct calibration
-# Tests strike proximity filter threshold (0 = disabled, up to 0.2%)
+# Sweep 12: Full lifecycle state machine parameter optimization trigger timing + trailing + recovery
+
+[backtest.sweep.stop_loss]
+dual_trigger_consecutive_ticks = [1, 2, 3]
+hard_drop_abs = ["0.06", "0.10"]
+trailing_distance = ["0.03", "0.07"]
+trailing_arm_distance = ["0.010", "0.020"]
+recovery_max_set_cost = ["1.00", "1.02"]
+reentry_cooldown_secs = [2, 8, 12]
 
 [backtest.sweep.tailend]
-min_strike_distance_pct = ["0", "0.0004", "0.0008", "0.0012", "0.002"]
+post_entry_exit_drop = ["0.03", "0.05", "0.07"]
+min_sell_delay_secs = [5, 8, 12]

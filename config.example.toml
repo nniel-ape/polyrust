@@ -270,3 +270,61 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # typical_depth = 150            # Shares at best bid/ask (replaces default 1000)
 # depth_decay_near_expiry = true # Linearly reduce depth as market approaches expiration
 # gtc_taker_fee_heuristic = true # Charge taker fee on GTC orders that cross the spread
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARAMETER SWEEP
+# ─────────────────────────────────────────────────────────────────────────────
+# Grid search over strategy parameters. Run: cargo run -- --backtest-sweep
+#
+# Three recommended profiles:
+#
+# --- Profile 1: Trigger Sensitivity (243 combos) ---
+# Focus: when exits fire — dual-trigger hysteresis + hard crash thresholds
+#
+# [backtest.sweep]
+# rank_by = "sharpe"
+# top_n = 15
+# csv_export = "sweep_triggers.csv"
+#
+# [backtest.sweep.stop_loss]
+# dual_trigger_consecutive_ticks = [1, 2, 3]
+# hard_drop_abs = ["0.05", "0.08", "0.12"]
+# hard_reversal_pct = ["0.004", "0.006", "0.009"]
+# reversal_pct = ["0.002", "0.003", "0.005"]
+# min_drop = ["0.03", "0.05", "0.08"]
+#
+# --- Profile 2: Trailing Stop Tuning (144 combos) ---
+# Focus: profit capture — trailing distance + arming + floor
+#
+# [backtest.sweep]
+# rank_by = "pnl"
+# top_n = 15
+# csv_export = "sweep_trailing.csv"
+#
+# [backtest.sweep.stop_loss]
+# trailing_distance = ["0.03", "0.04", "0.05", "0.07"]
+# trailing_min_distance = ["0.010", "0.015", "0.020"]
+# trailing_arm_distance = ["0.010", "0.015", "0.020", "0.025"]
+# min_remaining_secs = [30, 45, 60]
+#
+# --- Profile 3: Full Lifecycle (6,561 combos — set force = true) ---
+# Focus: narrow ranges from best of 1+2, plus recovery params
+#
+# [backtest.sweep]
+# rank_by = "sharpe"
+# top_n = 20
+# force = true
+# csv_export = "sweep_lifecycle.csv"
+# json_export = "sweep_lifecycle.json"
+#
+# [backtest.sweep.stop_loss]
+# dual_trigger_consecutive_ticks = [1, 2, 3]
+# hard_drop_abs = ["0.06", "0.08", "0.10"]
+# trailing_distance = ["0.03", "0.05", "0.07"]
+# trailing_arm_distance = ["0.010", "0.015", "0.020"]
+# recovery_max_set_cost = ["1.00", "1.01", "1.02"]
+# reentry_cooldown_secs = [4, 8, 12]
+#
+# [backtest.sweep.tailend]
+# post_entry_exit_drop = ["0.03", "0.05", "0.07"]
+# min_sell_delay_secs = [8, 10, 12]

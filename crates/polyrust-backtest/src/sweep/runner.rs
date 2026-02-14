@@ -146,6 +146,7 @@ impl SweepRunner {
             // Backtest can't produce Historical quality
             arb_config.tailend.min_reference_quality = ReferenceQualityLevel::Current;
             arb_config.use_chainlink = false; // No RPC in backtest
+            arb_config.tailend.stale_ob_secs = i64::MAX; // Staleness meaningless in backtest
 
             let combo_index = combo.index;
 

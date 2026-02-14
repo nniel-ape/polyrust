@@ -95,6 +95,8 @@ pub struct TailEndSweepParams {
     pub post_entry_window_secs: Option<IntParamRange>,
     /// Min strike distance (crypto % from strike) sweep.
     pub min_strike_distance_pct: Option<ParamRange>,
+    /// Seconds after entry before any sell is allowed.
+    pub min_sell_delay_secs: Option<IntParamRange>,
 }
 
 /// Sweep parameters for sizing config fields.
@@ -116,6 +118,20 @@ pub struct StopLossSweepParams {
     pub trailing_distance: Option<ParamRange>,
     /// Minimum seconds remaining for stop-loss to be active.
     pub min_remaining_secs: Option<IntParamRange>,
+    /// Hard crash absolute bid drop threshold.
+    pub hard_drop_abs: Option<ParamRange>,
+    /// Hard crash external price reversal threshold.
+    pub hard_reversal_pct: Option<ParamRange>,
+    /// Consecutive ticks dual-trigger must hold (hysteresis).
+    pub dual_trigger_consecutive_ticks: Option<IntParamRange>,
+    /// Distance from entry price to arm the trailing stop.
+    pub trailing_arm_distance: Option<ParamRange>,
+    /// Floor on effective trailing distance near expiry.
+    pub trailing_min_distance: Option<ParamRange>,
+    /// Max combined cost for opposite-side set completion.
+    pub recovery_max_set_cost: Option<ParamRange>,
+    /// Cooldown seconds after recovery before re-entry.
+    pub reentry_cooldown_secs: Option<IntParamRange>,
 }
 
 /// Top-level sweep configuration.

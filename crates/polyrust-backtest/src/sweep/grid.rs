@@ -108,6 +108,41 @@ impl ParameterCombination {
                         config.stop_loss.min_remaining_secs = *v as i64;
                     }
                 }
+                "stop_loss.hard_drop_abs" => {
+                    if let ParamValue::Decimal(v) = value {
+                        config.stop_loss.hard_drop_abs = *v;
+                    }
+                }
+                "stop_loss.hard_reversal_pct" => {
+                    if let ParamValue::Decimal(v) = value {
+                        config.stop_loss.hard_reversal_pct = *v;
+                    }
+                }
+                "stop_loss.dual_trigger_consecutive_ticks" => {
+                    if let ParamValue::U64(v) = value {
+                        config.stop_loss.dual_trigger_consecutive_ticks = *v as usize;
+                    }
+                }
+                "stop_loss.trailing_arm_distance" => {
+                    if let ParamValue::Decimal(v) = value {
+                        config.stop_loss.trailing_arm_distance = *v;
+                    }
+                }
+                "stop_loss.trailing_min_distance" => {
+                    if let ParamValue::Decimal(v) = value {
+                        config.stop_loss.trailing_min_distance = *v;
+                    }
+                }
+                "stop_loss.recovery_max_set_cost" => {
+                    if let ParamValue::Decimal(v) = value {
+                        config.stop_loss.recovery_max_set_cost = *v;
+                    }
+                }
+                "stop_loss.reentry_cooldown_secs" => {
+                    if let ParamValue::U64(v) = value {
+                        config.stop_loss.reentry_cooldown_secs = *v as i64;
+                    }
+                }
                 // TailEnd post-entry params
                 "tailend.post_entry_exit_drop" => {
                     if let ParamValue::Decimal(v) = value {
@@ -122,6 +157,11 @@ impl ParameterCombination {
                 "tailend.min_strike_distance_pct" => {
                     if let ParamValue::Decimal(v) = value {
                         config.tailend.min_strike_distance_pct = *v;
+                    }
+                }
+                "tailend.min_sell_delay_secs" => {
+                    if let ParamValue::U64(v) = value {
+                        config.tailend.min_sell_delay_secs = *v as i64;
                     }
                 }
                 // Dynamic threshold params: "tailend.dynamic_thresholds.{secs}"
@@ -242,6 +282,12 @@ impl ParameterGrid {
                     .collect(),
             });
         }
+        if let Some(ref range) = config.tailend.min_sell_delay_secs {
+            axes.push(Axis {
+                name: "tailend.min_sell_delay_secs".to_string(),
+                values: range.expand().into_iter().map(ParamValue::U64).collect(),
+            });
+        }
 
         // Dynamic thresholds: each bucket becomes a separate axis
         if let Some(ref dt) = config.tailend.dynamic_thresholds {
@@ -334,6 +380,68 @@ impl ParameterGrid {
                 values: range.expand().into_iter().map(ParamValue::U64).collect(),
             });
         }
+        if let Some(ref range) = config.stop_loss.hard_drop_abs {
+            axes.push(Axis {
+                name: "stop_loss.hard_drop_abs".to_string(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
+            });
+        }
+        if let Some(ref range) = config.stop_loss.hard_reversal_pct {
+            axes.push(Axis {
+                name: "stop_loss.hard_reversal_pct".to_string(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
+            });
+        }
+        if let Some(ref range) = config.stop_loss.dual_trigger_consecutive_ticks {
+            axes.push(Axis {
+                name: "stop_loss.dual_trigger_consecutive_ticks".to_string(),
+                values: range.expand().into_iter().map(ParamValue::U64).collect(),
+            });
+        }
+        if let Some(ref range) = config.stop_loss.trailing_arm_distance {
+            axes.push(Axis {
+                name: "stop_loss.trailing_arm_distance".to_string(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
+            });
+        }
+        if let Some(ref range) = config.stop_loss.trailing_min_distance {
+            axes.push(Axis {
+                name: "stop_loss.trailing_min_distance".to_string(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
+            });
+        }
+        if let Some(ref range) = config.stop_loss.recovery_max_set_cost {
+            axes.push(Axis {
+                name: "stop_loss.recovery_max_set_cost".to_string(),
+                values: range
+                    .expand()
+                    .into_iter()
+                    .map(ParamValue::Decimal)
+                    .collect(),
+            });
+        }
+        if let Some(ref range) = config.stop_loss.reentry_cooldown_secs {
+            axes.push(Axis {
+                name: "stop_loss.reentry_cooldown_secs".to_string(),
+                values: range.expand().into_iter().map(ParamValue::U64).collect(),
+            });
+        }
 
         Self { axes }
     }
@@ -385,7 +493,9 @@ impl ParameterGrid {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sweep::config::{ParamRange, SweepConfig, TailEndSweepParams};
+    use crate::sweep::config::{
+        IntParamRange, ParamRange, StopLossSweepParams, SweepConfig, TailEndSweepParams,
+    };
     use rust_decimal_macros::dec;
 
     #[test]
@@ -565,5 +675,144 @@ mod tests {
         assert_eq!(config.tailend.dynamic_thresholds[1], (90, dec!(0.92)));
         assert_eq!(config.tailend.dynamic_thresholds[2], (60, dec!(0.93))); // overridden
         assert_eq!(config.tailend.dynamic_thresholds[3], (30, dec!(0.95)));
+    }
+
+    #[test]
+    fn apply_to_lifecycle_params() {
+        let combo = ParameterCombination {
+            index: 0,
+            params: vec![
+                (
+                    "stop_loss.hard_drop_abs".to_string(),
+                    ParamValue::Decimal(dec!(0.10)),
+                ),
+                (
+                    "stop_loss.hard_reversal_pct".to_string(),
+                    ParamValue::Decimal(dec!(0.008)),
+                ),
+                (
+                    "stop_loss.dual_trigger_consecutive_ticks".to_string(),
+                    ParamValue::U64(3),
+                ),
+                (
+                    "stop_loss.trailing_arm_distance".to_string(),
+                    ParamValue::Decimal(dec!(0.020)),
+                ),
+                (
+                    "stop_loss.trailing_min_distance".to_string(),
+                    ParamValue::Decimal(dec!(0.012)),
+                ),
+                (
+                    "stop_loss.recovery_max_set_cost".to_string(),
+                    ParamValue::Decimal(dec!(1.02)),
+                ),
+                (
+                    "stop_loss.reentry_cooldown_secs".to_string(),
+                    ParamValue::U64(12),
+                ),
+                (
+                    "tailend.min_sell_delay_secs".to_string(),
+                    ParamValue::U64(8),
+                ),
+            ],
+        };
+
+        let mut config = ArbitrageConfig::default();
+        combo.apply_to(&mut config);
+
+        assert_eq!(config.stop_loss.hard_drop_abs, dec!(0.10));
+        assert_eq!(config.stop_loss.hard_reversal_pct, dec!(0.008));
+        assert_eq!(config.stop_loss.dual_trigger_consecutive_ticks, 3);
+        assert_eq!(config.stop_loss.trailing_arm_distance, dec!(0.020));
+        assert_eq!(config.stop_loss.trailing_min_distance, dec!(0.012));
+        assert_eq!(config.stop_loss.recovery_max_set_cost, dec!(1.02));
+        assert_eq!(config.stop_loss.reentry_cooldown_secs, 12);
+        assert_eq!(config.tailend.min_sell_delay_secs, 8);
+    }
+
+    #[test]
+    fn grid_lifecycle_axes() {
+        let config = SweepConfig {
+            stop_loss: StopLossSweepParams {
+                hard_drop_abs: Some(ParamRange::Values(vec![dec!(0.05), dec!(0.08)])),
+                dual_trigger_consecutive_ticks: Some(IntParamRange::Values(vec![1, 2, 3])),
+                trailing_arm_distance: Some(ParamRange::Values(vec![dec!(0.01), dec!(0.02)])),
+                recovery_max_set_cost: Some(ParamRange::Values(vec![
+                    dec!(1.00),
+                    dec!(1.01),
+                    dec!(1.02),
+                ])),
+                ..Default::default()
+            },
+            tailend: TailEndSweepParams {
+                min_sell_delay_secs: Some(IntParamRange::Values(vec![8, 10])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let grid = ParameterGrid::from_config(&config);
+        // 2 * 3 * 2 * 3 * 2 = 72
+        assert_eq!(grid.total_combinations(), 72);
+
+        let names = grid.axis_names();
+        assert!(names.contains(&"stop_loss.hard_drop_abs"));
+        assert!(names.contains(&"stop_loss.dual_trigger_consecutive_ticks"));
+        assert!(names.contains(&"stop_loss.trailing_arm_distance"));
+        assert!(names.contains(&"stop_loss.recovery_max_set_cost"));
+        assert!(names.contains(&"tailend.min_sell_delay_secs"));
+    }
+
+    #[test]
+    fn sweep_config_lifecycle_toml_parsing() {
+        let toml = r#"
+            [stop_loss]
+            hard_drop_abs = ["0.05", "0.08", "0.12"]
+            hard_reversal_pct = ["0.004", "0.006"]
+            dual_trigger_consecutive_ticks = [1, 2, 3]
+            trailing_arm_distance = ["0.010", "0.015"]
+            trailing_min_distance = ["0.010", "0.020"]
+            recovery_max_set_cost = ["1.00", "1.01"]
+            reentry_cooldown_secs = [4, 8, 12]
+
+            [tailend]
+            min_sell_delay_secs = [8, 10, 12]
+        "#;
+        let config: SweepConfig = toml::from_str(toml).unwrap();
+
+        assert!(config.stop_loss.hard_drop_abs.is_some());
+        assert_eq!(config.stop_loss.hard_drop_abs.unwrap().expand().len(), 3);
+        assert!(config.stop_loss.hard_reversal_pct.is_some());
+        assert_eq!(
+            config.stop_loss.hard_reversal_pct.unwrap().expand().len(),
+            2
+        );
+        assert!(config.stop_loss.dual_trigger_consecutive_ticks.is_some());
+        assert_eq!(
+            config
+                .stop_loss
+                .dual_trigger_consecutive_ticks
+                .unwrap()
+                .expand()
+                .len(),
+            3
+        );
+        assert!(config.stop_loss.trailing_arm_distance.is_some());
+        assert!(config.stop_loss.trailing_min_distance.is_some());
+        assert!(config.stop_loss.recovery_max_set_cost.is_some());
+        assert!(config.stop_loss.reentry_cooldown_secs.is_some());
+        assert_eq!(
+            config
+                .stop_loss
+                .reentry_cooldown_secs
+                .unwrap()
+                .expand()
+                .len(),
+            3
+        );
+        assert!(config.tailend.min_sell_delay_secs.is_some());
+        assert_eq!(
+            config.tailend.min_sell_delay_secs.unwrap().expand(),
+            vec![8, 10, 12]
+        );
     }
 }
