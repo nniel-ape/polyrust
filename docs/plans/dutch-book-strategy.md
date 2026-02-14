@@ -146,11 +146,11 @@ This prevents holding unhedged directional risk.
 - [x] Run `cargo test -p polyrust-strategies` — must pass before next task
 
 ### Task 3: Arbitrage analyzer (opportunity detection)
-- [ ] Create `crates/polyrust-strategies/src/dutch_book/analyzer.rs` with `ArbitrageAnalyzer` struct
-- [ ] Maintain `tracked_markets: HashMap<MarketId, MarketEntry>` with token_a ↔ token_b mapping
-- [ ] Implement `add_market(&mut self, market: &MarketInfo)` — register both tokens for tracking
-- [ ] Implement `remove_market(&mut self, market_id: &str)` — unregister market
-- [ ] Implement `check_arbitrage(&self, token_id: &str, orderbooks: &HashMap<TokenId, OrderbookSnapshot>, config: &DutchBookConfig) -> Option<ArbitrageOpportunity>`:
+- [x] Create `crates/polyrust-strategies/src/dutch_book/analyzer.rs` with `ArbitrageAnalyzer` struct
+- [x] Maintain `tracked_markets: HashMap<MarketId, MarketEntry>` with token_a ↔ token_b mapping
+- [x] Implement `add_market(&mut self, market: &MarketInfo)` — register both tokens for tracking
+- [x] Implement `remove_market(&mut self, market_id: &str)` — unregister market
+- [x] Implement `check_arbitrage(&self, token_id: &str, orderbooks: &HashMap<TokenId, OrderbookSnapshot>, config: &DutchBookConfig) -> Option<ArbitrageOpportunity>`:
   - Look up which market this token belongs to
   - Get both token orderbooks from the shared state
   - Extract best ask price and size from each side
@@ -162,10 +162,10 @@ This prevents holding unhedged directional risk.
   - Calculate `max_size = min(yes_ask_size, no_ask_size, max_position_size)`
   - Reject if insufficient liquidity (size too small for minimum order)
   - Return `ArbitrageOpportunity` with all details
-- [ ] Write tests for arbitrage detection (opportunity exists, no opportunity, edge cases)
-- [ ] Write tests for profit calculation accuracy with `dec!()` literals
-- [ ] Write tests for size limiting (liquidity constraints, max position cap)
-- [ ] Run `cargo test -p polyrust-strategies` — must pass before next task
+- [x] Write tests for arbitrage detection (opportunity exists, no opportunity, edge cases)
+- [x] Write tests for profit calculation accuracy with `dec!()` literals
+- [x] Write tests for size limiting (liquidity constraints, max position cap)
+- [x] Run `cargo test -p polyrust-strategies` — must pass before next task
 
 ### Task 4: Strategy core (event handling + order placement)
 - [ ] Create `crates/polyrust-strategies/src/dutch_book/strategy.rs` with `DutchBookStrategy`:

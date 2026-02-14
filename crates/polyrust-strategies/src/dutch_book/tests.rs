@@ -1,9 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{Duration, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
+use polyrust_core::prelude::*;
+
+use super::analyzer::ArbitrageAnalyzer;
 use super::config::DutchBookConfig;
 use super::scanner::{GammaMarketResponse, GammaScanner};
 use super::types::{ExecutionState, FilledSide, MarketEntry, PairedPosition};
@@ -626,4 +629,455 @@ fn scanner_creation_succeeds() {
     let config = DutchBookConfig::default();
     let scanner = GammaScanner::new(config);
     assert!(scanner.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Analyzer tests — helpers
+// ---------------------------------------------------------------------------
+
+/// Create a MarketInfo for testing the analyzer.
+fn make_market_info(id: &str, token_a: &str, token_b: &str) -> MarketInfo {
+    MarketInfo {
+        id: id.to_string(),
+        slug: format!("{id}-slug"),
+        question: format!("Market {id}?"),
+        start_date: Some(Utc::now()),
+        end_date: Utc::now() + Duration::days(3),
+        token_ids: TokenIds {
+            outcome_a: token_a.to_string(),
+            outcome_b: token_b.to_string(),
+        },
+        accepting_orders: true,
+        neg_risk: false,
+        min_order_size: dec!(5),
+        tick_size: dec!(0.01),
+        fee_rate_bps: 0,
+    }
+}
+
+/// Create an OrderbookSnapshot with a single ask level.
+fn make_orderbook(token_id: &str, ask_price: Decimal, ask_size: Decimal) -> OrderbookSnapshot {
+    OrderbookSnapshot {
+        token_id: token_id.to_string(),
+        bids: vec![],
+        asks: vec![OrderbookLevel {
+            price: ask_price,
+            size: ask_size,
+        }],
+        timestamp: Utc::now(),
+    }
+}
+
+/// Create an empty OrderbookSnapshot (no asks, no bids).
+fn make_empty_orderbook(token_id: &str) -> OrderbookSnapshot {
+    OrderbookSnapshot {
+        token_id: token_id.to_string(),
+        bids: vec![],
+        asks: vec![],
+        timestamp: Utc::now(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Analyzer tests — add/remove markets
+// ---------------------------------------------------------------------------
+
+#[test]
+fn analyzer_add_market_registers_both_tokens() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    assert_eq!(analyzer.tracked_count(), 0);
+
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    assert_eq!(analyzer.tracked_count(), 1);
+    assert!(analyzer.market_for_token("tok_yes").is_some());
+    assert!(analyzer.market_for_token("tok_no").is_some());
+    assert_eq!(analyzer.market_for_token("tok_yes").unwrap().market_id, "m1");
+    assert_eq!(analyzer.market_for_token("tok_no").unwrap().market_id, "m1");
+}
+
+#[test]
+fn analyzer_remove_market_cleans_up_tokens() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    analyzer.remove_market("m1");
+    assert_eq!(analyzer.tracked_count(), 0);
+    assert!(analyzer.market_for_token("tok_yes").is_none());
+    assert!(analyzer.market_for_token("tok_no").is_none());
+}
+
+#[test]
+fn analyzer_remove_nonexistent_market_is_noop() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    analyzer.remove_market("nonexistent");
+    assert_eq!(analyzer.tracked_count(), 0);
+}
+
+#[test]
+fn analyzer_add_multiple_markets() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    analyzer.add_market(&make_market_info("m1", "t1a", "t1b"));
+    analyzer.add_market(&make_market_info("m2", "t2a", "t2b"));
+    analyzer.add_market(&make_market_info("m3", "t3a", "t3b"));
+
+    assert_eq!(analyzer.tracked_count(), 3);
+    assert_eq!(analyzer.market_for_token("t2a").unwrap().market_id, "m2");
+}
+
+#[test]
+fn analyzer_unknown_token_returns_none() {
+    let analyzer = ArbitrageAnalyzer::new();
+    assert!(analyzer.market_for_token("unknown").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Analyzer tests — arbitrage detection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn analyzer_detects_opportunity_when_combined_ask_below_threshold() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    let config = DutchBookConfig::default(); // max_combined_cost=0.99, min_profit=0.005
+
+    let mut orderbooks = HashMap::new();
+    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.48), dec!(200)));
+    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.49), dec!(150)));
+
+    // combined = 0.97, profit = (1 - 0.97) / 0.97 = 3.09%
+    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
+    assert!(opp.is_some());
+
+    let opp = opp.unwrap();
+    assert_eq!(opp.market_id, "m1");
+    assert_eq!(opp.yes_ask, dec!(0.48));
+    assert_eq!(opp.no_ask, dec!(0.49));
+    assert_eq!(opp.combined_cost, dec!(0.97));
+    // max_size = min(200, 150, 100) = 100 (config limit)
+    assert_eq!(opp.max_size, dec!(100));
+}
+
+#[test]
+fn analyzer_profit_pct_calculation_accuracy() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    let config = DutchBookConfig {
+        max_combined_cost: dec!(0.99),
+        min_profit_threshold: dec!(0.001), // very low threshold for this test
+        max_position_size: dec!(1000),
+        ..DutchBookConfig::default()
+    };
+
+    let mut orderbooks = HashMap::new();
+    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.45), dec!(500)));
+    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.50), dec!(500)));
+
+    // combined = 0.95, profit = (1 - 0.95) / 0.95 = 0.05/0.95 = 5.2631...%
+    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config).unwrap();
+    assert_eq!(opp.combined_cost, dec!(0.95));
+
+    // Verify profit_pct = 0.05 / 0.95 with Decimal precision
+    let expected_profit = dec!(0.05) / dec!(0.95);
+    assert_eq!(opp.profit_pct, expected_profit);
+}
+
+#[test]
+fn analyzer_no_opportunity_when_combined_at_threshold() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    let config = DutchBookConfig::default(); // max_combined_cost = 0.99
+
+    let mut orderbooks = HashMap::new();
+    // combined = 0.99 — exactly at threshold, should be rejected (>= check)
+    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.50), dec!(100)));
+    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.49), dec!(100)));
+
+    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
+    assert!(opp.is_none());
+}
+
+#[test]
+fn analyzer_no_opportunity_when_combined_above_threshold() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    let config = DutchBookConfig::default(); // max_combined_cost = 0.99
+
+    let mut orderbooks = HashMap::new();
+    // combined = 1.01 — above $1, definitely no opportunity
+    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.52), dec!(100)));
+    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.49), dec!(100)));
+
+    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
+    assert!(opp.is_none());
+}
+
+#[test]
+fn analyzer_no_opportunity_when_profit_below_threshold() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    let config = DutchBookConfig {
+        max_combined_cost: dec!(0.999), // very permissive
+        min_profit_threshold: dec!(0.05), // require 5% profit
+        ..DutchBookConfig::default()
+    };
+
+    let mut orderbooks = HashMap::new();
+    // combined = 0.97, profit = 3.09% — below 5% threshold
+    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.48), dec!(100)));
+    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.49), dec!(100)));
+
+    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
+    assert!(opp.is_none());
+}
+
+#[test]
+fn analyzer_no_opportunity_when_yes_side_has_no_asks() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    let config = DutchBookConfig::default();
+
+    let mut orderbooks = HashMap::new();
+    orderbooks.insert("tok_yes".to_string(), make_empty_orderbook("tok_yes"));
+    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.49), dec!(100)));
+
+    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
+    assert!(opp.is_none());
+}
+
+#[test]
+fn analyzer_no_opportunity_when_no_side_has_no_asks() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    let config = DutchBookConfig::default();
+
+    let mut orderbooks = HashMap::new();
+    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.48), dec!(100)));
+    orderbooks.insert("tok_no".to_string(), make_empty_orderbook("tok_no"));
+
+    let opp = analyzer.check_arbitrage("tok_no", &orderbooks, &config);
+    assert!(opp.is_none());
+}
+
+#[test]
+fn analyzer_no_opportunity_when_both_orderbooks_empty() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    let config = DutchBookConfig::default();
+
+    let mut orderbooks = HashMap::new();
+    orderbooks.insert("tok_yes".to_string(), make_empty_orderbook("tok_yes"));
+    orderbooks.insert("tok_no".to_string(), make_empty_orderbook("tok_no"));
+
+    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
+    assert!(opp.is_none());
+}
+
+#[test]
+fn analyzer_returns_none_for_unknown_token() {
+    let analyzer = ArbitrageAnalyzer::new();
+    let config = DutchBookConfig::default();
+    let orderbooks = HashMap::new();
+
+    let opp = analyzer.check_arbitrage("unknown_token", &orderbooks, &config);
+    assert!(opp.is_none());
+}
+
+#[test]
+fn analyzer_returns_none_when_only_one_orderbook_present() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    let config = DutchBookConfig::default();
+
+    // Only YES side has an orderbook
+    let mut orderbooks = HashMap::new();
+    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.48), dec!(100)));
+
+    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
+    assert!(opp.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Analyzer tests — size limiting
+// ---------------------------------------------------------------------------
+
+#[test]
+fn analyzer_size_limited_by_yes_liquidity() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    let config = DutchBookConfig {
+        max_position_size: dec!(1000),
+        ..DutchBookConfig::default()
+    };
+
+    let mut orderbooks = HashMap::new();
+    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.45), dec!(30))); // small YES liquidity
+    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.45), dec!(500)));
+
+    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config).unwrap();
+    assert_eq!(opp.max_size, dec!(30)); // limited by YES side
+}
+
+#[test]
+fn analyzer_size_limited_by_no_liquidity() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    let config = DutchBookConfig {
+        max_position_size: dec!(1000),
+        ..DutchBookConfig::default()
+    };
+
+    let mut orderbooks = HashMap::new();
+    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.45), dec!(500)));
+    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.45), dec!(25))); // small NO liquidity
+
+    let opp = analyzer.check_arbitrage("tok_no", &orderbooks, &config).unwrap();
+    assert_eq!(opp.max_size, dec!(25)); // limited by NO side
+}
+
+#[test]
+fn analyzer_size_limited_by_config_max_position_size() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    let config = DutchBookConfig {
+        max_position_size: dec!(50), // low cap
+        ..DutchBookConfig::default()
+    };
+
+    let mut orderbooks = HashMap::new();
+    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.45), dec!(500)));
+    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.45), dec!(500)));
+
+    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config).unwrap();
+    assert_eq!(opp.max_size, dec!(50)); // limited by config
+}
+
+#[test]
+fn analyzer_triggered_from_either_token_side() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    let config = DutchBookConfig::default();
+
+    let mut orderbooks = HashMap::new();
+    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.48), dec!(200)));
+    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.49), dec!(150)));
+
+    // Trigger from YES side
+    let opp_a = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
+    assert!(opp_a.is_some());
+
+    // Trigger from NO side — same opportunity
+    let opp_b = analyzer.check_arbitrage("tok_no", &orderbooks, &config);
+    assert!(opp_b.is_some());
+
+    // Both should produce the same result
+    let opp_a = opp_a.unwrap();
+    let opp_b = opp_b.unwrap();
+    assert_eq!(opp_a.market_id, opp_b.market_id);
+    assert_eq!(opp_a.combined_cost, opp_b.combined_cost);
+    assert_eq!(opp_a.profit_pct, opp_b.profit_pct);
+    assert_eq!(opp_a.max_size, opp_b.max_size);
+}
+
+#[test]
+fn analyzer_multiple_markets_independent() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    analyzer.add_market(&make_market_info("m1", "t1a", "t1b"));
+    analyzer.add_market(&make_market_info("m2", "t2a", "t2b"));
+
+    let config = DutchBookConfig::default();
+
+    let mut orderbooks = HashMap::new();
+    // m1: opportunity (combined = 0.95)
+    orderbooks.insert("t1a".to_string(), make_orderbook("t1a", dec!(0.45), dec!(100)));
+    orderbooks.insert("t1b".to_string(), make_orderbook("t1b", dec!(0.50), dec!(100)));
+    // m2: no opportunity (combined = 1.01)
+    orderbooks.insert("t2a".to_string(), make_orderbook("t2a", dec!(0.52), dec!(100)));
+    orderbooks.insert("t2b".to_string(), make_orderbook("t2b", dec!(0.49), dec!(100)));
+
+    assert!(analyzer.check_arbitrage("t1a", &orderbooks, &config).is_some());
+    assert!(analyzer.check_arbitrage("t2a", &orderbooks, &config).is_none());
+}
+
+#[test]
+fn analyzer_exact_profit_threshold_boundary() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    // Use the exact same calculation the analyzer uses internally:
+    // combined_cost = 0.49 + 0.49 = 0.98
+    // profit_pct = (1 - 0.98) / 0.98
+    let combined = dec!(0.98);
+    let exact_profit = (Decimal::ONE - combined) / combined;
+
+    // Set threshold above the profit — should reject
+    let config_above = DutchBookConfig {
+        max_combined_cost: dec!(0.999),
+        min_profit_threshold: exact_profit + dec!(0.001),
+        max_position_size: dec!(100),
+        ..DutchBookConfig::default()
+    };
+
+    let mut orderbooks = HashMap::new();
+    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.49), dec!(100)));
+    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.49), dec!(100)));
+
+    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config_above);
+    assert!(opp.is_none(), "should reject when threshold > profit");
+
+    // Set threshold below the profit — should accept
+    let config_below = DutchBookConfig {
+        min_profit_threshold: exact_profit - dec!(0.001),
+        ..config_above
+    };
+    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config_below);
+    assert!(opp.is_some(), "should accept when threshold < profit");
+}
+
+#[test]
+fn analyzer_check_after_remove_returns_none() {
+    let mut analyzer = ArbitrageAnalyzer::new();
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    analyzer.add_market(&market);
+
+    let config = DutchBookConfig::default();
+    let mut orderbooks = HashMap::new();
+    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.45), dec!(100)));
+    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.45), dec!(100)));
+
+    // Should find opportunity before removal
+    assert!(analyzer.check_arbitrage("tok_yes", &orderbooks, &config).is_some());
+
+    // After removal, same token should return None
+    analyzer.remove_market("m1");
+    assert!(analyzer.check_arbitrage("tok_yes", &orderbooks, &config).is_none());
 }
