@@ -336,8 +336,18 @@ impl DutchBookStrategy {
             None => return vec![],
         };
 
-        let yes_price = exec.yes_fill_price.unwrap_or(Decimal::ZERO);
-        let no_price = exec.no_fill_price.unwrap_or(Decimal::ZERO);
+        let (yes_price, no_price) = match (exec.yes_fill_price, exec.no_fill_price) {
+            (Some(y), Some(n)) => (y, n),
+            _ => {
+                warn!(
+                    %market_id,
+                    yes_fill = ?exec.yes_fill_price,
+                    no_fill = ?exec.no_fill_price,
+                    "Promoting to position without both fill prices — skipping"
+                );
+                return vec![];
+            }
+        };
         let fee_rate = polyrust_core::fees::default_taker_fee_rate();
         let total_fees = (taker_fee_per_share(yes_price, fee_rate)
             + taker_fee_per_share(no_price, fee_rate))
@@ -557,7 +567,7 @@ impl DutchBookStrategy {
     }
 
     /// Handle a market expiration event.
-    fn handle_market_expired(&mut self, market_id: &str) -> Vec<Action> {
+    async fn handle_market_expired(&mut self, market_id: &str) -> Vec<Action> {
         // Check if we have an open position that should be redeemed
         let result = if let Some(pos) = self.open_positions.remove(market_id) {
             info!(
@@ -565,6 +575,13 @@ impl DutchBookStrategy {
                 expected_profit = %pos.expected_profit,
                 "Market expired with open Dutch Book position — requesting redemption"
             );
+
+            // Record realized profit: Dutch Book holds both sides, payout is $1/share
+            {
+                let mut state = self.shared_state.write().await;
+                state.total_realized_pnl += pos.expected_profit;
+            }
+
             vec![Action::RedeemPosition(RedeemRequest {
                 market_id: market_id.to_string(),
                 condition_id: market_id.to_string(),
@@ -617,6 +634,12 @@ impl DutchBookStrategy {
         let mut actions = vec![];
         for market_id in stale_ids {
             let exec = self.active_executions.get(&market_id).unwrap();
+
+            // Skip executions already in Unwinding state — don't place duplicate sell orders
+            if matches!(exec.state, ExecutionState::Unwinding { .. }) {
+                continue;
+            }
+
             let has_yes_fill = exec.yes_fill_price.is_some();
             let has_no_fill = exec.no_fill_price.is_some();
 
@@ -738,7 +761,7 @@ impl Strategy for DutchBookStrategy {
             }
 
             Event::MarketData(MarketDataEvent::MarketExpired(market_id)) => {
-                self.handle_market_expired(market_id)
+                self.handle_market_expired(market_id).await
             }
 
             _ => vec![],

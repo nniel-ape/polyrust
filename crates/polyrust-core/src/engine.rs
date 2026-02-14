@@ -777,6 +777,12 @@ pub async fn execute_action(
             }));
         }
         Action::SubscribeMarket(info) => {
+            // Register market in shared context so find_market_id_for_token works
+            // for immediate FOK fills (e.g. Dutch Book batch orders).
+            {
+                let mut md = context.market_data.write().await;
+                md.markets.insert(info.id.clone(), info.clone());
+            }
             if let Some(tx) = feed_command_tx {
                 let market_id = info.id.clone();
                 if let Err(e) = tx.send(FeedCommand::Subscribe(info.clone())) {
