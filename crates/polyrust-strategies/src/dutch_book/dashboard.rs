@@ -277,6 +277,9 @@ fn render_executions(state: &DutchBookState, html: &mut String) {
             ExecutionState::Unwinding { .. } => {
                 r#"<span class="bp-loss">Unwinding</span>"#.to_string()
             }
+            ExecutionState::OneCancelled { cancelled_side } => {
+                format!("1 Cancelled ({cancelled_side:?})")
+            }
             ExecutionState::Complete => "Complete".to_string(),
         };
 

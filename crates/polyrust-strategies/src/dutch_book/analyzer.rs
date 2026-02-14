@@ -37,6 +37,9 @@ impl ArbitrageAnalyzer {
             token_a: market.token_ids.outcome_a.clone(),
             token_b: market.token_ids.outcome_b.clone(),
             neg_risk: market.neg_risk,
+            tick_size: market.tick_size,
+            fee_rate_bps: market.fee_rate_bps,
+            min_order_size: market.min_order_size,
         };
 
         self.token_to_market
@@ -121,8 +124,8 @@ impl ArbitrageAnalyzer {
         // Calculate max size: min of both sides' liquidity and config limit
         let max_size = size_a.min(size_b).min(config.max_position_size);
 
-        // Reject if size is zero or negative (shouldn't happen, but defensive)
-        if max_size <= Decimal::ZERO {
+        // Reject if size is below market minimum or zero
+        if max_size < entry.min_order_size || max_size <= Decimal::ZERO {
             return None;
         }
 

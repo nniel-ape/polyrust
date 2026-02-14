@@ -1,11 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use rust_decimal::Decimal;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
+
+/// Timeout for active executions: if an execution stays unresolved for this long,
+/// it is cleaned up to prevent permanently blocking the market slot.
+/// FOK orders should resolve within seconds; 120s is very generous.
+const EXECUTION_TIMEOUT_SECS: i64 = 120;
 
 use polyrust_core::prelude::*;
 
@@ -127,6 +132,18 @@ impl DutchBookStrategy {
         };
         drop(md);
 
+        // Check balance before placing orders
+        let required_usdc = opportunity.combined_cost * opportunity.max_size;
+        let available = ctx.balance.read().await.available_usdc;
+        if available < required_usdc {
+            debug!(
+                market_id = %opportunity.market_id,
+                %required_usdc, %available,
+                "Insufficient balance for Dutch Book trade"
+            );
+            return vec![];
+        }
+
         self.execute_opportunity(opportunity, &market_entry).await
     }
 
@@ -146,7 +163,9 @@ impl DutchBookStrategy {
             OrderSide::Buy,
             OrderType::Fok,
             market_entry.neg_risk,
-        );
+        )
+        .with_tick_size(market_entry.tick_size)
+        .with_fee_rate_bps(market_entry.fee_rate_bps);
 
         let no_order = OrderRequest::new(
             market_entry.token_b.clone(),
@@ -155,7 +174,9 @@ impl DutchBookStrategy {
             OrderSide::Buy,
             OrderType::Fok,
             market_entry.neg_risk,
-        );
+        )
+        .with_tick_size(market_entry.tick_size)
+        .with_fee_rate_bps(market_entry.fee_rate_bps);
 
         info!(
             market_id = %opp.market_id,
@@ -275,9 +296,9 @@ impl DutchBookStrategy {
             exec.no_fill_price = Some(price);
         }
         let new_state = if is_yes_side {
-            exec.state.clone().fill_yes()
+            exec.state.clone().fill_yes(order_id.to_string())
         } else {
-            exec.state.clone().fill_no()
+            exec.state.clone().fill_no(order_id.to_string())
         };
         exec.state = new_state;
 
@@ -288,9 +309,12 @@ impl DutchBookStrategy {
             "Dutch Book order filled"
         );
 
-        // Check if both sides are now filled
+        // Check resulting state
         if exec.state == ExecutionState::BothFilled {
             self.promote_to_position(&market_id)
+        } else if exec.state.needs_unwind() {
+            // Fill arrived after the other side was cancelled → partial fill
+            self.start_emergency_unwind(&market_id)
         } else {
             vec![]
         }
@@ -385,21 +409,26 @@ impl DutchBookStrategy {
             "Dutch Book order cancelled"
         );
 
-        // If both cancelled, clean up
-        if exec.state == ExecutionState::Complete {
-            info!(%market_id, "Both Dutch Book orders cancelled — opportunity missed");
-            let exec = self.active_executions.remove(&market_id).unwrap();
-            self.order_to_market.remove(&exec.yes_order_id);
-            self.order_to_market.remove(&exec.no_order_id);
-            return vec![];
+        match &exec.state {
+            // Both cancelled → clean up
+            ExecutionState::Complete => {
+                info!(%market_id, "Both Dutch Book orders cancelled — opportunity missed");
+                let exec = self.active_executions.remove(&market_id).unwrap();
+                self.order_to_market.remove(&exec.yes_order_id);
+                self.order_to_market.remove(&exec.no_order_id);
+                vec![]
+            }
+            // One side cancelled, other side not yet reported → wait for second event
+            ExecutionState::OneCancelled { .. } => {
+                debug!(%market_id, state = ?exec.state, "One side cancelled, awaiting other side's event");
+                vec![]
+            }
+            // Partial fill (one cancelled + other filled) → unwind
+            _ if exec.state.needs_unwind() => {
+                self.start_emergency_unwind(&market_id.clone())
+            }
+            _ => vec![],
         }
-
-        // If partial fill, trigger emergency unwind
-        if exec.state.needs_unwind() {
-            return self.start_emergency_unwind(&market_id.clone());
-        }
-
-        vec![]
     }
 
     /// Start emergency unwind for a partially-filled paired order.
@@ -457,7 +486,9 @@ impl DutchBookStrategy {
             OrderSide::Sell,
             OrderType::Gtc,
             entry.neg_risk,
-        );
+        )
+        .with_tick_size(entry.tick_size)
+        .with_fee_rate_bps(entry.fee_rate_bps);
 
         vec![Action::PlaceOrder(sell_order)]
     }
@@ -563,6 +594,44 @@ impl DutchBookStrategy {
         self.active_executions.len()
     }
 
+    /// Clean up stale executions that have exceeded the timeout.
+    /// Returns actions for any unwinds triggered by timed-out partial fills.
+    fn cleanup_stale_executions(&mut self) -> Vec<Action> {
+        let now = Utc::now();
+        let timeout = Duration::seconds(EXECUTION_TIMEOUT_SECS);
+        let stale_ids: Vec<MarketId> = self
+            .active_executions
+            .iter()
+            .filter(|(_, exec)| now - exec.submitted_at > timeout)
+            .map(|(mid, _)| mid.clone())
+            .collect();
+
+        let mut actions = vec![];
+        for market_id in stale_ids {
+            let exec = self.active_executions.remove(&market_id).unwrap();
+            self.order_to_market.remove(&exec.yes_order_id);
+            self.order_to_market.remove(&exec.no_order_id);
+
+            warn!(
+                %market_id,
+                state = ?exec.state,
+                age_secs = (now - exec.submitted_at).num_seconds(),
+                "Removing stale Dutch Book execution (timed out)"
+            );
+
+            // If one side was filled, we have an unhedged position — log for manual review
+            if exec.yes_fill_price.is_some() || exec.no_fill_price.is_some() {
+                actions.push(Action::Log {
+                    level: LogLevel::Warn,
+                    message: format!(
+                        "Dutch Book: stale execution for {market_id} had partial fills — manual review required"
+                    ),
+                });
+            }
+        }
+        actions
+    }
+
     /// Sync internal state to the shared dashboard state.
     async fn sync_dashboard_state(&self) {
         let mut state = self.shared_state.write().await;
@@ -605,6 +674,9 @@ impl Strategy for DutchBookStrategy {
     async fn on_event(&mut self, event: &Event, ctx: &StrategyContext) -> Result<Vec<Action>> {
         // Always drain pending subscriptions on any event
         let mut actions = self.drain_pending_subscriptions().await;
+
+        // Periodically clean up stale executions
+        actions.extend(self.cleanup_stale_executions());
 
         let event_actions = match event {
             Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot)) => {

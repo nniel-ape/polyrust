@@ -192,7 +192,7 @@ fn execution_state_new_starts_awaiting() {
 #[test]
 fn execution_state_both_fill_yes_first() {
     let state = ExecutionState::new();
-    let state = state.fill_yes();
+    let state = state.fill_yes("yes_order".to_string());
     assert_eq!(
         state,
         ExecutionState::AwaitingFills {
@@ -201,22 +201,22 @@ fn execution_state_both_fill_yes_first() {
         }
     );
 
-    let state = state.fill_no();
+    let state = state.fill_no("no_order".to_string());
     assert_eq!(state, ExecutionState::BothFilled);
 }
 
 #[test]
 fn execution_state_both_fill_no_first() {
     let state = ExecutionState::new();
-    let state = state.fill_no();
-    let state = state.fill_yes();
+    let state = state.fill_no("no_order".to_string());
+    let state = state.fill_yes("yes_order".to_string());
     assert_eq!(state, ExecutionState::BothFilled);
 }
 
 #[test]
 fn execution_state_partial_fill_yes_then_cancel_no() {
     let state = ExecutionState::new();
-    let state = state.fill_yes();
+    let state = state.fill_yes("yes_order_123".to_string());
     let state = state.cancel_no("yes_order_123".to_string());
     assert_eq!(
         state,
@@ -231,7 +231,7 @@ fn execution_state_partial_fill_yes_then_cancel_no() {
 #[test]
 fn execution_state_partial_fill_no_then_cancel_yes() {
     let state = ExecutionState::new();
-    let state = state.fill_no();
+    let state = state.fill_no("no_order_456".to_string());
     let state = state.cancel_yes("no_order_456".to_string());
     assert_eq!(
         state,
@@ -246,22 +246,81 @@ fn execution_state_partial_fill_no_then_cancel_yes() {
 #[test]
 fn execution_state_both_cancelled_is_complete() {
     let state = ExecutionState::new();
-    // Cancel YES first when NO hasn't filled either
+    // Cancel YES first → OneCancelled, then cancel NO → Complete
     let state = state.cancel_yes("no_order".to_string());
+    assert_eq!(
+        state,
+        ExecutionState::OneCancelled {
+            cancelled_side: FilledSide::Yes,
+        }
+    );
+    let state = state.cancel_no("yes_order".to_string());
     assert_eq!(state, ExecutionState::Complete);
 }
 
 #[test]
 fn execution_state_both_cancelled_no_first() {
     let state = ExecutionState::new();
+    // Cancel NO first → OneCancelled, then cancel YES → Complete
     let state = state.cancel_no("yes_order".to_string());
+    assert_eq!(
+        state,
+        ExecutionState::OneCancelled {
+            cancelled_side: FilledSide::No,
+        }
+    );
+    let state = state.cancel_yes("no_order".to_string());
     assert_eq!(state, ExecutionState::Complete);
+}
+
+#[test]
+fn execution_state_cancel_then_fill_triggers_partial() {
+    // Race condition test: YES cancelled first, then NO fills → PartialFill
+    let state = ExecutionState::new();
+    let state = state.cancel_yes("no_order".to_string());
+    assert_eq!(
+        state,
+        ExecutionState::OneCancelled {
+            cancelled_side: FilledSide::Yes,
+        }
+    );
+    let state = state.fill_no("no_order_123".to_string());
+    assert_eq!(
+        state,
+        ExecutionState::PartialFill {
+            filled_side: FilledSide::No,
+            filled_order_id: "no_order_123".to_string(),
+        }
+    );
+    assert!(state.needs_unwind());
+}
+
+#[test]
+fn execution_state_cancel_no_then_fill_yes_triggers_partial() {
+    // Race condition test: NO cancelled first, then YES fills → PartialFill
+    let state = ExecutionState::new();
+    let state = state.cancel_no("yes_order".to_string());
+    assert_eq!(
+        state,
+        ExecutionState::OneCancelled {
+            cancelled_side: FilledSide::No,
+        }
+    );
+    let state = state.fill_yes("yes_order_123".to_string());
+    assert_eq!(
+        state,
+        ExecutionState::PartialFill {
+            filled_side: FilledSide::Yes,
+            filled_order_id: "yes_order_123".to_string(),
+        }
+    );
+    assert!(state.needs_unwind());
 }
 
 #[test]
 fn execution_state_unwind_lifecycle() {
     let state = ExecutionState::new();
-    let state = state.fill_yes();
+    let state = state.fill_yes("yes_order".to_string());
     let state = state.cancel_no("yes_order".to_string());
     assert!(state.needs_unwind());
 
@@ -278,11 +337,11 @@ fn execution_state_unwind_lifecycle() {
 #[test]
 fn execution_state_fill_on_terminal_is_noop() {
     let state = ExecutionState::BothFilled;
-    let state = state.fill_yes();
+    let state = state.fill_yes("order".to_string());
     assert_eq!(state, ExecutionState::BothFilled);
 
     let state = ExecutionState::Complete;
-    let state = state.fill_no();
+    let state = state.fill_no("order".to_string());
     assert_eq!(state, ExecutionState::Complete);
 }
 
@@ -339,12 +398,17 @@ fn market_entry_construction() {
         token_a: "token_yes".to_string(),
         token_b: "token_no".to_string(),
         neg_risk: false,
+        tick_size: dec!(0.01),
+        fee_rate_bps: 0,
+        min_order_size: dec!(5),
     };
 
     assert_eq!(entry.market_id, "cond_123");
     assert_eq!(entry.token_a, "token_yes");
     assert_eq!(entry.token_b, "token_no");
     assert!(!entry.neg_risk);
+    assert_eq!(entry.tick_size, dec!(0.01));
+    assert_eq!(entry.min_order_size, dec!(5));
 }
 
 // ---------------------------------------------------------------------------
@@ -1099,6 +1163,12 @@ async fn setup_strategy_with_market(
 
     let ctx = StrategyContext::new();
 
+    // Set sufficient balance for trading
+    {
+        let mut bal = ctx.balance.write().await;
+        bal.available_usdc = dec!(10000);
+    }
+
     // Populate orderbooks in the shared context
     {
         let mut md = ctx.market_data.write().await;
@@ -1256,6 +1326,10 @@ async fn strategy_enforces_position_limit() {
 
     let ctx = StrategyContext::new();
     {
+        let mut bal = ctx.balance.write().await;
+        bal.available_usdc = dec!(10000);
+    }
+    {
         let mut md = ctx.market_data.write().await;
         // Market 1: opportunity exists
         md.orderbooks
@@ -1331,6 +1405,10 @@ async fn strategy_paired_orders_respect_neg_risk() {
     strategy.analyzer.add_market(&market);
 
     let ctx = StrategyContext::new();
+    {
+        let mut bal = ctx.balance.write().await;
+        bal.available_usdc = dec!(10000);
+    }
     {
         let mut md = ctx.market_data.write().await;
         md.orderbooks
@@ -1478,9 +1556,12 @@ async fn strategy_both_cancelled_cleans_up() {
     strategy.on_event(&event, &ctx).await.unwrap();
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
-    // Cancel both (neither filled)
+    // Cancel YES first — goes to OneCancelled, still waiting for NO
     strategy.handle_order_cancelled(&yes_oid).await;
-    // After first cancel (neither side was filled), state goes to Complete
+    assert_eq!(strategy.active_execution_count(), 1);
+
+    // Cancel NO second — now both cancelled → Complete, cleaned up
+    strategy.handle_order_cancelled(&no_oid).await;
     assert_eq!(strategy.active_execution_count(), 0);
 
     // Order mappings cleaned up
@@ -1672,16 +1753,20 @@ async fn strategy_rejected_order_treated_as_cancel() {
     strategy.on_event(&event, &ctx).await.unwrap();
     let (yes_oid, _no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
-    // Reject the YES order
+    // Reject the YES order — goes to OneCancelled (waiting for NO side event)
     let reject_event = Event::OrderUpdate(OrderEvent::Rejected {
         order_id: Some(yes_oid.clone()),
         reason: "Insufficient funds".to_string(),
         token_id: Some("tok_yes".to_string()),
     });
     let actions = strategy.on_event(&reject_event, &ctx).await.unwrap();
+    assert!(actions.is_empty());
+    assert_eq!(strategy.active_execution_count(), 1); // still waiting for NO side
 
-    // Should be handled (neither side was filled, so Complete → cleanup)
-    assert!(actions.is_empty()); // cleanup happens internally
+    // Cancel NO side too — now both cancelled → Complete → cleanup
+    let cancel_no = Event::OrderUpdate(OrderEvent::Cancelled(_no_oid.clone()));
+    let actions = strategy.on_event(&cancel_no, &ctx).await.unwrap();
+    assert!(actions.is_empty());
     assert_eq!(strategy.active_execution_count(), 0);
 }
 
@@ -1827,6 +1912,10 @@ async fn lifecycle_unwind_discount_configurable() {
 
     let ctx = StrategyContext::new();
     {
+        let mut bal = ctx.balance.write().await;
+        bal.available_usdc = dec!(10000);
+    }
+    {
         let mut md = ctx.market_data.write().await;
         md.orderbooks
             .insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.45), dec!(200)));
@@ -1865,11 +1954,14 @@ async fn lifecycle_both_cancelled_first_yes_then_no() {
     strategy.on_event(&event, &ctx).await.unwrap();
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
-    // Cancel YES first (neither filled yet) — goes to Complete immediately
+    // Cancel YES first (neither filled yet) — goes to OneCancelled, still waiting
     let actions = strategy.handle_order_cancelled(&yes_oid).await;
     assert!(actions.is_empty());
+    assert_eq!(strategy.active_execution_count(), 1);
 
-    // Execution should be fully cleaned up
+    // Cancel NO second — both cancelled → Complete, cleaned up
+    let actions = strategy.handle_order_cancelled(&no_oid).await;
+    assert!(actions.is_empty());
     assert_eq!(strategy.active_execution_count(), 0);
     assert!(!strategy.order_to_market.contains_key(&yes_oid));
     assert!(!strategy.order_to_market.contains_key(&no_oid));
@@ -1884,10 +1976,15 @@ async fn lifecycle_both_cancelled_first_no_then_yes() {
     let snapshot = make_orderbook("tok_yes", dec!(0.48), dec!(200));
     let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
     strategy.on_event(&event, &ctx).await.unwrap();
-    let (_yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
+    let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
-    // Cancel NO first
+    // Cancel NO first — goes to OneCancelled
     let actions = strategy.handle_order_cancelled(&no_oid).await;
+    assert!(actions.is_empty());
+    assert_eq!(strategy.active_execution_count(), 1);
+
+    // Cancel YES second — both cancelled → Complete
+    let actions = strategy.handle_order_cancelled(&yes_oid).await;
     assert!(actions.is_empty());
     assert_eq!(strategy.active_execution_count(), 0);
 }
@@ -2530,6 +2627,10 @@ async fn integration_default_config_event_flow() {
         DutchBookStrategy::with_shared_state(config, Arc::clone(&shared_state));
 
     let ctx = StrategyContext::new();
+    {
+        let mut bal = ctx.balance.write().await;
+        bal.available_usdc = dec!(10000);
+    }
 
     // No-op event produces no actions (just drains empty pending queue)
     let actions = strategy

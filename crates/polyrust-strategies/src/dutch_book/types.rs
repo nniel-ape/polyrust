@@ -96,7 +96,13 @@ pub enum ExecutionState {
     Unwinding {
         sell_order_id: OrderId,
     },
-    /// Execution complete (either both filled → position, or unwind done)
+    /// One side cancelled, awaiting the other side's event.
+    /// If the other side also cancels → Complete (both missed).
+    /// If the other side fills → PartialFill (needs unwind).
+    OneCancelled {
+        cancelled_side: FilledSide,
+    },
+    /// Execution complete (either both filled → position, or unwind done, or both cancelled)
     Complete,
 }
 
@@ -116,7 +122,7 @@ impl ExecutionState {
     }
 
     /// Mark the YES side as filled. Returns the new state.
-    pub fn fill_yes(self) -> Self {
+    pub fn fill_yes(self, yes_order_id: OrderId) -> Self {
         match self {
             Self::AwaitingFills { no_filled, .. } => {
                 if no_filled {
@@ -128,12 +134,19 @@ impl ExecutionState {
                     }
                 }
             }
+            // NO was already cancelled, YES just filled → partial fill needing unwind
+            Self::OneCancelled {
+                cancelled_side: FilledSide::No,
+            } => Self::PartialFill {
+                filled_side: FilledSide::Yes,
+                filled_order_id: yes_order_id,
+            },
             other => other,
         }
     }
 
     /// Mark the NO side as filled. Returns the new state.
-    pub fn fill_no(self) -> Self {
+    pub fn fill_no(self, no_order_id: OrderId) -> Self {
         match self {
             Self::AwaitingFills { yes_filled, .. } => {
                 if yes_filled {
@@ -145,6 +158,13 @@ impl ExecutionState {
                     }
                 }
             }
+            // YES was already cancelled, NO just filled → partial fill needing unwind
+            Self::OneCancelled {
+                cancelled_side: FilledSide::Yes,
+            } => Self::PartialFill {
+                filled_side: FilledSide::No,
+                filled_order_id: no_order_id,
+            },
             other => other,
         }
     }
@@ -162,7 +182,13 @@ impl ExecutionState {
             Self::AwaitingFills {
                 yes_filled: false,
                 no_filled: false,
-            } => Self::Complete, // Both cancelled
+            } => Self::OneCancelled {
+                cancelled_side: FilledSide::Yes,
+            },
+            // NO was already cancelled, now YES also cancelled → both missed
+            Self::OneCancelled {
+                cancelled_side: FilledSide::No,
+            } => Self::Complete,
             other => other,
         }
     }
@@ -180,7 +206,13 @@ impl ExecutionState {
             Self::AwaitingFills {
                 yes_filled: false,
                 no_filled: false,
-            } => Self::Complete, // Both cancelled
+            } => Self::OneCancelled {
+                cancelled_side: FilledSide::No,
+            },
+            // YES was already cancelled, now NO also cancelled → both missed
+            Self::OneCancelled {
+                cancelled_side: FilledSide::Yes,
+            } => Self::Complete,
             other => other,
         }
     }
@@ -211,6 +243,12 @@ pub struct MarketEntry {
     pub token_b: TokenId,
     /// Whether this market uses neg_risk
     pub neg_risk: bool,
+    /// Market tick size for price rounding
+    pub tick_size: Decimal,
+    /// Fee rate in basis points
+    pub fee_rate_bps: u32,
+    /// Minimum order size in shares
+    pub min_order_size: Decimal,
 }
 
 /// Shared state between the strategy and dashboard.
