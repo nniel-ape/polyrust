@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
@@ -213,4 +215,49 @@ pub struct MarketEntry {
     pub end_date: DateTime<Utc>,
     /// Market liquidity in USD at time of discovery
     pub liquidity: Decimal,
+}
+
+/// Shared state between the strategy and dashboard.
+///
+/// The strategy writes to this state, and the dashboard reads it asynchronously
+/// via `Arc<RwLock<DutchBookState>>`.
+#[derive(Debug, Clone)]
+pub struct DutchBookState {
+    /// Number of markets currently being monitored for opportunities.
+    pub tracked_markets: usize,
+    /// Active paired positions awaiting market resolution.
+    pub positions: Vec<PairedPosition>,
+    /// Active executions (orders in flight or unwinding).
+    pub executions: Vec<PairedOrder>,
+    /// Recent arbitrage opportunities detected (ring buffer, newest first).
+    pub recent_opportunities: VecDeque<ArbitrageOpportunity>,
+    /// Total number of opportunities detected since start.
+    pub total_opportunities: u64,
+    /// Total realized P&L from completed positions.
+    pub total_realized_pnl: Decimal,
+    /// Total unwind losses.
+    pub total_unwind_losses: Decimal,
+}
+
+impl DutchBookState {
+    pub fn new() -> Self {
+        Self {
+            tracked_markets: 0,
+            positions: Vec::new(),
+            executions: Vec::new(),
+            recent_opportunities: VecDeque::new(),
+            total_opportunities: 0,
+            total_realized_pnl: Decimal::ZERO,
+            total_unwind_losses: Decimal::ZERO,
+        }
+    }
+
+    /// Record a new opportunity, maintaining a ring buffer of the last 50.
+    pub fn record_opportunity(&mut self, opp: ArbitrageOpportunity) {
+        self.total_opportunities += 1;
+        self.recent_opportunities.push_front(opp);
+        if self.recent_opportunities.len() > 50 {
+            self.recent_opportunities.pop_back();
+        }
+    }
 }

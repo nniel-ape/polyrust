@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use rust_decimal::Decimal;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -13,7 +13,7 @@ use super::analyzer::ArbitrageAnalyzer;
 use super::config::DutchBookConfig;
 use super::scanner::GammaScanner;
 use super::types::{
-    ArbitrageOpportunity, ExecutionState, FilledSide, PairedOrder, PairedPosition,
+    ArbitrageOpportunity, DutchBookState, ExecutionState, FilledSide, PairedOrder, PairedPosition,
 };
 
 /// Dutch Book arbitrage strategy.
@@ -36,10 +36,19 @@ pub struct DutchBookStrategy {
     pub(crate) order_to_market: HashMap<OrderId, MarketId>,
     /// Handle to the background scanner task.
     scanner_handle: Option<JoinHandle<()>>,
+    /// Shared dashboard state (read by DutchBookDashboard).
+    pub(crate) shared_state: Arc<RwLock<DutchBookState>>,
 }
 
 impl DutchBookStrategy {
     pub fn new(config: DutchBookConfig) -> Self {
+        Self::with_shared_state(config, Arc::new(RwLock::new(DutchBookState::new())))
+    }
+
+    pub fn with_shared_state(
+        config: DutchBookConfig,
+        shared_state: Arc<RwLock<DutchBookState>>,
+    ) -> Self {
         Self {
             config,
             analyzer: ArbitrageAnalyzer::new(),
@@ -49,7 +58,13 @@ impl DutchBookStrategy {
             open_positions: HashMap::new(),
             order_to_market: HashMap::new(),
             scanner_handle: None,
+            shared_state,
         }
+    }
+
+    /// Get the shared state for constructing a dashboard view.
+    pub fn shared_state(&self) -> Arc<RwLock<DutchBookState>> {
+        Arc::clone(&self.shared_state)
     }
 
     /// Drain the pending subscription queue and emit SubscribeMarket actions.
@@ -151,6 +166,11 @@ impl DutchBookStrategy {
             no_ask = %opp.no_ask,
             "Executing Dutch Book arbitrage"
         );
+
+        // Record opportunity in shared dashboard state (non-blocking try_write)
+        if let Ok(mut state) = self.shared_state.try_write() {
+            state.record_opportunity(opp.clone());
+        }
 
         // We don't have order IDs yet — they come from the Placed event.
         // Create a placeholder PairedOrder with empty IDs; we'll fill them
@@ -490,6 +510,11 @@ impl DutchBookStrategy {
                 "Emergency unwind complete — realized loss"
             );
 
+            // Record unwind loss in shared state
+            if let Ok(mut state) = self.shared_state.try_write() {
+                state.total_unwind_losses += loss;
+            }
+
             Some(vec![Action::Log {
                 level: LogLevel::Warn,
                 message: format!(
@@ -551,6 +576,14 @@ impl DutchBookStrategy {
     /// Get the number of active executions.
     pub fn active_execution_count(&self) -> usize {
         self.active_executions.len()
+    }
+
+    /// Sync internal state to the shared dashboard state.
+    async fn sync_dashboard_state(&self) {
+        let mut state = self.shared_state.write().await;
+        state.tracked_markets = self.analyzer.tracked_count();
+        state.positions = self.open_positions.values().cloned().collect();
+        state.executions = self.active_executions.values().cloned().collect();
     }
 }
 
@@ -624,6 +657,10 @@ impl Strategy for DutchBookStrategy {
         };
 
         actions.extend(event_actions);
+
+        // Sync state to dashboard after processing
+        self.sync_dashboard_state().await;
+
         Ok(actions)
     }
 

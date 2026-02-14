@@ -206,18 +206,18 @@ This prevents holding unhedged directional risk.
 - [x] Run `cargo test -p polyrust-strategies` — must pass before next task
 
 ### Task 6: Dashboard view
-- [ ] Create `crates/polyrust-strategies/src/dutch_book/dashboard.rs` with `DutchBookDashboard`
-- [ ] Implement `DashboardViewProvider` trait:
+- [x] Create `crates/polyrust-strategies/src/dutch_book/dashboard.rs` with `DutchBookDashboard`
+- [x] Implement `DashboardViewProvider` trait:
   - `view_name()` → `"dutch-book"`
   - `render_view()` → async HTML rendering
-- [ ] Render sections:
+- [x] Render sections:
   - **Summary**: total markets monitored, active positions, total P&L, opportunities detected
   - **Active Positions**: table with market_id, combined_cost, expected_profit, size, age
   - **Recent Opportunities**: last N detected opportunities (filled or missed)
   - **Execution Status**: any active/unwinding executions
-- [ ] Store dashboard state in `Arc<RwLock<DutchBookState>>` shared between strategy and dashboard
-- [ ] Write tests for HTML rendering (non-empty output, correct section headers)
-- [ ] Run `cargo test -p polyrust-strategies` — must pass before next task
+- [x] Store dashboard state in `Arc<RwLock<DutchBookState>>` shared between strategy and dashboard
+- [x] Write tests for HTML rendering (non-empty output, correct section headers)
+- [x] Run `cargo test -p polyrust-strategies` — must pass before next task
 
 ### Task 7: Integration (main.rs, config, registration)
 - [ ] Add `DutchBookConfig` to `ConfigWrapper` in `src/main.rs` with `#[serde(default)]`

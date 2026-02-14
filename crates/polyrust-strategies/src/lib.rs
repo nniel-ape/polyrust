@@ -6,4 +6,4 @@ pub use crypto_arb::{
     ArbitrageConfig, CryptoArbBase, CryptoArbDashboard, ReferenceQualityLevel, SizingConfig,
     TailEndConfig, TailEndStrategy,
 };
-pub use dutch_book::DutchBookConfig;
+pub use dutch_book::{DutchBookConfig, DutchBookDashboard, DutchBookState, DutchBookStrategy};

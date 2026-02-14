@@ -1,16 +1,22 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use tokio::sync::RwLock;
 
 use polyrust_core::prelude::*;
 
 use super::analyzer::ArbitrageAnalyzer;
 use super::config::DutchBookConfig;
+use super::dashboard::DutchBookDashboard;
 use super::scanner::{GammaMarketResponse, GammaScanner};
 use super::strategy::DutchBookStrategy;
-use super::types::{ExecutionState, FilledSide, MarketEntry, PairedPosition};
+use super::types::{
+    ArbitrageOpportunity, DutchBookState, ExecutionState, FilledSide, MarketEntry,
+    PairedOrder, PairedPosition,
+};
 
 // ---------------------------------------------------------------------------
 // Config tests
@@ -2193,4 +2199,267 @@ async fn lifecycle_full_unwind_path_via_events() {
 
     assert_eq!(strategy.active_execution_count(), 0);
     assert_eq!(strategy.open_position_count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// DutchBookState tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dutch_book_state_new_is_empty() {
+    let state = DutchBookState::new();
+    assert_eq!(state.tracked_markets, 0);
+    assert!(state.positions.is_empty());
+    assert!(state.executions.is_empty());
+    assert!(state.recent_opportunities.is_empty());
+    assert_eq!(state.total_opportunities, 0);
+    assert_eq!(state.total_realized_pnl, Decimal::ZERO);
+    assert_eq!(state.total_unwind_losses, Decimal::ZERO);
+}
+
+#[test]
+fn dutch_book_state_record_opportunity_ring_buffer() {
+    let mut state = DutchBookState::new();
+
+    // Add 55 opportunities — should cap at 50
+    for i in 0..55 {
+        state.record_opportunity(ArbitrageOpportunity {
+            market_id: format!("m{i}"),
+            yes_ask: dec!(0.48),
+            no_ask: dec!(0.49),
+            combined_cost: dec!(0.97),
+            profit_pct: dec!(0.0309),
+            max_size: dec!(100),
+            detected_at: Utc::now(),
+        });
+    }
+
+    assert_eq!(state.total_opportunities, 55);
+    assert_eq!(state.recent_opportunities.len(), 50);
+    // Newest first: front should be m54
+    assert_eq!(state.recent_opportunities.front().unwrap().market_id, "m54");
+    // Oldest kept: m5 (m0-m4 were evicted)
+    assert_eq!(state.recent_opportunities.back().unwrap().market_id, "m5");
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard rendering tests
+// ---------------------------------------------------------------------------
+
+fn make_test_state() -> DutchBookState {
+    let mut state = DutchBookState::new();
+    state.tracked_markets = 42;
+    state.total_opportunities = 15;
+    state.total_realized_pnl = dec!(5.25);
+
+    // Add a position
+    state.positions.push(PairedPosition {
+        market_id: "0xabc123def456".to_string(),
+        yes_entry_price: dec!(0.48),
+        no_entry_price: dec!(0.49),
+        size: dec!(100),
+        combined_cost: dec!(97),
+        expected_profit: dec!(3),
+        opened_at: Utc::now() - Duration::hours(2),
+    });
+
+    // Add an opportunity
+    state.recent_opportunities.push_front(ArbitrageOpportunity {
+        market_id: "0xdef789abc012".to_string(),
+        yes_ask: dec!(0.47),
+        no_ask: dec!(0.50),
+        combined_cost: dec!(0.97),
+        profit_pct: dec!(0.0309),
+        max_size: dec!(50),
+        detected_at: Utc::now() - Duration::minutes(5),
+    });
+
+    // Add an active execution
+    state.executions.push(PairedOrder {
+        market_id: "0xexec111222".to_string(),
+        yes_order_id: "ord1".to_string(),
+        no_order_id: "ord2".to_string(),
+        size: dec!(80),
+        submitted_at: Utc::now(),
+        state: ExecutionState::AwaitingFills {
+            yes_filled: true,
+            no_filled: false,
+        },
+        yes_fill_price: Some(dec!(0.45)),
+        no_fill_price: None,
+    });
+
+    state
+}
+
+#[tokio::test]
+async fn dashboard_renders_non_empty_html() {
+    let state = Arc::new(RwLock::new(make_test_state()));
+    let dashboard = DutchBookDashboard::new(state);
+    let html = dashboard.render_view().await.unwrap();
+    assert!(!html.is_empty());
+}
+
+#[tokio::test]
+async fn dashboard_renders_summary_section() {
+    let state = Arc::new(RwLock::new(make_test_state()));
+    let dashboard = DutchBookDashboard::new(state);
+    let html = dashboard.render_view().await.unwrap();
+
+    assert!(html.contains("Dutch Book Summary"));
+    assert!(html.contains("Markets monitored:"));
+    assert!(html.contains("42")); // tracked_markets count
+    assert!(html.contains("Active positions:"));
+    assert!(html.contains("Opportunities detected:"));
+    assert!(html.contains("15")); // total_opportunities
+    assert!(html.contains("Realized P&amp;L:"));
+}
+
+#[tokio::test]
+async fn dashboard_renders_positions_section() {
+    let state = Arc::new(RwLock::new(make_test_state()));
+    let dashboard = DutchBookDashboard::new(state);
+    let html = dashboard.render_view().await.unwrap();
+
+    assert!(html.contains("Active Positions (1)"));
+    assert!(html.contains("0xabc123...")); // truncated market ID
+    assert!(html.contains("0.48")); // YES price
+    assert!(html.contains("0.49")); // NO price
+    assert!(html.contains("YES Price"));
+    assert!(html.contains("NO Price"));
+}
+
+#[tokio::test]
+async fn dashboard_renders_opportunities_section() {
+    let state = Arc::new(RwLock::new(make_test_state()));
+    let dashboard = DutchBookDashboard::new(state);
+    let html = dashboard.render_view().await.unwrap();
+
+    assert!(html.contains("Recent Opportunities (1)"));
+    assert!(html.contains("0xdef789...")); // truncated market ID (first 8 chars)
+    assert!(html.contains("0.47")); // YES ask
+    assert!(html.contains("0.50")); // NO ask
+    assert!(html.contains("Profit %"));
+}
+
+#[tokio::test]
+async fn dashboard_renders_execution_section() {
+    let state = Arc::new(RwLock::new(make_test_state()));
+    let dashboard = DutchBookDashboard::new(state);
+    let html = dashboard.render_view().await.unwrap();
+
+    assert!(html.contains("Execution Status (1)"));
+    assert!(html.contains("0xexec11...")); // truncated market ID (first 8 chars)
+    assert!(html.contains("Awaiting [Y/-]")); // yes filled, no awaiting
+}
+
+#[tokio::test]
+async fn dashboard_renders_empty_state() {
+    let state = Arc::new(RwLock::new(DutchBookState::new()));
+    let dashboard = DutchBookDashboard::new(state);
+    let html = dashboard.render_view().await.unwrap();
+
+    assert!(html.contains("Dutch Book Summary"));
+    assert!(html.contains("No active positions"));
+    assert!(html.contains("No opportunities detected yet"));
+    // Execution section should not appear when empty
+    assert!(!html.contains("Execution Status"));
+}
+
+#[tokio::test]
+async fn dashboard_view_name_is_dutch_book() {
+    let state = Arc::new(RwLock::new(DutchBookState::new()));
+    let dashboard = DutchBookDashboard::new(state);
+    assert_eq!(dashboard.view_name(), "dutch-book");
+}
+
+#[tokio::test]
+async fn dashboard_renders_unwind_losses() {
+    let mut test_state = DutchBookState::new();
+    test_state.total_unwind_losses = dec!(1.50);
+    let state = Arc::new(RwLock::new(test_state));
+    let dashboard = DutchBookDashboard::new(state);
+    let html = dashboard.render_view().await.unwrap();
+
+    assert!(html.contains("Unwind losses:"));
+    assert!(html.contains("1.5000"));
+}
+
+#[tokio::test]
+async fn dashboard_hides_unwind_losses_when_zero() {
+    let state = Arc::new(RwLock::new(DutchBookState::new()));
+    let dashboard = DutchBookDashboard::new(state);
+    let html = dashboard.render_view().await.unwrap();
+
+    assert!(!html.contains("Unwind losses:"));
+}
+
+#[tokio::test]
+async fn dashboard_renders_unwinding_execution_state() {
+    let mut test_state = DutchBookState::new();
+    test_state.executions.push(PairedOrder {
+        market_id: "0xunwind_test".to_string(),
+        yes_order_id: "o1".to_string(),
+        no_order_id: "o2".to_string(),
+        size: dec!(50),
+        submitted_at: Utc::now(),
+        state: ExecutionState::Unwinding {
+            sell_order_id: "sell_1".to_string(),
+        },
+        yes_fill_price: Some(dec!(0.45)),
+        no_fill_price: None,
+    });
+    let state = Arc::new(RwLock::new(test_state));
+    let dashboard = DutchBookDashboard::new(state);
+    let html = dashboard.render_view().await.unwrap();
+
+    assert!(html.contains("Unwinding"));
+    assert!(html.contains("bp-loss")); // unwinding styled as loss
+}
+
+// ---------------------------------------------------------------------------
+// Strategy shared state sync tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strategy_syncs_state_to_dashboard() {
+    let shared = Arc::new(RwLock::new(DutchBookState::new()));
+    let config = DutchBookConfig {
+        max_combined_cost: dec!(0.99),
+        min_profit_threshold: dec!(0.005),
+        max_concurrent_positions: 10,
+        ..DutchBookConfig::default()
+    };
+    let mut strategy = DutchBookStrategy::with_shared_state(config, Arc::clone(&shared));
+
+    // Add a market to the analyzer
+    let market = make_market_info("m1", "tok_yes", "tok_no");
+    strategy.analyzer.add_market(&market);
+
+    // Manually add a position
+    strategy.open_positions.insert(
+        "m1".to_string(),
+        PairedPosition {
+            market_id: "m1".to_string(),
+            yes_entry_price: dec!(0.48),
+            no_entry_price: dec!(0.49),
+            size: dec!(100),
+            combined_cost: dec!(97),
+            expected_profit: dec!(3),
+            opened_at: Utc::now(),
+        },
+    );
+
+    // Trigger a sync via on_event with a no-op event
+    let ctx = StrategyContext::new();
+    let _actions = strategy
+        .on_event(&Event::System(SystemEvent::EngineStarted), &ctx)
+        .await
+        .unwrap();
+
+    // Check that the shared state was updated
+    let state = shared.read().await;
+    assert_eq!(state.tracked_markets, 1);
+    assert_eq!(state.positions.len(), 1);
+    assert_eq!(state.positions[0].market_id, "m1");
 }
