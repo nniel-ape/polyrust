@@ -266,16 +266,16 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run `cargo clippy --workspace -- -D warnings` — zero warnings
 
 ### Task 18: Verify acceptance criteria
-- [ ] Verify: trailing at entry 0.99 is automatically detected as unarmable (no 1.04 requirement)
-- [ ] Verify: contradictory config defaults produce startup errors
-- [ ] Verify: composite price used for stop-loss decisions (not stale single-source)
-- [ ] Verify: PnL correctly computed (GTC entry=0% fee, actual fill price used)
-- [ ] Verify: 2s GTC refresh cycle works (orders refreshed with current bid)
-- [ ] Verify: partial exits reduce position without retry loops on dust
-- [ ] Verify: recovery buys opposite side when sell fails and set cost <= 1.01
-- [ ] Run full `cargo test --workspace` — all pass
-- [ ] Run `cargo clippy --workspace -- -D warnings` — zero warnings
-- [ ] Review state transition logs format (useful for dashboard)
+- [x] Verify: trailing at entry 0.99 is automatically detected as unarmable (no 1.04 requirement)
+- [x] Verify: contradictory config defaults produce startup errors
+- [x] Verify: composite price used for stop-loss decisions (not stale single-source)
+- [x] Verify: PnL correctly computed (GTC entry=0% fee, actual fill price used)
+- [x] Verify: 2s GTC refresh cycle works (orders refreshed with current bid)
+- [x] Verify: partial exits reduce position without retry loops on dust
+- [x] Verify: recovery buys opposite side when sell fails and set cost <= 1.01
+- [x] Run full `cargo test --workspace` — all pass
+- [x] Run `cargo clippy --workspace -- -D warnings` — zero warnings
+- [x] Review state transition logs format (useful for dashboard)
 
 ### Task 19: [Final] Update documentation
 - [ ] Update `config.example.toml` with all new stop-loss lifecycle fields and comments
