@@ -132,17 +132,6 @@ impl MarketWithReference {
     }
 }
 
-/// Metadata for a pending stop-loss sell order.
-///
-/// Carries the exit price and order type so the fill handler can apply
-/// the correct fee model (0% for GTC maker, taker fee for FOK).
-#[derive(Debug, Clone)]
-pub struct PendingStopLoss {
-    /// Exit (sell) price for P&L calculation.
-    pub exit_price: Decimal,
-    /// Order type used for this stop-loss (GTC or FOK).
-    pub order_type: OrderType,
-}
 
 /// A detected arbitrage opportunity ready for execution.
 ///

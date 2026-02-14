@@ -15,7 +15,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use polyrust_core::prelude::*;
 use polyrust_market::ChainlinkHistoricalClient;
@@ -23,7 +23,7 @@ use polyrust_market::ChainlinkHistoricalClient;
 use crate::crypto_arb::config::{ArbitrageConfig, SizingConfig};
 use crate::crypto_arb::types::{
     ArbitragePosition, BoundarySnapshot, ExitOrderMeta, MarketWithReference, ModeStats,
-    OpenLimitOrder, OrderTelemetry, PendingOrder, PendingStopLoss, PositionLifecycle,
+    OpenLimitOrder, OrderTelemetry, PendingOrder, PositionLifecycle,
     ReferenceQuality, SpikeEvent,
 };
 
@@ -73,43 +73,6 @@ impl StopLossRejectionKind {
         }
     }
 
-    /// Get the cooldown schedule for this rejection kind.
-    pub fn cooldown_schedule<'a>(&self, liquidity: &'a [u64], balance: &'a [u64]) -> &'a [u64] {
-        match self {
-            Self::Liquidity => liquidity,
-            Self::BalanceAllowance | Self::Transient | Self::InvalidSize => balance,
-        }
-    }
-}
-
-/// A GTC stop-loss order resting on the book after FOK rejection.
-#[derive(Debug, Clone)]
-pub struct GtcStopLossOrder {
-    /// The CLOB order ID.
-    pub order_id: OrderId,
-    /// Token being sold.
-    pub token_id: TokenId,
-    /// Market this position belongs to.
-    pub market_id: MarketId,
-    /// GTC sell price (bid - tick_offset).
-    pub price: Decimal,
-    /// Size in shares.
-    pub size: Decimal,
-    /// When the GTC order was placed (for staleness check).
-    pub placed_at: DateTime<Utc>,
-}
-
-/// Metadata about why a stop-loss was triggered, for diagnostic logging.
-#[derive(Debug, Clone)]
-pub struct StopLossTrigger {
-    /// Which trigger fired: "trailing_stop" or "dual_trigger".
-    pub reason: &'static str,
-    /// Peak bid observed during position lifetime.
-    pub peak_bid: Decimal,
-    /// Effective trailing distance (after time decay + floor).
-    pub effective_distance: Decimal,
-    /// Seconds remaining on the market.
-    pub time_remaining: i64,
 }
 
 /// Number of price history entries to keep per coin.
@@ -254,9 +217,6 @@ pub struct CryptoArbBase {
     pub pending_orders: RwLock<HashMap<TokenId, PendingOrder>>,
     /// Open GTC limit orders awaiting fill, keyed by order_id.
     pub open_limit_orders: RwLock<HashMap<OrderId, OpenLimitOrder>>,
-    /// Token IDs with active stop-loss sell orders awaiting confirmation.
-    /// Carries exit price and order type for correct fee model at fill time.
-    pub pending_stop_loss: RwLock<HashMap<TokenId, PendingStopLoss>>,
     /// Markets discovered before prices were available, keyed by coin.
     /// Promoted to active_markets once a price arrives for the coin.
     /// Vec allows multiple markets per coin (e.g. multiple BTC windows at backtest start).
@@ -277,10 +237,6 @@ pub struct CryptoArbBase {
     /// Order rejection cooldowns per market — prevents retry storms.
     /// Uses `DateTime<Utc>` so backtests with simulated time work correctly.
     pub rejection_cooldowns: RwLock<HashMap<MarketId, DateTime<Utc>>>,
-    /// Stop-loss rejection cooldowns per token — prevents retry storms on sell failures.
-    pub stop_loss_cooldowns: RwLock<HashMap<TokenId, DateTime<Utc>>>,
-    /// Stop-loss retry counts per token — used for escalating cooldowns.
-    pub stop_loss_retry_counts: RwLock<HashMap<TokenId, u32>>,
     /// Stale market cooldowns — prevents re-entry after a position was removed as stale.
     pub stale_market_cooldowns: RwLock<HashMap<MarketId, DateTime<Utc>>>,
     /// TailEnd skip-reason counters for diagnostics.
@@ -303,11 +259,6 @@ pub struct CryptoArbBase {
     /// Signal veto counters for diagnostics.
     /// Tracks why entries were vetoed (stale feeds, dispersion, etc.).
     pub signal_veto_stats: std::sync::Mutex<HashMap<&'static str, u64>>,
-    /// Token IDs marked for GTC fallback on next stop-loss attempt.
-    /// Set when a FOK stop-loss sell is rejected for liquidity.
-    pub stop_loss_use_gtc: RwLock<HashSet<TokenId>>,
-    /// Outstanding GTC stop-loss sell orders, keyed by order_id.
-    pub gtc_stop_loss_orders: RwLock<HashMap<OrderId, GtcStopLossOrder>>,
     /// Cached composite prices for stop-loss decisions, keyed by coin.
     /// Updated on every ExternalPrice event in `record_price`.
     /// Tuple: (composite result, timestamp when computed).
@@ -351,7 +302,6 @@ impl CryptoArbBase {
             positions: RwLock::new(HashMap::new()),
             pending_orders: RwLock::new(HashMap::new()),
             open_limit_orders: RwLock::new(HashMap::new()),
-            pending_stop_loss: RwLock::new(HashMap::new()),
             pending_discovery: RwLock::new(HashMap::new()),
             spike_events: RwLock::new(VecDeque::new()),
             stats: RwLock::new(ModeStats::new(window_size)),
@@ -359,8 +309,6 @@ impl CryptoArbBase {
             last_dashboard_emit: RwLock::new(None),
             last_status_log: RwLock::new(None),
             rejection_cooldowns: RwLock::new(HashMap::new()),
-            stop_loss_cooldowns: RwLock::new(HashMap::new()),
-            stop_loss_retry_counts: RwLock::new(HashMap::new()),
             stale_market_cooldowns: RwLock::new(HashMap::new()),
             tailend_skip_stats: std::sync::Mutex::new(HashMap::new()),
             coin_nearest_expiry: RwLock::new(HashMap::new()),
@@ -368,8 +316,6 @@ impl CryptoArbBase {
             order_telemetry: std::sync::Mutex::new(OrderTelemetry::default()),
             feed_last_seen: RwLock::new(HashMap::new()),
             signal_veto_stats: std::sync::Mutex::new(HashMap::new()),
-            stop_loss_use_gtc: RwLock::new(HashSet::new()),
-            gtc_stop_loss_orders: RwLock::new(HashMap::new()),
             sl_composite_cache: RwLock::new(HashMap::new()),
             position_lifecycle: RwLock::new(HashMap::new()),
             exit_orders_by_id: RwLock::new(HashMap::new()),
@@ -1309,33 +1255,28 @@ impl CryptoArbBase {
             reservations.remove(market_id);
         }
 
-        // Cancel outstanding GTC stop-loss orders for this market
+        // Cancel outstanding lifecycle exit orders for this market
         let cancel_actions: Vec<Action> = {
-            let mut gtc_sl = self.gtc_stop_loss_orders.write().await;
-            let to_cancel: Vec<OrderId> = gtc_sl
+            let market_token_ids: Vec<String> = vec![
+                market.market.token_ids.outcome_a.clone(),
+                market.market.token_ids.outcome_b.clone(),
+            ];
+            let mut exit_orders = self.exit_orders_by_id.write().await;
+            let to_cancel: Vec<(OrderId, String)> = exit_orders
                 .iter()
-                .filter(|(_, sl)| sl.market_id == market_id)
-                .map(|(oid, _)| oid.clone())
+                .filter(|(_, meta)| market_token_ids.contains(&meta.token_id))
+                .map(|(oid, meta)| (oid.clone(), meta.token_id.clone()))
                 .collect();
             let mut actions = Vec::new();
-            for oid in to_cancel {
-                if let Some(sl) = gtc_sl.remove(&oid) {
-                    info!(
-                        order_id = %oid,
-                        token_id = %sl.token_id,
-                        market = %market_id,
-                        "Cancelling GTC stop-loss order on market expiry"
-                    );
-                    // Clear pending_stop_loss
-                    let mut pending_sl = self.pending_stop_loss.write().await;
-                    pending_sl.remove(&sl.token_id);
-                    drop(pending_sl);
-                    // Clear GTC flag
-                    let mut gtc_set = self.stop_loss_use_gtc.write().await;
-                    gtc_set.remove(&sl.token_id);
-                    drop(gtc_set);
-                    actions.push(Action::CancelOrder(oid));
-                }
+            for (oid, token_id) in to_cancel {
+                exit_orders.remove(&oid);
+                info!(
+                    order_id = %oid,
+                    token_id = %token_id,
+                    market = %market_id,
+                    "Cancelling exit order on market expiry"
+                );
+                actions.push(Action::CancelOrder(oid));
             }
             actions
         };
@@ -1747,14 +1688,8 @@ impl CryptoArbBase {
             removed
         };
 
-        // Clear stop-loss state and lifecycle when position is removed
+        // Clean up lifecycle when position is removed
         if removed.is_some() {
-            let mut counts = self.stop_loss_retry_counts.write().await;
-            counts.remove(token_id);
-            drop(counts);
-            let mut gtc_set = self.stop_loss_use_gtc.write().await;
-            gtc_set.remove(token_id);
-            drop(gtc_set);
             self.remove_lifecycle(token_id).await;
         }
 
@@ -1804,14 +1739,8 @@ impl CryptoArbBase {
             result
         };
 
-        // Clear stop-loss state and lifecycle only on full close
+        // Clean up lifecycle only on full close
         if let Some((_, true)) = &result {
-            let mut counts = self.stop_loss_retry_counts.write().await;
-            counts.remove(token_id);
-            drop(counts);
-            let mut gtc_set = self.stop_loss_use_gtc.write().await;
-            gtc_set.remove(token_id);
-            drop(gtc_set);
             self.remove_lifecycle(token_id).await;
         }
 
@@ -1827,163 +1756,6 @@ impl CryptoArbBase {
                     pos.peak_bid = current_bid;
                 }
             }
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Stop-loss
-    // -------------------------------------------------------------------------
-
-    /// Check if stop-loss should trigger for a position.
-    ///
-    /// Triggers when:
-    /// 1. Crypto price reversed by >= stop_loss_reversal_pct (0.5%)
-    /// 2. Market price dropped by >= stop_loss_min_drop (5¢) from entry
-    /// 3. Time remaining > 60s (don't sell in final minute)
-    ///
-    /// Returns `Some((action, exit_price, order_type, trigger))` when stop-loss should trigger.
-    pub async fn check_stop_loss(
-        &self,
-        pos: &ArbitragePosition,
-        snapshot: &OrderbookSnapshot,
-        now: DateTime<Utc>,
-    ) -> Option<(Action, Decimal, OrderType, StopLossTrigger)> {
-        // Read time_remaining from active_markets, then drop the lock before
-        // acquiring price_history (via get_latest_price) to avoid inconsistent
-        // lock ordering with record_price which acquires them in reverse order.
-        let (time_remaining, neg_risk) = {
-            let markets = self.active_markets.read().await;
-            let market = markets.get(&pos.market_id)?;
-            (
-                market.market.seconds_remaining_at(now),
-                market.market.neg_risk,
-            )
-        };
-
-        // Don't trigger stop-loss when time remaining is below configured threshold
-        if time_remaining <= self.config.stop_loss.min_remaining_secs {
-            return None;
-        }
-
-        // Skip stop-loss for dust positions below min order size (unsellable)
-        {
-            let markets = self.active_markets.read().await;
-            if let Some(active) = markets.get(&pos.market_id)
-                && pos.size < active.market.min_order_size
-            {
-                debug!(
-                    token_id = %pos.token_id,
-                    size = %pos.size,
-                    min = %active.market.min_order_size,
-                    "Stop-loss skipped: dust position below min order size"
-                );
-                return None;
-            }
-        }
-
-        // Check crypto price reversal
-        let current_crypto = self.get_latest_price(&pos.coin).await;
-
-        let crypto_reversed = if let Some(current) = current_crypto {
-            let reversal = match pos.side {
-                OutcomeSide::Up | OutcomeSide::Yes => {
-                    // We bet Up, so reversal = price went down
-                    (pos.reference_price - current) / pos.reference_price
-                }
-                OutcomeSide::Down | OutcomeSide::No => {
-                    // We bet Down, so reversal = price went up
-                    (current - pos.reference_price) / pos.reference_price
-                }
-            };
-            reversal >= self.config.stop_loss.reversal_pct
-        } else {
-            false
-        };
-
-        // Check market price drop from entry
-        let current_bid = snapshot.best_bid()?;
-        let price_drop = pos.entry_price - current_bid;
-        let market_dropped = price_drop >= self.config.stop_loss.min_drop;
-
-        let min_distance = self.config.stop_loss.trailing_min_distance;
-
-        // Trailing stop: triggers when position was profitable and bid dropped from peak.
-        // Arming requires peak_bid >= entry_price + trailing_min_distance to avoid
-        // triggering on sub-cent profit noise.
-        let (trailing_triggered, effective_distance) = if self.config.stop_loss.trailing_enabled
-            && pos.peak_bid >= pos.entry_price + min_distance
-        {
-            let base_distance = self.config.stop_loss.trailing_distance;
-            let eff = if self.config.stop_loss.time_decay {
-                // Tighten trailing distance as expiry approaches (900s = 15min market)
-                let decay_factor = Decimal::from(time_remaining) / Decimal::from(900i64);
-                // Clamp to [0, 1]
-                let clamped = if decay_factor > Decimal::ONE {
-                    Decimal::ONE
-                } else if decay_factor < Decimal::ZERO {
-                    Decimal::ZERO
-                } else {
-                    decay_factor
-                };
-                // Apply floor: never let effective distance go below trailing_min_distance
-                (base_distance * clamped).max(min_distance)
-            } else {
-                base_distance
-            };
-            let drop_from_peak = pos.peak_bid - current_bid;
-            (drop_from_peak >= eff, eff)
-        } else {
-            (false, min_distance)
-        };
-
-        if (crypto_reversed && market_dropped) || trailing_triggered {
-            let reason = if trailing_triggered {
-                "trailing_stop"
-            } else {
-                "dual_trigger"
-            };
-            let trigger = StopLossTrigger {
-                reason,
-                peak_bid: pos.peak_bid,
-                effective_distance,
-                time_remaining,
-            };
-
-            // Check if this token is marked for GTC fallback (after FOK liquidity rejection)
-            let use_gtc = {
-                let gtc_set = self.stop_loss_use_gtc.read().await;
-                gtc_set.contains(&pos.token_id)
-            };
-
-            let (order_type, sell_price) = if use_gtc {
-                // GTC fallback: rest below current bid as maker order (0% fee)
-                let tick_size = pos.tick_size;
-                let offset = Decimal::from(self.config.stop_loss.gtc_fallback_tick_offset);
-                let gtc_price = (current_bid - tick_size * offset).max(tick_size);
-                (OrderType::Gtc, gtc_price)
-            } else {
-                (OrderType::Fok, current_bid)
-            };
-
-            // Clear GTC flag after constructing order (consumed)
-            if use_gtc {
-                let mut gtc_set = self.stop_loss_use_gtc.write().await;
-                gtc_set.remove(&pos.token_id);
-            }
-
-            let order = OrderRequest::new(
-                pos.token_id.clone(),
-                sell_price,
-                pos.size,
-                OrderSide::Sell,
-                order_type,
-                neg_risk,
-            )
-            .with_tick_size(pos.tick_size)
-            .with_fee_rate_bps(pos.fee_rate_bps);
-            Some((Action::PlaceOrder(order), sell_price, order_type, trigger))
-        } else {
-            None
         }
     }
 
@@ -2030,25 +1802,6 @@ impl CryptoArbBase {
         }
     }
 
-    /// Record a stop-loss rejection cooldown for a token.
-    pub async fn record_stop_loss_cooldown(&self, token_id: &TokenId, cooldown_secs: u64) {
-        let now = self.event_time().await;
-        let expires_at = now + chrono::Duration::seconds(cooldown_secs as i64);
-        let mut cooldowns = self.stop_loss_cooldowns.write().await;
-        cooldowns.insert(token_id.clone(), expires_at);
-    }
-
-    /// Check if a token is still in stop-loss rejection cooldown.
-    pub async fn is_stop_loss_cooled_down(&self, token_id: &TokenId) -> bool {
-        let now = self.event_time().await;
-        let cooldowns = self.stop_loss_cooldowns.read().await;
-        if let Some(expires_at) = cooldowns.get(token_id) {
-            now < *expires_at
-        } else {
-            false
-        }
-    }
-
     /// Record a stale market cooldown to prevent re-entry after position removal.
     pub async fn record_stale_market_cooldown(&self, market_id: &MarketId, cooldown_secs: u64) {
         let now = self.event_time().await;
@@ -2086,111 +1839,6 @@ impl CryptoArbBase {
         } else {
             false
         }
-    }
-
-    /// Handle a rejected stop-loss sell order.
-    ///
-    /// Classifies the rejection reason and applies the appropriate cooldown schedule:
-    /// - Liquidity: fast cooldowns (default [1, 5, 15, 30]s), marks for GTC fallback
-    /// - Balance/Allowance: longer cooldowns (default [5, 15, 30, 60]s)
-    /// - Transient: same as balance/allowance
-    ///
-    /// After 5+ consecutive failures, logs ERROR-level alert.
-    pub async fn handle_stop_loss_rejection(
-        &self,
-        token_id: &TokenId,
-        reason: &str,
-        mode_name: &str,
-    ) {
-        let mut pending_sl = self.pending_stop_loss.write().await;
-        pending_sl.remove(token_id);
-        drop(pending_sl);
-
-        let kind = StopLossRejectionKind::classify(reason);
-
-        // InvalidSize: dust position too small to sell — remove immediately, no retry
-        if kind == StopLossRejectionKind::InvalidSize {
-            // Find and remove the dust position
-            let positions = self.positions.read().await;
-            let dust_size = positions
-                .values()
-                .flat_map(|v| v.iter())
-                .find(|p| p.token_id == *token_id)
-                .map(|p| p.size);
-            drop(positions);
-
-            if let Some(size) = dust_size {
-                self.reduce_or_remove_position_by_token(token_id, size).await;
-                warn!(
-                    token_id = %token_id,
-                    mode = mode_name,
-                    dust_size = %size,
-                    reason = %reason,
-                    "Removed unsellable dust position after InvalidSize rejection — will resolve at expiry"
-                );
-            }
-            // Clean up retry state
-            self.stop_loss_retry_counts.write().await.remove(token_id);
-            self.stop_loss_cooldowns.write().await.remove(token_id);
-            self.stop_loss_use_gtc.write().await.remove(token_id);
-            return;
-        }
-
-        // Increment retry count for escalating cooldowns
-        let retry_count = {
-            let mut counts = self.stop_loss_retry_counts.write().await;
-            let count = counts.entry(token_id.clone()).or_insert(0);
-            *count += 1;
-            *count
-        };
-
-        // Pick cooldown from the appropriate schedule based on retry count
-        let schedule = kind.cooldown_schedule(
-            &self.config.stop_loss.liquidity_cooldowns,
-            &self.config.stop_loss.balance_cooldowns,
-        );
-        let idx = (retry_count as usize)
-            .saturating_sub(1)
-            .min(schedule.len().saturating_sub(1));
-        let cooldown_secs = schedule.get(idx).copied().unwrap_or(60);
-
-        if retry_count >= 5 {
-            error!(
-                token_id = %token_id,
-                mode = mode_name,
-                retry_count = retry_count,
-                reason = %reason,
-                kind = ?kind,
-                "Stop-loss sell repeatedly failing — may need manual intervention"
-            );
-        }
-
-        // For liquidity rejections, mark token for GTC fallback on next attempt
-        if kind == StopLossRejectionKind::Liquidity && self.config.stop_loss.gtc_fallback {
-            let mut gtc_set = self.stop_loss_use_gtc.write().await;
-            gtc_set.insert(token_id.clone());
-            warn!(
-                token_id = %token_id,
-                mode = mode_name,
-                reason = %reason,
-                retry_count = retry_count,
-                cooldown_secs = cooldown_secs,
-                "Stop-loss FOK rejected (liquidity), marked for GTC fallback"
-            );
-        } else {
-            warn!(
-                token_id = %token_id,
-                mode = mode_name,
-                reason = %reason,
-                retry_count = retry_count,
-                cooldown_secs = cooldown_secs,
-                kind = ?kind,
-                "Stop-loss sell rejected, cooldown applied"
-            );
-        }
-
-        self.record_stop_loss_cooldown(token_id, cooldown_secs)
-            .await;
     }
 
     /// Handle a CancelFailed event for a limit order.

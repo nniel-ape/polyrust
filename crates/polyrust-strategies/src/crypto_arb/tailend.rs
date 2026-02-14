@@ -17,12 +17,11 @@ use tracing::{debug, info, warn};
 
 use polyrust_core::prelude::*;
 
-use crate::crypto_arb::base::{CryptoArbBase, GtcStopLossOrder, taker_fee};
+use crate::crypto_arb::base::{CryptoArbBase, StopLossRejectionKind, taker_fee};
 use crate::crypto_arb::dashboard::try_emit_dashboard_updates;
-use crate::crypto_arb::base::StopLossRejectionKind;
 use crate::crypto_arb::types::{
     ArbitrageOpportunity, ArbitragePosition, ExitOrderMeta, OpenLimitOrder, PendingOrder,
-    PendingStopLoss, PositionLifecycle, PositionLifecycleState, StopLossTriggerKind,
+    PositionLifecycle, PositionLifecycleState, StopLossTriggerKind,
     TriggerEvalContext, compute_exit_clip,
 };
 
@@ -287,65 +286,28 @@ impl TailEndStrategy {
 
     /// Handle order placement result.
     async fn on_order_placed(&self, result: &OrderResult) -> Vec<Action> {
-        // Check if this is a stop-loss sell confirmation.
+        // Check if this is a lifecycle exit/recovery order confirmation.
         // Don't remove position here — defer to Filled event to avoid race
         // with the persistence handler (which also needs the position for P&L).
         {
-            let pending_sl = self.base.pending_stop_loss.read().await;
-            if let Some(sl_info) = pending_sl.get(&result.token_id) {
-                let exit_price = sl_info.exit_price;
-                let sl_order_type = sl_info.order_type;
-                drop(pending_sl);
-
+            let is_exit_order = {
+                let exit_orders = self.base.exit_orders_by_id.read().await;
+                exit_orders.values().any(|meta| meta.token_id == result.token_id)
+            };
+            if is_exit_order {
                 if result.success {
-                    // Only track GTC stop-loss orders for lifecycle management.
-                    // FOK orders fill immediately — tracking them here would cause
-                    // the fill handler to use the 0% maker fee path instead of taker fee.
-                    if sl_order_type == OrderType::Gtc {
-                        if let Some(order_id) = &result.order_id {
-                            let now = self.base.event_time().await;
-                            let pos_info = {
-                                let positions = self.base.positions.read().await;
-                                positions
-                                    .values()
-                                    .flat_map(|v| v.iter())
-                                    .find(|p| p.token_id == result.token_id)
-                                    .map(|p| (p.market_id.clone(), p.size))
-                            };
-
-                            if let Some((market_id, size)) = pos_info {
-                                let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
-                                gtc_sl.insert(
-                                    order_id.clone(),
-                                    GtcStopLossOrder {
-                                        order_id: order_id.clone(),
-                                        token_id: result.token_id.clone(),
-                                        market_id,
-                                        price: exit_price,
-                                        size,
-                                        placed_at: now,
-                                    },
-                                );
-                            }
-
-                            info!(
-                                token_id = %result.token_id,
-                                order_id = %order_id,
-                                "TailEnd GTC stop-loss sell order placed, awaiting fill"
-                            );
-                        }
-                    } else {
+                    if let Some(order_id) = &result.order_id {
                         info!(
                             token_id = %result.token_id,
-                            order_type = ?sl_order_type,
-                            "TailEnd stop-loss sell order placed (FOK), awaiting fill"
+                            order_id = %order_id,
+                            "TailEnd exit order placed, awaiting fill"
                         );
                     }
                 } else {
                     warn!(
                         token_id = %result.token_id,
                         message = %result.message,
-                        "TailEnd stop-loss sell failed"
+                        "TailEnd exit order placement failed"
                     );
                 }
                 return vec![];
@@ -723,8 +685,7 @@ impl TailEndStrategy {
     /// Handle an orderbook update: update cached asks, peak bids, evaluate
     /// lifecycle-driven stop-loss triggers on our positions.
     ///
-    /// Replaces the old check_stop_loss + post-entry exit logic with the
-    /// 4-level trigger hierarchy (evaluate_triggers) and lifecycle state machine.
+    /// Uses the 4-level trigger hierarchy (evaluate_triggers) and lifecycle state machine.
     async fn handle_orderbook_update(&self, snapshot: &OrderbookSnapshot) -> Vec<Action> {
         // Update cached asks
         if let Some(best_ask) = snapshot.asks.first() {
@@ -739,33 +700,7 @@ impl TailEndStrategy {
                 .await;
         }
 
-        // Cancel stale GTC stop-loss orders (older than max_age_secs)
         let mut actions = Vec::new();
-        {
-            let max_age = self.base.config.stop_loss.gtc_stop_loss_max_age_secs as i64;
-            let now = self.base.event_time().await;
-            let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
-            let stale: Vec<OrderId> = gtc_sl
-                .iter()
-                .filter(|(_, sl)| (now - sl.placed_at).num_seconds() >= max_age)
-                .map(|(oid, _)| oid.clone())
-                .collect();
-            for oid in stale {
-                if let Some(sl) = gtc_sl.remove(&oid) {
-                    info!(
-                        order_id = %oid,
-                        token_id = %sl.token_id,
-                        age_secs = (now - sl.placed_at).num_seconds(),
-                        "Cancelling stale GTC stop-loss order for re-evaluation"
-                    );
-                    // Clear pending_stop_loss so stop-loss can re-trigger
-                    let mut pending_sl = self.base.pending_stop_loss.write().await;
-                    pending_sl.remove(&sl.token_id);
-                    drop(pending_sl);
-                    actions.push(Action::CancelOrder(oid));
-                }
-            }
-        }
 
         // Lifecycle-driven stop-loss evaluation on our positions
         let position_snapshot: Vec<(MarketId, ArbitragePosition)> = {
@@ -783,22 +718,30 @@ impl TailEndStrategy {
                 continue;
             }
 
-            // Skip if stop-loss already in flight (legacy pending_stop_loss check for transition period)
-            {
-                let pending_sl = self.base.pending_stop_loss.read().await;
-                if pending_sl.contains_key(&pos.token_id) {
-                    continue;
-                }
-            }
-            if self.base.is_stop_loss_cooled_down(&pos.token_id).await {
-                continue;
-            }
-
             // Get or create lifecycle for this position
             let mut lifecycle = self.base.ensure_lifecycle(&pos.token_id).await;
 
-            // If lifecycle is in ExitExecuting, skip — order is already in flight
-            if matches!(lifecycle.state, PositionLifecycleState::ExitExecuting { .. }) {
+            // If lifecycle is in ExitExecuting, check for stale GTC orders needing refresh
+            if let PositionLifecycleState::ExitExecuting {
+                order_id: ref exit_oid,
+                order_type: ref exit_type,
+                submitted_at,
+                ..
+            } = lifecycle.state
+            {
+                if *exit_type == OrderType::Gtc {
+                    let age_secs = (now - submitted_at).num_seconds();
+                    if age_secs >= self.base.config.stop_loss.short_limit_refresh_secs as i64 {
+                        info!(
+                            token_id = %pos.token_id,
+                            order_id = %exit_oid,
+                            age_secs,
+                            "Cancelling stale GTC exit for refresh"
+                        );
+                        actions.push(Action::CancelOrder(exit_oid.clone()));
+                    }
+                }
+                // Order is in flight (fresh or being cancelled) — skip evaluation
                 continue;
             }
 
@@ -1151,18 +1094,6 @@ impl TailEndStrategy {
             );
         }
 
-        // Also store in legacy pending_stop_loss for compatibility with existing fill handler
-        {
-            let mut pending_sl = self.base.pending_stop_loss.write().await;
-            pending_sl.insert(
-                pos.token_id.clone(),
-                PendingStopLoss {
-                    exit_price: current_bid,
-                    order_type: OrderType::Fok,
-                },
-            );
-        }
-
         info!(
             market = %pos.market_id,
             token_id = %pos.token_id,
@@ -1282,30 +1213,12 @@ impl TailEndStrategy {
             None => return None,
         };
 
-        // Check if an existing GTC exit order needs refresh (cancel stale ones)
+        // If a pending exit order exists (from previous ExitExecuting state),
+        // wait for it to be cancelled/filled before placing a new one.
         if let Some(exit_oid) = &lifecycle.pending_exit_order_id {
             let exit_orders = self.base.exit_orders_by_id.read().await;
-            if let Some(meta) = exit_orders.get(exit_oid.as_str())
-                && meta.order_type == OrderType::Gtc
-            {
-                // Check if GTC order is stale (older than refresh interval)
-                let gtc_sl = self.base.gtc_stop_loss_orders.read().await;
-                if let Some(sl_order) = gtc_sl.get(exit_oid.as_str()) {
-                    let age_secs = (now - sl_order.placed_at).num_seconds();
-                    if age_secs >= sl_config.short_limit_refresh_secs as i64 {
-                        drop(gtc_sl);
-                        drop(exit_orders);
-                        // Cancel stale GTC for re-placement on next cycle
-                        info!(
-                            token_id = %pos.token_id,
-                            order_id = %exit_oid,
-                            age_secs,
-                            "ResidualRisk: cancelling stale GTC exit for refresh"
-                        );
-                        return Some(Action::CancelOrder(exit_oid.clone()));
-                    }
-                }
-                // GTC order still fresh — wait for fill or refresh
+            if exit_orders.contains_key(exit_oid.as_str()) {
+                // Exit order still in flight — wait for cancel/fill event
                 return None;
             }
         }
@@ -1384,7 +1297,7 @@ impl TailEndStrategy {
             }
             lifecycle.pending_exit_order_id = Some(exit_order_id.clone());
 
-            // Store exit order meta and GTC tracking
+            // Store exit order meta for fill routing
             {
                 let mut exit_orders = self.base.exit_orders_by_id.write().await;
                 exit_orders.insert(
@@ -1393,31 +1306,6 @@ impl TailEndStrategy {
                         token_id: pos.token_id.clone(),
                         order_type: OrderType::Gtc,
                         source_state: format!("ResidualRisk(retry={retry_count})"),
-                    },
-                );
-            }
-            {
-                let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
-                gtc_sl.insert(
-                    exit_order_id.clone(),
-                    GtcStopLossOrder {
-                        order_id: exit_order_id.clone(),
-                        token_id: pos.token_id.clone(),
-                        market_id: pos.market_id.clone(),
-                        price: exit_price,
-                        size: clip,
-                        placed_at: now,
-                    },
-                );
-            }
-            // Also store in legacy pending_stop_loss for compatibility
-            {
-                let mut pending_sl = self.base.pending_stop_loss.write().await;
-                pending_sl.insert(
-                    pos.token_id.clone(),
-                    PendingStopLoss {
-                        exit_price,
-                        order_type: OrderType::Gtc,
                     },
                 );
             }
@@ -1470,16 +1358,6 @@ impl TailEndStrategy {
                     token_id: pos.token_id.clone(),
                     order_type: OrderType::Fok,
                     source_state: format!("ResidualRisk(retry={retry_count})"),
-                },
-            );
-        }
-        {
-            let mut pending_sl = self.base.pending_stop_loss.write().await;
-            pending_sl.insert(
-                pos.token_id.clone(),
-                PendingStopLoss {
-                    exit_price: current_bid,
-                    order_type: OrderType::Fok,
                 },
             );
         }
@@ -1855,253 +1733,179 @@ impl TailEndStrategy {
     async fn on_order_filled(
         &self,
         order_id: &str,
-        token_id: &str,
+        _token_id: &str,
         price: Decimal,
         size: Decimal,
     ) -> Vec<Action> {
-        // Check if this is a recovery order fill (by order_id in exit_orders_by_id)
+        // Check if this is a lifecycle exit/recovery order fill (by order_id in exit_orders_by_id)
         {
             let exit_meta = {
                 let exit_orders = self.base.exit_orders_by_id.read().await;
                 exit_orders.get(order_id).cloned()
             };
-            if let Some(meta) = &exit_meta
-                && meta.source_state.starts_with("RecoveryProbe")
-            {
+            if let Some(meta) = exit_meta {
                 let now = self.base.event_time().await;
                 let sl_config = &self.base.config.stop_loss;
 
-                // Check if this is a partial fill by comparing fill size to remaining position
-                let remaining_after = {
-                    let positions = self.base.positions.read().await;
-                    positions
-                        .values()
-                        .flat_map(|v| v.iter())
-                        .find(|p| p.token_id == meta.token_id)
-                        .map(|p| p.size)
-                };
-
-                let is_partial = remaining_after
-                    .map(|pos_size| size < pos_size)
-                    .unwrap_or(false);
-
-                let mut lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
-
-                if is_partial {
-                    // Partial recovery fill — accept what we got, resolve remaining with loss.
-                    // Recovery orders are FOK so partials are rare, but handle defensively.
-                    warn!(
-                        order_id = %order_id,
-                        token_id = %meta.token_id,
-                        fill_size = %size,
-                        remaining = ?remaining_after,
-                        "Recovery order partially filled — resolving remaining with loss"
-                    );
-
-                    // Record recovery exit cooldown for re-entry gating
-                    let pos_info = {
+                if meta.source_state.starts_with("RecoveryProbe") {
+                    // Recovery order fill
+                    let remaining_after = {
                         let positions = self.base.positions.read().await;
                         positions
                             .values()
                             .flat_map(|v| v.iter())
                             .find(|p| p.token_id == meta.token_id)
-                            .map(|p| p.market_id.clone())
+                            .map(|p| p.size)
                     };
-                    if let Some(market_id) = pos_info {
-                        self.base.record_recovery_exit_cooldown(&market_id).await;
-                    }
 
-                    // Remove the entire position (partial recovery is not worth continuing)
-                    if let Some(remaining) = remaining_after {
-                        self.base
-                            .reduce_or_remove_position_by_token(&meta.token_id, remaining)
-                            .await;
-                    }
+                    let is_partial = remaining_after
+                        .map(|pos_size| size < pos_size)
+                        .unwrap_or(false);
 
-                    // Force-remove lifecycle since position is resolved
-                    self.base.remove_lifecycle(&meta.token_id).await;
-                } else {
-                    // Full recovery fill — transition to Cooldown
-                    let cooldown_until =
-                        now + chrono::Duration::seconds(sl_config.reentry_cooldown_secs);
+                    let mut lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
 
-                    if let Err(e) = lifecycle.transition(
-                        PositionLifecycleState::Cooldown {
-                            until: cooldown_until,
-                        },
-                        &format!("recovery fill: {} at {}", meta.source_state, price),
-                        now,
-                    ) {
+                    if is_partial {
                         warn!(
-                            token_id = %meta.token_id,
-                            error = %e,
-                            "RecoveryProbe→Cooldown transition failed"
-                        );
-                    }
-                    lifecycle.pending_exit_order_id = None;
-                    self.write_lifecycle(&meta.token_id, &lifecycle).await;
-
-                    info!(
-                        order_id = %order_id,
-                        token_id = %meta.token_id,
-                        source = %meta.source_state,
-                        fill_price = %price,
-                        fill_size = %size,
-                        cooldown_secs = sl_config.reentry_cooldown_secs,
-                        "Recovery order filled — transitioning to Cooldown"
-                    );
-                }
-
-                // Clean up exit order tracking
-                {
-                    let mut exit_orders = self.base.exit_orders_by_id.write().await;
-                    exit_orders.remove(order_id);
-                }
-
-                return vec![];
-            }
-        }
-
-        // Check if this is a GTC stop-loss fill (by order_id)
-        {
-            let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
-            if let Some(sl_order) = gtc_sl.remove(order_id) {
-                drop(gtc_sl);
-                // Clear pending_stop_loss for this token
-                {
-                    let mut pending_sl = self.base.pending_stop_loss.write().await;
-                    pending_sl.remove(&sl_order.token_id);
-                }
-                if let Some((pos, fully_closed)) = self
-                    .base
-                    .reduce_or_remove_position_by_token(&sl_order.token_id, size)
-                    .await
-                {
-                    // GTC fills are maker orders → 0% fee on exit
-                    // Use entry_fee_per_share (0 for GTC entry, actual taker fee for FOK entry)
-                    let pnl = (price - pos.entry_price) * size - (pos.entry_fee_per_share * size);
-                    self.base.record_trade_pnl(pnl).await;
-                    if !fully_closed {
-                        let remaining = pos.size - size;
-                        let now = self.base.event_time().await;
-                        // Transition to ResidualRisk for the remaining amount
-                        self.transition_to_residual_risk(
-                            &sl_order.token_id,
-                            remaining,
-                            1,
-                            true, // Continue with GTC
-                            "GTC exit partial fill",
-                            now,
-                        )
-                        .await;
-                        warn!(
-                            token_id = %sl_order.token_id,
                             order_id = %order_id,
+                            token_id = %meta.token_id,
                             fill_size = %size,
-                            remaining = %remaining,
-                            "GTC stop-loss partial fill: transitioned to ResidualRisk"
+                            remaining = ?remaining_after,
+                            "Recovery order partially filled — resolving remaining with loss"
                         );
-                    }
-                    info!(
-                        token_id = %sl_order.token_id,
-                        order_id = %order_id,
-                        pnl = %pnl,
-                        fill_size = %size,
-                        fully_closed,
-                        "GTC stop-loss sell filled (maker, 0% fee)"
-                    );
-                } else {
-                    warn!(
-                        token_id = %sl_order.token_id,
-                        order_id = %order_id,
-                        "GTC stop-loss fill: position already removed (race)"
-                    );
-                }
-                // Clean up exit order tracking
-                {
-                    let mut exit_orders = self.base.exit_orders_by_id.write().await;
-                    exit_orders.remove(order_id);
-                }
-                return vec![];
-            }
-        }
 
-        // Check if this is a FOK stop-loss sell fill (by token_id in pending_stop_loss)
-        {
-            let mut pending_sl = self.base.pending_stop_loss.write().await;
-            if let Some(_sl_info) = pending_sl.remove(token_id) {
-                drop(pending_sl);
-                // Use actual CLOB fill price, not trigger bid (sl_info.exit_price)
-                let exit_price = price;
-                if let Some((pos, fully_closed)) = self
-                    .base
-                    .reduce_or_remove_position_by_token(token_id, size)
-                    .await
-                {
-                    let exit_fee = taker_fee(exit_price, self.base.config.fee.taker_fee_rate);
-                    // Use entry_fee_per_share (0 for GTC entry, actual taker fee for FOK entry)
-                    let pnl = (exit_price - pos.entry_price) * size
-                        - (pos.entry_fee_per_share * size)
-                        - (exit_fee * size);
-                    self.base.record_trade_pnl(pnl).await;
-                    if !fully_closed {
-                        let remaining = pos.size - size;
-                        // Check if residual is below minimum order size (unsellable dust)
-                        let is_dust = {
-                            let markets = self.base.active_markets.read().await;
-                            markets
-                                .get(&pos.market_id)
-                                .map(|m| remaining < m.market.min_order_size)
-                                .unwrap_or(true)
+                        let pos_info = {
+                            let positions = self.base.positions.read().await;
+                            positions
+                                .values()
+                                .flat_map(|v| v.iter())
+                                .find(|p| p.token_id == meta.token_id)
+                                .map(|p| p.market_id.clone())
                         };
-                        if is_dust {
-                            // Remove dust — too small to sell, will resolve at expiry
+                        if let Some(market_id) = pos_info {
+                            self.base.record_recovery_exit_cooldown(&market_id).await;
+                        }
+
+                        if let Some(remaining) = remaining_after {
                             self.base
-                                .reduce_or_remove_position_by_token(token_id, remaining)
+                                .reduce_or_remove_position_by_token(&meta.token_id, remaining)
                                 .await;
+                        }
+
+                        self.base.remove_lifecycle(&meta.token_id).await;
+                    } else {
+                        let cooldown_until =
+                            now + chrono::Duration::seconds(sl_config.reentry_cooldown_secs);
+
+                        if let Err(e) = lifecycle.transition(
+                            PositionLifecycleState::Cooldown {
+                                until: cooldown_until,
+                            },
+                            &format!("recovery fill: {} at {}", meta.source_state, price),
+                            now,
+                        ) {
                             warn!(
-                                token_id = %token_id,
-                                dust_size = %remaining,
-                                "Removed unsellable dust after FOK partial fill — will resolve at expiry"
-                            );
-                        } else {
-                            // Transition to ResidualRisk for the remaining amount
-                            let now = self.base.event_time().await;
-                            self.transition_to_residual_risk(
-                                token_id,
-                                remaining,
-                                1,
-                                true, // Switch to GTC for next attempt
-                                "FOK exit partial fill",
-                                now,
-                            )
-                            .await;
-                            warn!(
-                                token_id = %token_id,
-                                fill_size = %size,
-                                remaining = %remaining,
-                                "FOK stop-loss partial fill: transitioned to ResidualRisk"
+                                token_id = %meta.token_id,
+                                error = %e,
+                                "RecoveryProbe→Cooldown transition failed"
                             );
                         }
+                        lifecycle.pending_exit_order_id = None;
+                        self.write_lifecycle(&meta.token_id, &lifecycle).await;
+
+                        info!(
+                            order_id = %order_id,
+                            token_id = %meta.token_id,
+                            source = %meta.source_state,
+                            fill_price = %price,
+                            fill_size = %size,
+                            cooldown_secs = sl_config.reentry_cooldown_secs,
+                            "Recovery order filled — transitioning to Cooldown"
+                        );
                     }
-                    info!(
-                        token_id = %token_id,
-                        pnl = %pnl,
-                        fill_size = %size,
-                        fully_closed,
-                        "Stop-loss sell filled"
-                    );
                 } else {
-                    warn!(
-                        token_id = %token_id,
-                        "TailEnd stop-loss fill: position already removed (race)"
-                    );
+                    // Exit order fill (ExitExecuting state)
+                    let exit_price = price; // Use actual CLOB fill price
+                    let is_gtc_exit = meta.order_type == OrderType::Gtc;
+
+                    if let Some((pos, fully_closed)) = self
+                        .base
+                        .reduce_or_remove_position_by_token(&meta.token_id, size)
+                        .await
+                    {
+                        // GTC exits are maker orders (0% fee), FOK exits pay taker fee
+                        let exit_fee = if is_gtc_exit {
+                            Decimal::ZERO
+                        } else {
+                            taker_fee(exit_price, self.base.config.fee.taker_fee_rate)
+                        };
+                        let pnl = (exit_price - pos.entry_price) * size
+                            - (pos.entry_fee_per_share * size)
+                            - (exit_fee * size);
+                        self.base.record_trade_pnl(pnl).await;
+
+                        if !fully_closed {
+                            let remaining = pos.size - size;
+                            // Check if residual is below minimum order size (unsellable dust)
+                            let is_dust = {
+                                let markets = self.base.active_markets.read().await;
+                                markets
+                                    .get(&pos.market_id)
+                                    .map(|m| remaining < m.market.min_order_size)
+                                    .unwrap_or(true)
+                            };
+                            if is_dust {
+                                self.base
+                                    .reduce_or_remove_position_by_token(&meta.token_id, remaining)
+                                    .await;
+                                warn!(
+                                    token_id = %meta.token_id,
+                                    dust_size = %remaining,
+                                    "Removed unsellable dust after partial fill — will resolve at expiry"
+                                );
+                            } else {
+                                self.transition_to_residual_risk(
+                                    &meta.token_id,
+                                    remaining,
+                                    1,
+                                    true, // Switch to GTC for next attempt
+                                    &format!("{} exit partial fill", if is_gtc_exit { "GTC" } else { "FOK" }),
+                                    now,
+                                )
+                                .await;
+                                warn!(
+                                    token_id = %meta.token_id,
+                                    order_id = %order_id,
+                                    fill_size = %size,
+                                    remaining = %remaining,
+                                    "Exit partial fill: transitioned to ResidualRisk"
+                                );
+                            }
+                        }
+
+                        info!(
+                            token_id = %meta.token_id,
+                            order_id = %order_id,
+                            pnl = %pnl,
+                            fill_size = %size,
+                            fully_closed,
+                            exit_type = if is_gtc_exit { "GTC (0% fee)" } else { "FOK (taker fee)" },
+                            "Exit order filled"
+                        );
+                    } else {
+                        warn!(
+                            token_id = %meta.token_id,
+                            order_id = %order_id,
+                            "Exit fill: position already removed (race)"
+                        );
+                    }
                 }
+
                 // Clean up exit order tracking
                 {
                     let mut exit_orders = self.base.exit_orders_by_id.write().await;
-                    exit_orders.retain(|_, meta| meta.token_id != *token_id);
+                    exit_orders.remove(order_id);
                 }
+
                 return vec![];
             }
         }
@@ -2295,18 +2099,10 @@ impl Strategy for TailEndStrategy {
                             }
                         }
 
-                        // Clean up exit order tracking and legacy pending_stop_loss
+                        // Clean up exit order tracking
                         {
                             let mut exit_orders = self.base.exit_orders_by_id.write().await;
                             exit_orders.retain(|_, meta| meta.token_id != *token_id);
-                        }
-                        {
-                            let mut pending_sl = self.base.pending_stop_loss.write().await;
-                            pending_sl.remove(token_id);
-                        }
-                        {
-                            let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
-                            gtc_sl.retain(|_, sl| sl.token_id != *token_id);
                         }
 
                         return Ok(vec![]);
@@ -2351,36 +2147,6 @@ impl Strategy for TailEndStrategy {
                         return Ok(vec![]);
                     }
 
-                    // Handle stop-loss rejection with classification and GTC fallback (legacy path)
-                    if self
-                        .base
-                        .pending_stop_loss
-                        .read()
-                        .await
-                        .contains_key(token_id)
-                    {
-                        // If a GTC SL was rejected, clear the GTC tracking and revert to FOK
-                        {
-                            let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
-                            let gtc_order_ids: Vec<OrderId> = gtc_sl
-                                .iter()
-                                .filter(|(_, sl)| sl.token_id == *token_id)
-                                .map(|(oid, _)| oid.clone())
-                                .collect();
-                            for oid in gtc_order_ids {
-                                gtc_sl.remove(&oid);
-                                warn!(
-                                    order_id = %oid,
-                                    token_id = %token_id,
-                                    "GTC stop-loss rejected, reverting to FOK for next attempt"
-                                );
-                            }
-                        }
-
-                        self.base
-                            .handle_stop_loss_rejection(token_id, reason, "TailEnd")
-                            .await;
-                    }
                 }
                 vec![]
             }
@@ -2437,14 +2203,6 @@ impl Strategy for TailEndStrategy {
                             let mut exit_orders = self.base.exit_orders_by_id.write().await;
                             exit_orders.remove(order_id);
                         }
-                        {
-                            let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
-                            gtc_sl.remove(order_id);
-                        }
-                        {
-                            let mut pending_sl = self.base.pending_stop_loss.write().await;
-                            pending_sl.remove(&meta.token_id);
-                        }
 
                         info!(
                             order_id = %order_id,
@@ -2452,21 +2210,6 @@ impl Strategy for TailEndStrategy {
                             retry_count,
                             "Lifecycle GTC exit cancelled, will re-place on next OB update"
                         );
-                        return Ok(vec![]);
-                    }
-                }
-
-                // Check if this is a legacy GTC stop-loss cancel
-                {
-                    let mut gtc_sl = self.base.gtc_stop_loss_orders.write().await;
-                    if let Some(sl) = gtc_sl.remove(order_id) {
-                        info!(
-                            order_id = %order_id,
-                            token_id = %sl.token_id,
-                            "GTC stop-loss order cancelled, will re-evaluate"
-                        );
-                        let mut pending_sl = self.base.pending_stop_loss.write().await;
-                        pending_sl.remove(&sl.token_id);
                         return Ok(vec![]);
                     }
                 }
@@ -3202,13 +2945,6 @@ mod tests {
             !exit_orders.is_empty(),
             "exit_orders_by_id should have the exit order meta"
         );
-
-        // Verify pending_stop_loss was also populated (legacy compat)
-        let pending_sl = strategy.base.pending_stop_loss.read().await;
-        assert!(
-            pending_sl.contains_key("token_up"),
-            "pending_stop_loss should be set for fill handler"
-        );
     }
 
     /// Orderbook update with trigger condition during sell delay window
@@ -3404,12 +3140,6 @@ mod tests {
             )
             .await;
 
-        // Clean up pending_stop_loss (as the Rejected handler would)
-        {
-            let mut pending_sl = strategy.base.pending_stop_loss.write().await;
-            pending_sl.remove("token_up");
-        }
-
         // Lifecycle should be ResidualRisk with correct fields
         let lifecycles = strategy.base.position_lifecycle.read().await;
         let lc = lifecycles.get("token_up").unwrap();
@@ -3507,21 +3237,7 @@ mod tests {
             lifecycles.insert("token_up".to_string(), lifecycle);
         }
 
-        // Track the GTC order as a stop-loss order (3s old)
-        {
-            let mut gtc_sl = base.gtc_stop_loss_orders.write().await;
-            gtc_sl.insert(
-                exit_oid.clone(),
-                GtcStopLossOrder {
-                    order_id: exit_oid.clone(),
-                    token_id: "token_up".to_string(),
-                    market_id: "market1".to_string(),
-                    price: dec!(0.81),
-                    size: dec!(10),
-                    placed_at: now - Duration::seconds(3),
-                },
-            );
-        }
+        // Track the GTC order in exit_orders_by_id
         {
             let mut exit_orders = base.exit_orders_by_id.write().await;
             exit_orders.insert(
@@ -3574,13 +3290,8 @@ mod tests {
         let remaining = dec!(5); // 10 - 5
 
         // We simulate what the on_order_filled handler does:
-        // 1. Remove the pending_stop_loss entry
-        // 2. Call reduce_or_remove_position_by_token
-        // 3. Transition to ResidualRisk
-        {
-            let mut pending_sl = strategy.base.pending_stop_loss.write().await;
-            pending_sl.remove("token_up");
-        }
+        // 1. Call reduce_or_remove_position_by_token
+        // 2. Transition to ResidualRisk
 
         // reduce_or_remove with fill_size=5 out of 10 → partial
         let result = strategy
@@ -4073,34 +3784,6 @@ mod tests {
             );
         }
 
-        // Track in pending_stop_loss (legacy compat)
-        {
-            let mut pending_sl = base.pending_stop_loss.write().await;
-            pending_sl.insert(
-                "token_up".to_string(),
-                PendingStopLoss {
-                    exit_price: dec!(0.85),
-                    order_type: exit_order_type,
-                },
-            );
-        }
-
-        // For GTC: also track in gtc_stop_loss_orders
-        if exit_order_type == OrderType::Gtc {
-            let mut gtc_sl = base.gtc_stop_loss_orders.write().await;
-            gtc_sl.insert(
-                exit_oid.clone(),
-                GtcStopLossOrder {
-                    order_id: exit_oid.clone(),
-                    token_id: "token_up".to_string(),
-                    market_id: "market1".to_string(),
-                    price: dec!(0.85),
-                    size: dec!(10),
-                    placed_at: now,
-                },
-            );
-        }
-
         let strategy = TailEndStrategy::new(base);
         (strategy, exit_oid)
     }
@@ -4109,11 +3792,12 @@ mod tests {
     /// computes P&L, and cleans up exit_orders_by_id.
     #[tokio::test]
     async fn lifecycle_exit_fill_routes_through_lifecycle_fok() {
-        let (strategy, _exit_oid) = make_exit_fill_test_setup(OrderType::Fok).await;
+        let (strategy, exit_oid) = make_exit_fill_test_setup(OrderType::Fok).await;
 
         // Simulate a Filled event: full fill at price 0.85 for size 10
+        // Must use exit_oid to match the exit order in exit_orders_by_id
         let actions = strategy
-            .on_order_filled("token_up_fill", "token_up", dec!(0.85), dec!(10))
+            .on_order_filled(&exit_oid, "token_up", dec!(0.85), dec!(10))
             .await;
 
         // No further actions needed (fill handled internally)
@@ -4145,12 +3829,6 @@ mod tests {
             "exit_orders_by_id should be cleaned up after full fill"
         );
 
-        // pending_stop_loss should be cleaned up
-        let pending_sl = strategy.base.pending_stop_loss.read().await;
-        assert!(
-            !pending_sl.contains_key("token_up"),
-            "pending_stop_loss should be cleaned up after full fill"
-        );
     }
 
     /// Full exit fill (GTC) routes correctly: removes position and lifecycle,
@@ -4181,23 +3859,18 @@ mod tests {
             "Lifecycle should be removed after GTC full fill"
         );
 
-        // gtc_stop_loss_orders should be cleaned up
-        let gtc_sl = strategy.base.gtc_stop_loss_orders.read().await;
-        assert!(
-            !gtc_sl.contains_key(&exit_oid),
-            "GTC stop-loss order should be removed"
-        );
     }
 
     /// Partial exit fill (FOK) with remaining below min_order_size
     /// triggers dust detection and removes position.
     #[tokio::test]
     async fn lifecycle_partial_exit_fill_dust_removed() {
-        let (strategy, _exit_oid) = make_exit_fill_test_setup(OrderType::Fok).await;
+        let (strategy, exit_oid) = make_exit_fill_test_setup(OrderType::Fok).await;
 
         // Simulate partial FOK fill: 6 out of 10 filled, remaining=4 < min_order_size(5)
+        // Must use exit_oid to match the exit order in exit_orders_by_id
         let _actions = strategy
-            .on_order_filled("token_up_fill", "token_up", dec!(0.85), dec!(6))
+            .on_order_filled(&exit_oid, "token_up", dec!(0.85), dec!(6))
             .await;
 
         // Remaining 4 < min_order_size(5) — dust detection should remove position
@@ -4286,12 +3959,13 @@ mod tests {
             lifecycles.insert("token_up".to_string(), lifecycle);
         }
         {
-            let mut pending_sl = base.pending_stop_loss.write().await;
-            pending_sl.insert(
-                "token_up".to_string(),
-                PendingStopLoss {
-                    exit_price: dec!(0.85),
+            let mut exit_orders = base.exit_orders_by_id.write().await;
+            exit_orders.insert(
+                "exit-fok-1".to_string(),
+                ExitOrderMeta {
+                    token_id: "token_up".to_string(),
                     order_type: OrderType::Fok,
+                    source_state: "test".to_string(),
                 },
             );
         }
@@ -4299,8 +3973,9 @@ mod tests {
         let strategy = TailEndStrategy::new(base);
 
         // Simulate partial FOK fill: 12 out of 20
+        // Must use exit-fok-1 to match the exit order in exit_orders_by_id
         let _actions = strategy
-            .on_order_filled("token_up_fill", "token_up", dec!(0.85), dec!(12))
+            .on_order_filled("exit-fok-1", "token_up", dec!(0.85), dec!(12))
             .await;
 
         // Remaining = 20 - 12 = 8 > min_order_size(5) — should be in ResidualRisk
@@ -4559,17 +4234,6 @@ mod tests {
                 },
             );
         }
-        {
-            let mut pending_sl = base.pending_stop_loss.write().await;
-            pending_sl.insert(
-                "token_up".to_string(),
-                PendingStopLoss {
-                    exit_price: dec!(0.85),
-                    order_type: OrderType::Fok,
-                },
-            );
-        }
-
         let mut strategy = TailEndStrategy::new(base);
         let ctx = StrategyContext::new();
 
@@ -4612,11 +4276,5 @@ mod tests {
             "exit_orders_by_id should be cleaned up after rejection"
         );
 
-        // pending_stop_loss should be cleaned up
-        let pending_sl = strategy.base.pending_stop_loss.read().await;
-        assert!(
-            !pending_sl.contains_key("token_up"),
-            "pending_stop_loss should be cleaned up after rejection"
-        );
     }
 }

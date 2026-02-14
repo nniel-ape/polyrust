@@ -252,18 +252,18 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Run tests — must pass before task 17
 
 ### Task 17: Remove old stop-loss HashMaps
-- [ ] Remove `pending_stop_loss: RwLock<HashMap<TokenId, PendingStopLoss>>` from CryptoArbBase — replaced by lifecycle ExitExecuting state
-- [ ] Remove `stop_loss_cooldowns: RwLock<HashMap<TokenId, DateTime>>` — replaced by ResidualRisk.last_attempt and lifecycle timing
-- [ ] Remove `stop_loss_retry_counts: RwLock<HashMap<TokenId, u32>>` — replaced by ResidualRisk.retry_count
-- [ ] Remove `stop_loss_use_gtc: RwLock<HashSet<TokenId>>` — replaced by ResidualRisk.use_gtc_next
-- [ ] Remove `gtc_stop_loss_orders: RwLock<HashMap<OrderId, GtcStopLossOrder>>` — replaced by exit_orders_by_id
-- [ ] Remove `PendingStopLoss` and `GtcStopLossOrder` structs from types if no longer used
-- [ ] Remove `check_stop_loss()` method from base.rs (fully replaced by evaluate_triggers + lifecycle)
-- [ ] Remove `is_stop_loss_cooled_down()`, `record_stop_loss_cooldown()` if lifecycle handles this
-- [ ] Update any remaining references (TwoSided strategy?) — ensure TwoSided still compiles (it may use separate stop-loss logic or share base methods)
-- [ ] Write test: ensure no compilation errors
-- [ ] Run full `cargo test --workspace` — must pass
-- [ ] Run `cargo clippy --workspace -- -D warnings` — zero warnings
+- [x] Remove `pending_stop_loss: RwLock<HashMap<TokenId, PendingStopLoss>>` from CryptoArbBase — replaced by lifecycle ExitExecuting state
+- [x] Remove `stop_loss_cooldowns: RwLock<HashMap<TokenId, DateTime>>` — replaced by ResidualRisk.last_attempt and lifecycle timing
+- [x] Remove `stop_loss_retry_counts: RwLock<HashMap<TokenId, u32>>` — replaced by ResidualRisk.retry_count
+- [x] Remove `stop_loss_use_gtc: RwLock<HashSet<TokenId>>` — replaced by ResidualRisk.use_gtc_next
+- [x] Remove `gtc_stop_loss_orders: RwLock<HashMap<OrderId, GtcStopLossOrder>>` — replaced by exit_orders_by_id
+- [x] Remove `PendingStopLoss` and `GtcStopLossOrder` structs from types if no longer used
+- [x] Remove `check_stop_loss()` method from base.rs (fully replaced by evaluate_triggers + lifecycle)
+- [x] Remove `is_stop_loss_cooled_down()`, `record_stop_loss_cooldown()` if lifecycle handles this
+- [x] Update any remaining references (TwoSided strategy?) — ensure TwoSided still compiles (it may use separate stop-loss logic or share base methods)
+- [x] Write test: ensure no compilation errors
+- [x] Run full `cargo test --workspace` — must pass
+- [x] Run `cargo clippy --workspace -- -D warnings` — zero warnings
 
 ### Task 18: Verify acceptance criteria
 - [ ] Verify: trailing at entry 0.99 is automatically detected as unarmable (no 1.04 requirement)
