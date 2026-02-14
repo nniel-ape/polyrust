@@ -105,8 +105,8 @@ This prevents holding unhedged directional risk.
 ## Implementation Steps
 
 ### Task 1: Configuration and domain types
-- [ ] Create `crates/polyrust-strategies/src/dutch_book/mod.rs` with module declarations
-- [ ] Create `crates/polyrust-strategies/src/dutch_book/config.rs` with `DutchBookConfig`:
+- [x] Create `crates/polyrust-strategies/src/dutch_book/mod.rs` with module declarations
+- [x] Create `crates/polyrust-strategies/src/dutch_book/config.rs` with `DutchBookConfig`:
   - `enabled: bool` (default false)
   - `max_combined_cost: Decimal` (default 0.99 — fee buffer)
   - `min_profit_threshold: Decimal` (default 0.005 = 0.5%)
@@ -118,16 +118,16 @@ This prevents holding unhedged directional risk.
   - `unwind_discount: Decimal` (default 0.03 = sell at 97% on emergency unwind)
   - `unwind_settle_secs: u64` (default 5)
   - Implement `Default`, `Deserialize`, and `validate()` method
-- [ ] Create `crates/polyrust-strategies/src/dutch_book/types.rs`:
+- [x] Create `crates/polyrust-strategies/src/dutch_book/types.rs`:
   - `ArbitrageOpportunity { market_id, yes_ask, no_ask, combined_cost, profit_pct, max_size, detected_at }`
   - `PairedOrder { market_id, yes_order_id, no_order_id, size, submitted_at }`
   - `PairedPosition { market_id, yes_entry_price, no_entry_price, size, combined_cost, expected_profit, opened_at }`
   - `ExecutionState` enum: `AwaitingFills { yes_filled, no_filled }`, `BothFilled`, `PartialFill { filled_side, filled_order_id }`, `Unwinding { sell_order_id }`, `Complete`
   - `MarketEntry { market_id, token_a, token_b, neg_risk, end_date, liquidity }` — tracked market info
-- [ ] Add `pub mod dutch_book;` to `crates/polyrust-strategies/src/lib.rs`
-- [ ] Write tests for config validation (invalid thresholds, edge cases)
-- [ ] Write tests for type construction and state transitions
-- [ ] Run `cargo test -p polyrust-strategies` — must pass before next task
+- [x] Add `pub mod dutch_book;` to `crates/polyrust-strategies/src/lib.rs`
+- [x] Write tests for config validation (invalid thresholds, edge cases)
+- [x] Write tests for type construction and state transitions
+- [x] Run `cargo test -p polyrust-strategies` — must pass before next task
 
 ### Task 2: Market scanner (Gamma API discovery)
 - [ ] Create `crates/polyrust-strategies/src/dutch_book/scanner.rs` with `GammaScanner` struct
