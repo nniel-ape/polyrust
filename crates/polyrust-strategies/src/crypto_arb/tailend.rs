@@ -545,7 +545,7 @@ impl TailEndStrategy {
             fee_rate_bps: pending.fee_rate_bps,
             entry_order_type: pending.order_type,
             entry_fee_per_share,
-            realized_pnl: Decimal::ZERO,
+
         };
 
         info!(
@@ -1295,13 +1295,28 @@ impl TailEndStrategy {
         let sl_config = &self.base.config.stop_loss;
 
         // Get market metadata
-        let (neg_risk, min_order_size) = {
+        let (neg_risk, min_order_size, time_remaining) = {
             let markets = self.base.active_markets.read().await;
             match markets.get(&pos.market_id) {
-                Some(m) => (m.market.neg_risk, m.market.min_order_size),
+                Some(m) => (
+                    m.market.neg_risk,
+                    m.market.min_order_size,
+                    m.market.seconds_remaining_at(now),
+                ),
                 None => return None,
             }
         };
+
+        // Don't sell in final seconds — let position settle at expiry
+        if time_remaining <= sl_config.min_remaining_secs {
+            debug!(
+                token_id = %pos.token_id,
+                time_remaining,
+                min = sl_config.min_remaining_secs,
+                "ResidualRisk: skipping retry — market about to settle"
+            );
+            return None;
+        }
 
         // Dust detection: if remaining is below min_order_size, resolve
         if remaining_size < min_order_size {
@@ -2164,18 +2179,34 @@ impl Strategy for TailEndStrategy {
                     exit_orders.get(order_id).cloned()
                 };
                 if let Some(meta) = exit_meta {
-                    // Reduce position by the filled amount so subsequent
-                    // Cancelled/Filled handlers see the correct remaining size.
-                    self.base
-                        .reduce_or_remove_position_by_token(&meta.token_id, *filled_size)
-                        .await;
-                    info!(
-                        order_id = %order_id,
-                        token_id = %meta.token_id,
-                        filled = %filled_size,
-                        remaining = %remaining_size,
-                        "Exit order partially filled — position reduced"
-                    );
+                    let is_recovery = meta.source_state.starts_with("RecoveryProbe");
+
+                    if is_recovery {
+                        // Recovery orders buy the opposite side for set completion.
+                        // Do NOT reduce the original position — it still holds its tokens.
+                        info!(
+                            order_id = %order_id,
+                            token_id = %meta.token_id,
+                            filled = %filled_size,
+                            remaining = %remaining_size,
+                            "Recovery order partially filled — position unchanged"
+                        );
+                    } else {
+                        // Normal exit: reduce position by the filled amount so subsequent
+                        // Cancelled/Filled handlers see the correct remaining size.
+                        // P&L is deferred to the final Filled event (PartiallyFilled
+                        // does not carry a fill price).
+                        self.base
+                            .reduce_or_remove_position_by_token(&meta.token_id, *filled_size)
+                            .await;
+                        info!(
+                            order_id = %order_id,
+                            token_id = %meta.token_id,
+                            filled = %filled_size,
+                            remaining = %remaining_size,
+                            "Exit order partially filled — position reduced"
+                        );
+                    }
                 } else {
                     let mut limits = self.base.open_limit_orders.write().await;
                     if let Some(lo) = limits.get_mut(order_id) {
@@ -3066,7 +3097,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
-            realized_pnl: Decimal::ZERO,
+
         };
         base.record_position(pos).await;
 
@@ -3386,7 +3417,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
-            realized_pnl: Decimal::ZERO,
+
         };
         base.record_position(pos).await;
 
@@ -3558,7 +3589,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
-            realized_pnl: Decimal::ZERO,
+
         };
         base.record_position(pos.clone()).await;
 
@@ -3683,7 +3714,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
-            realized_pnl: Decimal::ZERO,
+
         };
         base.record_position(pos).await;
 
@@ -3796,7 +3827,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
-            realized_pnl: Decimal::ZERO,
+
         };
         base.record_position(pos).await;
 
@@ -3923,7 +3954,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
-            realized_pnl: Decimal::ZERO,
+
         };
         base.record_position(pos).await;
 
@@ -4115,7 +4146,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
-            realized_pnl: Decimal::ZERO,
+
         };
         base.record_position(pos).await;
 
@@ -4236,7 +4267,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
-            realized_pnl: Decimal::ZERO,
+
         };
         base.record_position(pos).await;
 
@@ -4383,7 +4414,7 @@ mod tests {
             fee_rate_bps: 0,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
-            realized_pnl: Decimal::ZERO,
+
         };
         base.record_position(pos).await;
 

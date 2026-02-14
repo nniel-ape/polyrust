@@ -203,8 +203,6 @@ pub struct ArbitragePosition {
     pub entry_order_type: OrderType,
     /// Actual fee per share at entry: 0 for GTC (maker), `taker_fee(price, rate)` for FOK.
     pub entry_fee_per_share: Decimal,
-    /// Accumulated realized P&L from partial exits (starts at 0).
-    pub realized_pnl: Decimal,
 }
 
 impl ArbitragePosition {
@@ -237,7 +235,6 @@ impl ArbitragePosition {
             fee_rate_bps: lo.fee_rate_bps,
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
-            realized_pnl: Decimal::ZERO,
         }
     }
 }
@@ -587,7 +584,6 @@ impl PositionLifecycleState {
                 | (ExitExecuting { .. }, ResidualRisk { .. })
                 | (ResidualRisk { .. }, ExitExecuting { .. })
                 | (ResidualRisk { .. }, RecoveryProbe { .. })
-                | (RecoveryProbe { .. }, ExitExecuting { .. })
                 | (RecoveryProbe { .. }, Cooldown { .. })
                 | (Cooldown { .. }, Healthy)
         )

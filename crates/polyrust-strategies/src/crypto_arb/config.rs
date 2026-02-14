@@ -301,16 +301,6 @@ pub struct StopLossConfig {
     /// Below this threshold, stop-losses are suppressed to avoid exiting
     /// positions that are about to settle. Default: 45.
     pub min_remaining_secs: i64,
-    /// Cooldown schedule for liquidity rejections ("couldn't be fully filled").
-    /// Fast retry since the issue is transient market depth.
-    /// Default: [1, 5, 15, 30] seconds (indexed by retry count).
-    #[serde(default = "default_liquidity_cooldowns")]
-    pub liquidity_cooldowns: Vec<u64>,
-    /// Cooldown schedule for balance/allowance rejections.
-    /// Longer cooldown since underlying issue may need settlement.
-    /// Default: [5, 15, 30, 60] seconds (indexed by retry count).
-    #[serde(default = "default_balance_cooldowns")]
-    pub balance_cooldowns: Vec<u64>,
     /// Enable GTC fallback after FOK liquidity rejection.
     /// After a FOK stop-loss sell is rejected for liquidity, the next attempt
     /// uses a GTC order resting below the current bid. Default: true.
@@ -374,13 +364,6 @@ pub struct StopLossConfig {
     pub reentry_cooldown_secs: i64,
 }
 
-fn default_liquidity_cooldowns() -> Vec<u64> {
-    vec![1, 5, 15, 30]
-}
-
-fn default_balance_cooldowns() -> Vec<u64> {
-    vec![5, 15, 30, 60]
-}
 
 impl Default for StopLossConfig {
     fn default() -> Self {
@@ -393,8 +376,6 @@ impl Default for StopLossConfig {
             trailing_min_distance: Decimal::new(15, 3), // 0.015
             stale_market_cooldown_secs: 120,
             min_remaining_secs: 45, // Suppress near-expiry exit (was 0)
-            liquidity_cooldowns: default_liquidity_cooldowns(),
-            balance_cooldowns: default_balance_cooldowns(),
             gtc_fallback: true,
             gtc_fallback_tick_offset: 1,
             gtc_stop_loss_max_age_secs: 2,
@@ -437,12 +418,6 @@ impl StopLossConfig {
         }
         if self.short_limit_refresh_secs < 1 {
             return Err("short_limit_refresh_secs must be >= 1".to_string());
-        }
-        if self.liquidity_cooldowns.is_empty() {
-            return Err("liquidity_cooldowns must not be empty".to_string());
-        }
-        if self.balance_cooldowns.is_empty() {
-            return Err("balance_cooldowns must not be empty".to_string());
         }
         if self.exit_depth_cap_factor <= Decimal::ZERO || self.exit_depth_cap_factor > Decimal::ONE
         {

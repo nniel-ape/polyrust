@@ -514,7 +514,7 @@ async fn base_can_open_position() {
                 fee_rate_bps: 0,
                 entry_order_type: OrderType::Gtc,
                 entry_fee_per_share: Decimal::ZERO,
-                realized_pnl: Decimal::ZERO,
+
             };
             positions
                 .entry(pos.market_id.clone())
@@ -1055,7 +1055,7 @@ fn make_position(
         fee_rate_bps: 0,
         entry_order_type: OrderType::Gtc,
         entry_fee_per_share: Decimal::ZERO,
-        realized_pnl: Decimal::ZERO,
+
     }
 }
 
@@ -1603,8 +1603,6 @@ fn stop_loss_config_new_field_defaults() {
     assert_eq!(config.trailing_min_distance, dec!(0.015));
     assert_eq!(config.stale_market_cooldown_secs, 120);
     assert_eq!(config.min_remaining_secs, 45);
-    assert_eq!(config.liquidity_cooldowns, vec![1, 5, 15, 30]);
-    assert_eq!(config.balance_cooldowns, vec![5, 15, 30, 60]);
     assert!(config.gtc_fallback);
     assert_eq!(config.gtc_fallback_tick_offset, 1);
     assert_eq!(config.gtc_stop_loss_max_age_secs, 2);
@@ -1624,8 +1622,6 @@ fn stop_loss_config_deserialize_missing_new_fields() {
     assert_eq!(config.trailing_min_distance, dec!(0.015));
     assert_eq!(config.stale_market_cooldown_secs, 120);
     assert_eq!(config.min_remaining_secs, 45);
-    assert_eq!(config.liquidity_cooldowns, vec![1, 5, 15, 30]);
-    assert_eq!(config.balance_cooldowns, vec![5, 15, 30, 60]);
     assert!(config.gtc_fallback);
 }
 
@@ -2689,17 +2685,6 @@ fn stop_loss_validate_short_limit_refresh_zero_errors() {
 }
 
 #[test]
-fn stop_loss_validate_empty_cooldowns_errors() {
-    let mut config = super::config::StopLossConfig::default();
-    config.liquidity_cooldowns = vec![];
-    assert!(config.validate().is_err());
-
-    let mut config = super::config::StopLossConfig::default();
-    config.balance_cooldowns = vec![];
-    assert!(config.validate().is_err());
-}
-
-#[test]
 fn stop_loss_validate_exit_depth_cap_factor_bounds() {
     // Zero is invalid
     let mut config = super::config::StopLossConfig::default();
@@ -2922,10 +2907,10 @@ fn lifecycle_deferred_exit_to_healthy() {
 }
 
 #[test]
-fn lifecycle_recovery_probe_to_exit_executing() {
+fn lifecycle_recovery_probe_to_exit_executing_is_invalid() {
     let t = now();
     let mut lc = PositionLifecycle::new();
-    // Walk through: Healthy -> ExitExecuting -> ResidualRisk -> RecoveryProbe -> ExitExecuting
+    // Walk through: Healthy -> ExitExecuting -> ResidualRisk -> RecoveryProbe
     lc.transition(
         PositionLifecycleState::ExitExecuting {
             order_id: "o1".into(),
@@ -2959,7 +2944,8 @@ fn lifecycle_recovery_probe_to_exit_executing() {
     )
     .unwrap();
 
-    // Recovery fails -> back to ExitExecuting
+    // RecoveryProbe -> ExitExecuting is not a valid transition;
+    // failed recovery resolves with loss instead of retrying exit.
     let result = lc.transition(
         PositionLifecycleState::ExitExecuting {
             order_id: "o2".into(),
@@ -2970,7 +2956,7 @@ fn lifecycle_recovery_probe_to_exit_executing() {
         "recovery failed",
         t,
     );
-    assert!(result.is_ok());
+    assert!(result.is_err());
 }
 
 #[test]
@@ -3253,7 +3239,7 @@ fn gtc_entry_has_zero_fee_per_share() {
 
     assert_eq!(pos.entry_order_type, OrderType::Gtc);
     assert_eq!(pos.entry_fee_per_share, Decimal::ZERO);
-    assert_eq!(pos.realized_pnl, Decimal::ZERO);
+
 }
 
 #[test]
@@ -3281,7 +3267,7 @@ fn fok_entry_has_computed_taker_fee_per_share() {
         fee_rate_bps: 315,
         entry_order_type: OrderType::Fok,
         entry_fee_per_share: expected_fee,
-        realized_pnl: Decimal::ZERO,
+
     };
 
     assert_eq!(pos.entry_order_type, OrderType::Fok);
@@ -3289,7 +3275,7 @@ fn fok_entry_has_computed_taker_fee_per_share() {
     assert!(pos.entry_fee_per_share > Decimal::ZERO);
     // At p=0.92: fee = 2 * 0.92 * 0.08 * 0.0315 = 0.0046368
     assert_eq!(pos.entry_fee_per_share, dec!(0.0046368));
-    assert_eq!(pos.realized_pnl, Decimal::ZERO);
+
 }
 
 #[test]
