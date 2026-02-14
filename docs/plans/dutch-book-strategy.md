@@ -185,25 +185,25 @@ This prevents holding unhedged directional risk.
 - [x] Run `cargo test -p polyrust-strategies` — must pass before next task
 
 ### Task 5: Paired execution tracking and emergency unwind
-- [ ] Implement execution state machine in strategy:
+- [x] Implement execution state machine in strategy:
   - On PlaceBatchOrder: create `PairedOrder` in `active_executions` with `ExecutionState::AwaitingFills`
   - On Filled for YES token: mark `yes_filled = true`, check if both filled
   - On Filled for NO token: mark `no_filled = true`, check if both filled
   - On both filled: move from `active_executions` to `open_positions` as `PairedPosition`, log success
   - On one cancelled + other filled: transition to `PartialFill` state
-- [ ] Implement emergency unwind logic:
+- [x] Implement emergency unwind logic:
   - On PartialFill detection: log warning with details
   - Calculate sell price: `filled_price * (1 - unwind_discount)` (default 97%)
   - Emit `PlaceOrder` (GTC, SELL, discounted price) for the filled side
   - Track unwind order ID in `ExecutionState::Unwinding`
   - On unwind fill: remove from `active_executions`, log realized loss
   - On unwind cancel/reject: log error, keep tracking (manual intervention may be needed)
-- [ ] Implement order-to-market mapping: maintain `HashMap<OrderId, MarketId>` to route fill/cancel events
-- [ ] Write tests for full execution lifecycle: both fill → PairedPosition
-- [ ] Write tests for partial fill → emergency unwind → sell filled
-- [ ] Write tests for both cancelled → clean removal
-- [ ] Write tests for unwind price calculation
-- [ ] Run `cargo test -p polyrust-strategies` — must pass before next task
+- [x] Implement order-to-market mapping: maintain `HashMap<OrderId, MarketId>` to route fill/cancel events
+- [x] Write tests for full execution lifecycle: both fill → PairedPosition
+- [x] Write tests for partial fill → emergency unwind → sell filled
+- [x] Write tests for both cancelled → clean removal
+- [x] Write tests for unwind price calculation
+- [x] Run `cargo test -p polyrust-strategies` — must pass before next task
 
 ### Task 6: Dashboard view
 - [ ] Create `crates/polyrust-strategies/src/dutch_book/dashboard.rs` with `DutchBookDashboard`

@@ -12,7 +12,9 @@ use polyrust_core::prelude::*;
 use super::analyzer::ArbitrageAnalyzer;
 use super::config::DutchBookConfig;
 use super::scanner::GammaScanner;
-use super::types::{ArbitrageOpportunity, ExecutionState, PairedOrder, PairedPosition};
+use super::types::{
+    ArbitrageOpportunity, ExecutionState, FilledSide, PairedOrder, PairedPosition,
+};
 
 /// Dutch Book arbitrage strategy.
 ///
@@ -160,6 +162,8 @@ impl DutchBookStrategy {
             size: opp.max_size,
             submitted_at: now,
             state: ExecutionState::new(),
+            yes_fill_price: None,
+            no_fill_price: None,
         };
 
         self.active_executions.insert(opp.market_id.clone(), paired);
@@ -201,12 +205,26 @@ impl DutchBookStrategy {
         };
 
         if let Some(exec) = self.active_executions.get_mut(&market_id) {
-            if result.token_id == entry.token_a {
-                exec.yes_order_id = order_id.clone();
-            } else if result.token_id == entry.token_b {
-                exec.no_order_id = order_id.clone();
+            // Check if this is an unwind sell order (execution in PartialFill state + SELL side)
+            if exec.state.needs_unwind() && result.side == OrderSide::Sell {
+                exec.state = exec.state.clone().start_unwind(order_id.clone());
+                self.order_to_market
+                    .insert(order_id, market_id.clone());
+                debug!(
+                    %market_id,
+                    state = ?exec.state,
+                    "Unwind sell order placed"
+                );
+            } else {
+                // Normal batch order placement
+                if result.token_id == entry.token_a {
+                    exec.yes_order_id = order_id.clone();
+                } else if result.token_id == entry.token_b {
+                    exec.no_order_id = order_id.clone();
+                }
+                self.order_to_market
+                    .insert(order_id, market_id);
             }
-            self.order_to_market.insert(order_id, market_id);
         }
 
         vec![]
@@ -220,6 +238,11 @@ impl DutchBookStrategy {
         price: Decimal,
         size: Decimal,
     ) -> Vec<Action> {
+        // Check if this is an unwind order fill
+        if let Some(actions) = self.handle_unwind_order_event(order_id, true) {
+            return actions;
+        }
+
         let market_id = match self.order_to_market.get(order_id) {
             Some(mid) => mid.clone(),
             None => return vec![],
@@ -235,8 +258,13 @@ impl DutchBookStrategy {
             None => return vec![],
         };
 
-        // Determine which side filled
+        // Determine which side filled and record fill price
         let is_yes_side = token_id == entry.token_a;
+        if is_yes_side {
+            exec.yes_fill_price = Some(price);
+        } else {
+            exec.no_fill_price = Some(price);
+        }
         let new_state = if is_yes_side {
             exec.state.clone().fill_yes()
         } else {
@@ -266,9 +294,18 @@ impl DutchBookStrategy {
             None => return vec![],
         };
 
+        let yes_price = exec.yes_fill_price.unwrap_or(Decimal::ZERO);
+        let no_price = exec.no_fill_price.unwrap_or(Decimal::ZERO);
+        let combined_cost = (yes_price + no_price) * exec.size;
+        let expected_profit = exec.size - combined_cost;
+
         info!(
             %market_id,
             size = %exec.size,
+            %yes_price,
+            %no_price,
+            %combined_cost,
+            %expected_profit,
             "Dutch Book paired position opened — both sides filled"
         );
 
@@ -276,13 +313,22 @@ impl DutchBookStrategy {
         self.order_to_market.remove(&exec.yes_order_id);
         self.order_to_market.remove(&exec.no_order_id);
 
-        // For now, we don't create a PairedPosition because we don't have
-        // the actual fill prices. That will be handled in Task 5.
-        // Instead, just emit a log.
+        let position = PairedPosition {
+            market_id: market_id.to_string(),
+            yes_entry_price: yes_price,
+            no_entry_price: no_price,
+            size: exec.size,
+            combined_cost,
+            expected_profit,
+            opened_at: Utc::now(),
+        };
+        self.open_positions
+            .insert(market_id.to_string(), position);
+
         vec![Action::Log {
             level: LogLevel::Info,
             message: format!(
-                "Dutch Book position opened for market {market_id} (size: {})",
+                "Dutch Book position opened for market {market_id} (size: {}, cost: {combined_cost}, profit: {expected_profit})",
                 exec.size
             ),
         }]
@@ -290,6 +336,11 @@ impl DutchBookStrategy {
 
     /// Handle an order cancellation — update execution state, trigger unwind if needed.
     pub(crate) fn handle_order_cancelled(&mut self, order_id: &str) -> Vec<Action> {
+        // Check if this is an unwind order completion (cancel/timeout of sell)
+        if let Some(actions) = self.handle_unwind_order_event(order_id, false) {
+            return actions;
+        }
+
         let market_id = match self.order_to_market.get(order_id) {
             Some(mid) => mid.clone(),
             None => return vec![],
@@ -325,16 +376,134 @@ impl DutchBookStrategy {
             return vec![];
         }
 
-        // If partial fill, we need emergency unwind (handled in Task 5)
+        // If partial fill, trigger emergency unwind
         if exec.state.needs_unwind() {
-            warn!(
-                %market_id,
-                state = ?exec.state,
-                "Partial fill detected — emergency unwind needed (Task 5)"
-            );
+            return self.start_emergency_unwind(&market_id.clone());
         }
 
         vec![]
+    }
+
+    /// Start emergency unwind for a partially-filled paired order.
+    ///
+    /// Sells the filled side at a discounted price (buy_price * (1 - unwind_discount))
+    /// using a GTC order to avoid holding unhedged directional risk.
+    fn start_emergency_unwind(&mut self, market_id: &str) -> Vec<Action> {
+        let exec = match self.active_executions.get(market_id) {
+            Some(e) => e,
+            None => return vec![],
+        };
+
+        let (filled_side, filled_token_id, fill_price) = match &exec.state {
+            ExecutionState::PartialFill {
+                filled_side,
+                filled_order_id: _,
+            } => {
+                let entry = match self.analyzer.market_for_token(&exec.yes_order_id) {
+                    Some(e) => e,
+                    None => {
+                        // Try looking up by market_id from tracked_markets
+                        match self.analyzer.market_for_market_id(market_id) {
+                            Some(e) => e,
+                            None => return vec![],
+                        }
+                    }
+                };
+                let (token_id, price) = match filled_side {
+                    FilledSide::Yes => (
+                        entry.token_a.clone(),
+                        exec.yes_fill_price.unwrap_or(Decimal::ZERO),
+                    ),
+                    FilledSide::No => (
+                        entry.token_b.clone(),
+                        exec.no_fill_price.unwrap_or(Decimal::ZERO),
+                    ),
+                };
+                (filled_side.clone(), token_id, price)
+            }
+            _ => return vec![],
+        };
+
+        // Calculate sell price: fill_price * (1 - unwind_discount)
+        let sell_price = fill_price * (Decimal::ONE - self.config.unwind_discount);
+
+        warn!(
+            %market_id,
+            ?filled_side,
+            %fill_price,
+            %sell_price,
+            size = %exec.size,
+            "Emergency unwind: selling filled side at discounted price"
+        );
+
+        let entry = match self.analyzer.market_for_market_id(market_id) {
+            Some(e) => e.clone(),
+            None => return vec![],
+        };
+
+        // Build GTC SELL order for the filled side
+        let sell_order = OrderRequest::new(
+            filled_token_id,
+            sell_price,
+            exec.size,
+            OrderSide::Sell,
+            OrderType::Gtc,
+            entry.neg_risk,
+        );
+
+        vec![Action::PlaceOrder(sell_order)]
+    }
+
+    /// Handle a fill or cancel event for an unwind order.
+    /// Returns Some(actions) if the order_id matched an unwinding execution, None otherwise.
+    fn handle_unwind_order_event(&mut self, order_id: &str, is_fill: bool) -> Option<Vec<Action>> {
+        // Find which execution is in Unwinding state with this sell_order_id
+        let market_id = {
+            let mut found = None;
+            for (mid, exec) in &self.active_executions {
+                if let ExecutionState::Unwinding { sell_order_id } = &exec.state {
+                    if sell_order_id == order_id {
+                        found = Some(mid.clone());
+                        break;
+                    }
+                }
+            }
+            found?
+        };
+
+        if is_fill {
+            // Unwind complete — clean up
+            let exec = self.active_executions.remove(&market_id)?;
+            self.order_to_market.remove(&exec.yes_order_id);
+            self.order_to_market.remove(&exec.no_order_id);
+            self.order_to_market.remove(order_id);
+
+            let loss = match (&exec.yes_fill_price, &exec.no_fill_price) {
+                (Some(p), None) => p * exec.size * self.config.unwind_discount,
+                (None, Some(p)) => p * exec.size * self.config.unwind_discount,
+                _ => Decimal::ZERO,
+            };
+
+            info!(
+                %market_id,
+                %loss,
+                "Emergency unwind complete — realized loss"
+            );
+
+            Some(vec![Action::Log {
+                level: LogLevel::Warn,
+                message: format!(
+                    "Dutch Book unwind for market {market_id}: ~{loss} USDC loss"
+                ),
+            }])
+        } else {
+            // Unwind order cancelled/rejected — log error, keep tracking
+            warn!(
+                %market_id, %order_id,
+                "Emergency unwind order cancelled — manual intervention may be needed"
+            );
+            Some(vec![])
+        }
     }
 
     /// Handle a market expiration event.

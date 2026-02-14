@@ -70,6 +70,11 @@ impl ArbitrageAnalyzer {
             .and_then(|mid| self.tracked_markets.get(mid))
     }
 
+    /// Look up a market entry by its market (condition) ID.
+    pub fn market_for_market_id(&self, market_id: &str) -> Option<&MarketEntry> {
+        self.tracked_markets.get(market_id)
+    }
+
     /// Check for an arbitrage opportunity triggered by an orderbook update.
     ///
     /// Given the token_id that just received an update, looks up the parent

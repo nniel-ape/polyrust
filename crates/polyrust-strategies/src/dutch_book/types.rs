@@ -37,6 +37,10 @@ pub struct PairedOrder {
     pub submitted_at: DateTime<Utc>,
     /// Current execution state
     pub state: ExecutionState,
+    /// Fill price for the YES side (set when filled)
+    pub yes_fill_price: Option<Decimal>,
+    /// Fill price for the NO side (set when filled)
+    pub no_fill_price: Option<Decimal>,
 }
 
 /// A fully filled paired position awaiting market resolution.
