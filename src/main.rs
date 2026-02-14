@@ -13,15 +13,18 @@ use polyrust_market::{
 };
 use polyrust_store::Store;
 use polyrust_strategies::{
-    ArbitrageConfig, CryptoArbBase, CryptoArbDashboard, ReferenceQualityLevel, TailEndStrategy,
+    ArbitrageConfig, CryptoArbBase, CryptoArbDashboard, DutchBookConfig, DutchBookDashboard,
+    DutchBookState, DutchBookStrategy, ReferenceQualityLevel, TailEndStrategy,
 };
 use serde::Deserialize;
 
-/// Wrapper to extract backtest and arbitrage configs from TOML file.
+/// Wrapper to extract backtest, arbitrage, and dutch book configs from TOML file.
 #[derive(Debug, Deserialize, Default)]
 struct ConfigWrapper {
     #[serde(default)]
     arbitrage: ArbitrageConfig,
+    #[serde(default)]
+    dutch_book: DutchBookConfig,
     #[serde(default)]
     backtest: Option<BacktestConfig>,
 }
@@ -128,13 +131,13 @@ async fn main() -> anyhow::Result<()> {
     info!("polyrust starting");
 
     // Load configuration — parse errors are fatal (silent defaults are dangerous for live trading)
-    let (config, arb_config) = match std::fs::read_to_string("config.toml") {
+    let (config, arb_config, dutch_book_config) = match std::fs::read_to_string("config.toml") {
         Ok(contents) => {
             let config: Config = toml::from_str(&contents)
                 .map_err(|e| anyhow::anyhow!("failed to parse config.toml: {e}"))?;
             let wrapper: ConfigWrapper = toml::from_str(&contents)
                 .map_err(|e| anyhow::anyhow!("failed to parse config.toml: {e}"))?;
-            (config, wrapper.arbitrage)
+            (config, wrapper.arbitrage, wrapper.dutch_book)
         }
         Err(e) => {
             return Err(anyhow::anyhow!(
@@ -205,11 +208,31 @@ async fn main() -> anyhow::Result<()> {
         info!("Arbitrage strategy disabled — running in dashboard-only mode");
     }
 
-    // Always register dashboard
+    // Always register crypto-arb dashboard
     builder = builder.strategy(DashboardStrategyWrapper::new(
         "crypto-arb-dashboard",
         Box::new(CryptoArbDashboard::new(Arc::clone(&base))),
     ));
+
+    // Conditionally register Dutch Book strategy
+    if dutch_book_config.enabled {
+        if let Err(e) = dutch_book_config.validate() {
+            return Err(anyhow::anyhow!("Invalid dutch_book config: {}", e));
+        }
+
+        info!("Dutch Book strategy enabled");
+        let dutch_book_state = Arc::new(tokio::sync::RwLock::new(DutchBookState::new()));
+        builder = builder.strategy(DutchBookStrategy::with_shared_state(
+            dutch_book_config,
+            Arc::clone(&dutch_book_state),
+        ));
+        builder = builder.strategy(DashboardStrategyWrapper::new(
+            "dutch-book-dashboard",
+            Box::new(DutchBookDashboard::new(dutch_book_state)),
+        ));
+    } else {
+        info!("Dutch Book strategy disabled");
+    }
 
     let mut engine = builder.build().await?;
 
@@ -722,6 +745,14 @@ async fn run_backtest() -> anyhow::Result<()> {
         "crypto-arb-tailend" => {
             let base = Arc::new(CryptoArbBase::new(arb_config.clone(), vec![]));
             Box::new(TailEndStrategy::new(base))
+        }
+        "dutch-book" => {
+            let wrapper: ConfigWrapper = toml::from_str(
+                &std::fs::read_to_string("config.toml")
+                    .map_err(|e| anyhow::anyhow!("config.toml read error: {e}"))?,
+            )
+            .map_err(|e| anyhow::anyhow!("config.toml parse error: {e}"))?;
+            Box::new(DutchBookStrategy::new(wrapper.dutch_book))
         }
         other => {
             return Err(anyhow::anyhow!("Unknown strategy name: {}", other));

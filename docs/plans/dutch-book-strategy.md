@@ -220,17 +220,17 @@ This prevents holding unhedged directional risk.
 - [x] Run `cargo test -p polyrust-strategies` — must pass before next task
 
 ### Task 7: Integration (main.rs, config, registration)
-- [ ] Add `DutchBookConfig` to `ConfigWrapper` in `src/main.rs` with `#[serde(default)]`
-- [ ] Add `[dutch_book]` section to `config.example.toml` with all parameters documented
-- [ ] Register strategy in `main.rs`:
+- [x] Add `DutchBookConfig` to `ConfigWrapper` in `src/main.rs` with `#[serde(default)]`
+- [x] Add `[dutch_book]` section to `config.example.toml` with all parameters documented
+- [x] Register strategy in `main.rs`:
   - Create shared state (`Arc<RwLock<DutchBookState>>`)
   - Instantiate `DutchBookStrategy` if `dutch_book_config.enabled`
   - Register with `builder.strategy(...)`
   - Register `DutchBookDashboard` via `DashboardStrategyWrapper`
-- [ ] Add strategy name `"dutch-book"` to backtest strategy matching in `main.rs` backtest section
-- [ ] Write integration test: create strategy with default config, send mock events, verify actions
-- [ ] Run `cargo test --workspace` — must pass before next task
-- [ ] Run `cargo clippy --workspace -- -D warnings` — must pass
+- [x] Add strategy name `"dutch-book"` to backtest strategy matching in `main.rs` backtest section
+- [x] Write integration test: create strategy with default config, send mock events, verify actions
+- [x] Run `cargo test --workspace` — must pass before next task
+- [x] Run `cargo clippy --workspace -- -D warnings` — must pass
 
 ### Task 8: Verify acceptance criteria
 - [ ] Verify all requirements from Overview are implemented:

@@ -2463,3 +2463,129 @@ async fn strategy_syncs_state_to_dashboard() {
     assert_eq!(state.positions.len(), 1);
     assert_eq!(state.positions[0].market_id, "m1");
 }
+
+// ---------------------------------------------------------------------------
+// Task 7: Integration tests (config wrapper, end-to-end with default config)
+// ---------------------------------------------------------------------------
+
+/// Verify that DutchBookConfig is correctly parsed from a full TOML config
+/// (matching the ConfigWrapper pattern used in main.rs).
+#[test]
+fn config_wrapper_parses_dutch_book_section() {
+    #[derive(Debug, serde::Deserialize, Default)]
+    struct TestConfigWrapper {
+        #[serde(default)]
+        dutch_book: DutchBookConfig,
+    }
+
+    let toml_str = r#"
+        [dutch_book]
+        enabled = true
+        max_combined_cost = 0.98
+        min_profit_threshold = 0.01
+        max_position_size = 50
+        max_concurrent_positions = 5
+    "#;
+
+    let wrapper: TestConfigWrapper = toml::from_str(toml_str).unwrap();
+    assert!(wrapper.dutch_book.enabled);
+    assert_eq!(wrapper.dutch_book.max_combined_cost, dec!(0.98));
+    assert_eq!(wrapper.dutch_book.min_profit_threshold, dec!(0.01));
+    assert_eq!(wrapper.dutch_book.max_position_size, dec!(50));
+    assert_eq!(wrapper.dutch_book.max_concurrent_positions, 5);
+    // Non-specified fields should be defaults
+    assert_eq!(wrapper.dutch_book.min_liquidity_usd, dec!(10000));
+    assert_eq!(wrapper.dutch_book.scan_interval_secs, 600);
+    assert!(wrapper.dutch_book.validate().is_ok());
+}
+
+/// Verify that DutchBookConfig defaults when [dutch_book] section is absent.
+#[test]
+fn config_wrapper_defaults_when_section_absent() {
+    #[derive(Debug, serde::Deserialize, Default)]
+    struct TestConfigWrapper {
+        #[serde(default)]
+        dutch_book: DutchBookConfig,
+    }
+
+    let toml_str = r#"
+        [some_other_section]
+        key = "value"
+    "#;
+
+    let wrapper: TestConfigWrapper = toml::from_str(toml_str).unwrap();
+    assert!(!wrapper.dutch_book.enabled);
+    assert_eq!(wrapper.dutch_book.max_combined_cost, dec!(0.99));
+    assert!(wrapper.dutch_book.validate().is_ok());
+}
+
+/// End-to-end integration: create strategy with default config, send mock
+/// events through on_event, verify actions.
+#[tokio::test]
+async fn integration_default_config_event_flow() {
+    let config = DutchBookConfig {
+        max_combined_cost: dec!(0.99),
+        min_profit_threshold: dec!(0.005),
+        max_position_size: dec!(100),
+        max_concurrent_positions: 5,
+        ..DutchBookConfig::default()
+    };
+    let shared_state = Arc::new(RwLock::new(DutchBookState::new()));
+    let mut strategy =
+        DutchBookStrategy::with_shared_state(config, Arc::clone(&shared_state));
+
+    let ctx = StrategyContext::new();
+
+    // No-op event produces no actions (just drains empty pending queue)
+    let actions = strategy
+        .on_event(&Event::System(SystemEvent::EngineStarted), &ctx)
+        .await
+        .unwrap();
+    assert!(actions.is_empty());
+
+    // Add a market and populate orderbooks with an arbitrage opportunity
+    let market = make_market_info("int_market", "int_yes", "int_no");
+    strategy.analyzer.add_market(&market);
+    {
+        let mut md = ctx.market_data.write().await;
+        md.orderbooks.insert(
+            "int_yes".to_string(),
+            make_orderbook("int_yes", dec!(0.47), dec!(200)),
+        );
+        md.orderbooks.insert(
+            "int_no".to_string(),
+            make_orderbook("int_no", dec!(0.48), dec!(200)),
+        );
+    }
+
+    // Orderbook update triggers opportunity detection
+    let snapshot = make_orderbook("int_yes", dec!(0.47), dec!(200));
+    let event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+    let actions = strategy.on_event(&event, &ctx).await.unwrap();
+    assert_eq!(actions.len(), 1);
+    match &actions[0] {
+        Action::PlaceBatchOrder(orders) => {
+            assert_eq!(orders.len(), 2);
+            assert_eq!(orders[0].side, OrderSide::Buy);
+            assert_eq!(orders[1].side, OrderSide::Buy);
+            assert_eq!(orders[0].order_type, OrderType::Fok);
+            assert_eq!(orders[1].order_type, OrderType::Fok);
+        }
+        other => panic!("Expected PlaceBatchOrder, got {:?}", other),
+    }
+
+    // Dashboard state should have recorded the opportunity
+    let state = shared_state.read().await;
+    assert_eq!(state.total_opportunities, 1);
+    assert_eq!(state.recent_opportunities.len(), 1);
+    // Tracked markets synced
+    assert_eq!(state.tracked_markets, 1);
+}
+
+/// Strategy name matches what main.rs expects for registration and backtest matching.
+#[test]
+fn integration_strategy_name_matches_expected() {
+    let config = DutchBookConfig::default();
+    let strategy = DutchBookStrategy::new(config);
+    assert_eq!(strategy.name(), "dutch-book");
+}
