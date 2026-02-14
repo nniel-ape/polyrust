@@ -419,6 +419,48 @@ impl CryptoArbDashboard {
 // TailEnd skip-reason bar chart
 // ---------------------------------------------------------------------------
 
+/// Map internal skip-reason key → (human label, tooltip description).
+fn skip_reason_info(key: &str) -> (&str, &str) {
+    match key {
+        "time_window" => (
+            "Time window",
+            "Market not in the final 0\u{2013}120s before expiry",
+        ),
+        "coin_not_near_expiry" => ("No expiry soon", "No market expiring soon for this coin"),
+        "no_ask" => ("No liquidity", "No ask in orderbook for predicted side"),
+        "stale_ob" => ("Stale orderbook", "Orderbook data too old to trust"),
+        "spread" => ("Wide spread", "Bid-ask spread too wide (illiquid)"),
+        "ref_quality" => ("Low ref quality", "Reference price quality below threshold"),
+        "no_prediction" => (
+            "No prediction",
+            "Price equals reference \u{2014} no directional signal",
+        ),
+        "threshold" => (
+            "Below threshold",
+            "Ask price below dynamic confidence threshold",
+        ),
+        "sustained" => ("Not sustained", "Price direction not held long enough"),
+        "volatility" => ("High volatility", "Recent price too choppy"),
+        "strike_proximity" => ("Near strike", "Crypto price too close to strike price"),
+        "stale_cooldown" => ("Stale cooldown", "Market on cooldown after stale data"),
+        "rejection_cooldown" => (
+            "Rejection cooldown",
+            "Market on cooldown after order rejection",
+        ),
+        "recovery_cooldown" => (
+            "Recovery cooldown",
+            "Market on cooldown after recovery exit",
+        ),
+        "reservation" => (
+            "Reserved/maxed",
+            "Market reserved, has exposure, or max positions",
+        ),
+        "auto_disabled" => ("Auto-disabled", "Mode disabled by performance tracker"),
+        "composite_stale" => ("Stale composite", "Composite reference price too old"),
+        other => (other, ""),
+    }
+}
+
 /// Group definition for skip reasons.
 struct SkipGroup {
     label: &'static str,
@@ -506,10 +548,12 @@ fn render_skip_stats(base: &CryptoArbBase, html: &mut String) {
 
         for (reason, count) in &rows {
             let width_pct = (*count as f64 / max_count as f64) * 100.0;
+            let (label, tooltip) = skip_reason_info(reason);
             let _ = write!(
                 html,
-                r#"<div class="bp-skip-row"><span class="bp-skip-label">{reason}</span><div class="bp-skip-bar-track"><div class="bp-skip-bar-fill bp-skip-bar-fill--{suffix}" style="width:{width:.1}%"></div></div><span class="bp-skip-count">{count}</span></div>"#,
-                reason = reason,
+                r#"<div class="bp-skip-row"><span class="bp-skip-label" title="{tooltip}">{label}</span><div class="bp-skip-bar-track"><div class="bp-skip-bar-fill bp-skip-bar-fill--{suffix}" style="width:{width:.1}%"></div></div><span class="bp-skip-count">{count}</span></div>"#,
+                tooltip = tooltip,
+                label = label,
                 suffix = group.css_suffix,
                 width = width_pct,
                 count = count,
