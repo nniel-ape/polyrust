@@ -300,23 +300,29 @@ impl TailEndStrategy {
                 let exit_orders = self.base.exit_orders_by_id.read().await;
                 exit_orders
                     .iter()
-                    .find(|(_, meta)| meta.token_id == result.token_id)
+                    .find(|(_, meta)| meta.order_token_id == result.token_id)
                     .map(|(k, _)| k.clone())
             };
             if let Some(syn_key) = synthetic_key {
                 if result.success {
                     if let Some(real_oid) = &result.order_id {
-                        // Re-key exit_orders_by_id: synthetic → real CLOB order ID
-                        {
+                        // Re-key exit_orders_by_id: synthetic → real CLOB order ID.
+                        // Extract position token from meta (differs from result.token_id
+                        // for recovery orders which use the opposite token).
+                        let position_token = {
                             let mut exit_orders = self.base.exit_orders_by_id.write().await;
                             if let Some(meta) = exit_orders.remove(&syn_key) {
+                                let pt = meta.token_id.clone();
                                 exit_orders.insert(real_oid.clone(), meta);
+                                pt
+                            } else {
+                                result.token_id.clone()
                             }
-                        }
+                        };
                         // Update lifecycle state with real order ID
                         {
                             let mut lifecycles = self.base.position_lifecycle.write().await;
-                            if let Some(lc) = lifecycles.get_mut(&result.token_id) {
+                            if let Some(lc) = lifecycles.get_mut(&position_token) {
                                 lc.pending_exit_order_id = Some(real_oid.clone());
                                 if let PositionLifecycleState::ExitExecuting {
                                     ref mut order_id, ..
@@ -327,11 +333,57 @@ impl TailEndStrategy {
                             }
                         }
                         info!(
-                            token_id = %result.token_id,
+                            token_id = %position_token,
                             real_order_id = %real_oid,
                             synthetic_id = %syn_key,
                             "TailEnd exit order placed, re-keyed to real CLOB ID"
                         );
+                    } else {
+                        // Success but no order ID — treat as failure to prevent
+                        // lifecycle getting permanently stuck in ExitExecuting.
+                        warn!(
+                            token_id = %result.token_id,
+                            synthetic_id = %syn_key,
+                            "Exit order placed successfully but no order ID returned — treating as failure"
+                        );
+                        let meta = {
+                            let mut exit_orders = self.base.exit_orders_by_id.write().await;
+                            exit_orders.remove(&syn_key)
+                        };
+                        let position_token = meta
+                            .as_ref()
+                            .map(|m| m.token_id.clone())
+                            .unwrap_or_else(|| result.token_id.clone());
+                        let prior_retry = meta.as_ref().map(|m| m.retry_count).unwrap_or(0);
+                        let now = self.base.event_time().await;
+                        let remaining = {
+                            let positions = self.base.positions.read().await;
+                            positions
+                                .values()
+                                .flat_map(|v| v.iter())
+                                .find(|p| p.token_id == position_token)
+                                .map(|p| p.size)
+                                .unwrap_or(Decimal::ZERO)
+                        };
+                        let mut lifecycle = self.base.ensure_lifecycle(&position_token).await;
+                        lifecycle.pending_exit_order_id = None;
+                        if let Err(e) = lifecycle.transition(
+                            PositionLifecycleState::ResidualRisk {
+                                remaining_size: remaining,
+                                retry_count: prior_retry + 1,
+                                last_attempt: now,
+                                use_gtc_next: true,
+                            },
+                            "exit order placed with no order ID",
+                            now,
+                        ) {
+                            warn!(
+                                token_id = %position_token,
+                                error = %e,
+                                "Failed to transition to ResidualRisk after missing order ID"
+                            );
+                        }
+                        self.write_lifecycle(&position_token, &lifecycle).await;
                     }
                 } else {
                     // Placement failed — read meta before removing, then handle
@@ -341,8 +393,14 @@ impl TailEndStrategy {
                         exit_orders.remove(&syn_key)
                     };
                     let prior_retry = meta.as_ref().map(|m| m.retry_count).unwrap_or(0);
+                    // Use the position's token_id from meta (not result.token_id,
+                    // which is the order token — differs for recovery orders).
+                    let position_token = meta
+                        .as_ref()
+                        .map(|m| m.token_id.clone())
+                        .unwrap_or_else(|| result.token_id.clone());
                     let now = self.base.event_time().await;
-                    let mut lifecycle = self.base.ensure_lifecycle(&result.token_id).await;
+                    let mut lifecycle = self.base.ensure_lifecycle(&position_token).await;
                     lifecycle.pending_exit_order_id = None;
 
                     if matches!(lifecycle.state, PositionLifecycleState::RecoveryProbe { .. }) {
@@ -353,11 +411,11 @@ impl TailEndStrategy {
                             positions
                                 .values()
                                 .flat_map(|v| v.iter())
-                                .find(|p| p.token_id == result.token_id)
+                                .find(|p| p.token_id == position_token)
                                 .map(|p| (p.size, p.market_id.clone()))
                         };
                         warn!(
-                            token_id = %result.token_id,
+                            token_id = %position_token,
                             message = %result.message,
                             remaining = ?pos_info.as_ref().map(|(s, _)| s),
                             "Recovery order placement failed — resolving position with loss"
@@ -365,10 +423,10 @@ impl TailEndStrategy {
                         if let Some((remaining, market_id)) = pos_info {
                             self.base.record_recovery_exit_cooldown(&market_id).await;
                             self.base
-                                .reduce_or_remove_position_by_token(&result.token_id, remaining)
+                                .reduce_or_remove_position_by_token(&position_token, remaining)
                                 .await;
                         }
-                        self.base.remove_lifecycle(&result.token_id).await;
+                        self.base.remove_lifecycle(&position_token).await;
                     } else {
                         // ExitExecuting placement failed — transition to ResidualRisk
                         // so the system retries on the next orderbook update.
@@ -377,7 +435,7 @@ impl TailEndStrategy {
                             positions
                                 .values()
                                 .flat_map(|v| v.iter())
-                                .find(|p| p.token_id == result.token_id)
+                                .find(|p| p.token_id == position_token)
                                 .map(|p| p.size)
                                 .unwrap_or(Decimal::ZERO)
                         };
@@ -392,14 +450,14 @@ impl TailEndStrategy {
                             now,
                         ) {
                             warn!(
-                                token_id = %result.token_id,
+                                token_id = %position_token,
                                 error = %e,
                                 "Failed to transition to ResidualRisk after placement failure"
                             );
                         }
-                        self.write_lifecycle(&result.token_id, &lifecycle).await;
+                        self.write_lifecycle(&position_token, &lifecycle).await;
                         warn!(
-                            token_id = %result.token_id,
+                            token_id = %position_token,
                             message = %result.message,
                             retry_count = prior_retry + 1,
                             "Exit order placement failed, transitioned to ResidualRisk"
@@ -1183,6 +1241,7 @@ impl TailEndStrategy {
                 exit_order_id,
                 ExitOrderMeta {
                     token_id: pos.token_id.clone(),
+                    order_token_id: pos.token_id.clone(),
                     order_type: OrderType::Fok,
                     source_state: format!("{trigger_kind}"),
                     retry_count: 0,
@@ -1400,6 +1459,7 @@ impl TailEndStrategy {
                     exit_order_id.clone(),
                     ExitOrderMeta {
                         token_id: pos.token_id.clone(),
+                        order_token_id: pos.token_id.clone(),
                         order_type: OrderType::Gtc,
                         source_state: format!("ResidualRisk(retry={retry_count})"),
                         retry_count,
@@ -1453,6 +1513,7 @@ impl TailEndStrategy {
                 exit_order_id,
                 ExitOrderMeta {
                     token_id: pos.token_id.clone(),
+                    order_token_id: pos.token_id.clone(),
                     order_type: OrderType::Fok,
                     source_state: format!("ResidualRisk(retry={retry_count})"),
                     retry_count,
@@ -1580,6 +1641,7 @@ impl TailEndStrategy {
                 recovery_order_id,
                 ExitOrderMeta {
                     token_id: pos.token_id.clone(),
+                    order_token_id: opposite_token.clone(),
                     order_type: OrderType::Fok,
                     source_state: "RecoveryProbe(set_completion)".to_string(),
                     retry_count: 0,
@@ -1731,6 +1793,7 @@ impl TailEndStrategy {
                 recovery_order_id,
                 ExitOrderMeta {
                     token_id: pos.token_id.clone(),
+                    order_token_id: opposite_token.clone(),
                     order_type: OrderType::Fok,
                     source_state: "RecoveryProbe(opposite_alpha)".to_string(),
                     retry_count: 0,
@@ -3313,6 +3376,7 @@ mod tests {
                 exit_oid.clone(),
                 ExitOrderMeta {
                     token_id: "token_up".to_string(),
+                    order_token_id: "token_up".to_string(),
                     order_type: OrderType::Gtc,
                     source_state: "ResidualRisk(retry=1)".to_string(),
                     retry_count: 1,
@@ -3848,6 +3912,7 @@ mod tests {
                 exit_oid.clone(),
                 ExitOrderMeta {
                     token_id: "token_up".to_string(),
+                    order_token_id: "token_up".to_string(),
                     order_type: exit_order_type,
                     source_state: "HardCrash(bid_drop=0.08, reversal=0.006)".to_string(),
                     retry_count: 0,
@@ -4035,6 +4100,7 @@ mod tests {
                 "exit-fok-1".to_string(),
                 ExitOrderMeta {
                     token_id: "token_up".to_string(),
+                    order_token_id: "token_up".to_string(),
                     order_type: OrderType::Fok,
                     source_state: "test".to_string(),
                     retry_count: 0,
@@ -4184,6 +4250,7 @@ mod tests {
                 recovery_oid.clone(),
                 ExitOrderMeta {
                     token_id: "token_up".to_string(),
+                    order_token_id: "token_down".to_string(),
                     order_type: OrderType::Fok,
                     source_state: "RecoveryProbe(set_completion)".to_string(),
                     retry_count: 0,
@@ -4302,6 +4369,7 @@ mod tests {
                 exit_oid.clone(),
                 ExitOrderMeta {
                     token_id: "token_up".to_string(),
+                    order_token_id: "token_up".to_string(),
                     order_type: OrderType::Fok,
                     source_state: "HardCrash".to_string(),
                     retry_count: 0,

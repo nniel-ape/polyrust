@@ -750,7 +750,7 @@ impl PositionLifecycle {
         let external_fresh = ctx
             .external_age_ms
             .is_some_and(|age| age <= sl_config.sl_max_external_age_ms);
-        let has_any_fresh_source = external_fresh
+        let has_relaxed_fresh_source = external_fresh
             || ctx
                 .external_age_ms
                 .is_some_and(|age| age <= sl_config.sl_max_external_age_ms * 2);
@@ -758,7 +758,7 @@ impl PositionLifecycle {
         // ── Level 1: Hard Crash ──────────────────────────────────────────
         // Requires only 1 fresh external source + fresh book.
         // Bypasses hysteresis — immediate exit.
-        if book_fresh && ctx.external_price.is_some() && has_any_fresh_source {
+        if book_fresh && ctx.external_price.is_some() && has_relaxed_fresh_source {
             let bid_drop = ctx.entry_price - ctx.current_bid;
             let hard_bid = bid_drop >= sl_config.hard_drop_abs;
 
@@ -868,10 +868,12 @@ impl PositionLifecycle {
             .num_seconds();
         let within_sell_delay =
             seconds_since_entry < tailend_config.min_sell_delay_secs;
-        let within_post_entry_window =
-            seconds_since_entry <= tailend_config.post_entry_window_secs;
+        // Note: within_post_entry_window is always true when within_sell_delay
+        // is true (config validates post_entry_window_secs > min_sell_delay_secs).
+        // The DeferredExit path in handle_orderbook_update re-evaluates triggers
+        // after sell delay expires, using Levels 1-3.
 
-        if within_sell_delay && within_post_entry_window && book_fresh {
+        if within_sell_delay && book_fresh {
             let bid_drop = ctx.entry_price - ctx.current_bid;
             if bid_drop >= tailend_config.post_entry_exit_drop {
                 return Some(StopLossTriggerKind::PostEntryExit { bid_drop });
@@ -913,6 +915,9 @@ fn compute_reversal(
 pub struct ExitOrderMeta {
     /// Token ID of the position this exit order belongs to.
     pub token_id: TokenId,
+    /// Token ID the order was actually placed for (differs from `token_id`
+    /// for recovery orders which buy the opposite side).
+    pub order_token_id: TokenId,
     /// Order type (GTC or FOK) for fee model selection.
     pub order_type: OrderType,
     /// Lifecycle state that spawned this order (for context in logs).

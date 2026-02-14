@@ -3206,6 +3206,7 @@ fn lifecycle_state_display() {
 fn exit_order_meta_fields() {
     let meta = ExitOrderMeta {
         token_id: "token-123".to_string(),
+        order_token_id: "token-123".to_string(),
         order_type: OrderType::Fok,
         source_state: "ExitExecuting".to_string(),
         retry_count: 0,
@@ -3420,6 +3421,7 @@ async fn remove_lifecycle_also_cleans_exit_orders() {
             "exit-order-1".to_string(),
             ExitOrderMeta {
                 token_id: "token_up".to_string(),
+                order_token_id: "token_up".to_string(),
                 order_type: OrderType::Fok,
                 source_state: "ExitExecuting".to_string(),
                 retry_count: 0,
@@ -3430,6 +3432,7 @@ async fn remove_lifecycle_also_cleans_exit_orders() {
             "exit-order-2".to_string(),
             ExitOrderMeta {
                 token_id: "other_token".to_string(),
+                order_token_id: "other_token".to_string(),
                 order_type: OrderType::Gtc,
                 source_state: "ResidualRisk".to_string(),
                 retry_count: 0,
