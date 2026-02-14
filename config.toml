@@ -121,16 +121,16 @@ rank_by = "sharpe"
 top_n = 20
 force = true
 
-# Sweep 12: Full lifecycle state machine parameter optimization trigger timing + trailing + recovery
+# Sweep 13: Min/max extremes only — verify OrderbookUpdate differentiation
 
 [backtest.sweep.stop_loss]
-dual_trigger_consecutive_ticks = [1, 2, 3]
+dual_trigger_consecutive_ticks = [1, 3]
 hard_drop_abs = ["0.06", "0.10"]
 trailing_distance = ["0.03", "0.07"]
 trailing_arm_distance = ["0.010", "0.020"]
 recovery_max_set_cost = ["1.00", "1.02"]
-reentry_cooldown_secs = [2, 8, 12]
+reentry_cooldown_secs = [2, 12]
 
 [backtest.sweep.tailend]
-post_entry_exit_drop = ["0.03", "0.05", "0.07"]
-min_sell_delay_secs = [5, 8, 12]
+post_entry_exit_drop = ["0.03", "0.07"]
+min_sell_delay_secs = [5, 12]
