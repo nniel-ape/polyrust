@@ -54,6 +54,9 @@ All P0-P1 improvements have been implemented (as of 2026-01-28):
 - ✅ **Trailing stops** (#8) — Lock in profits with time decay option
 - ✅ **Performance tracking** (#9) — Per-mode stats with auto-disable capability
 
+Post-improvement refactoring (completed 2026-02):
+- ✅ **Position lifecycle state machine** — Replaced scattered HashMap-based stop-loss tracking with a 6-state per-position lifecycle (Healthy → DeferredExit → ExitExecuting → ResidualRisk → RecoveryProbe → Cooldown). Fixes: stale single-source price in stop-loss, impossible trailing parameters at high entry prices, contradictory defaults, PnL fee/price bugs. See `docs/plans/tailend-position-lifecycle-sm.md` for full design.
+
 Remaining work:
 - 🔲 Market-making mode (#6, P3) — Two-sided liquidity provision
 - 🔲 Multi-source oracle (#10, P3) — Coinbase, aggregated VWAP
@@ -141,12 +144,9 @@ Polymarket now supports placing up to 15 orders per batch request. Current imple
 
 ### 8. Improved Stop-Loss with Trailing Stops
 
-**Impact: Medium** — Better downside management
+**Impact: Medium** — Better downside management (IMPLEMENTED + enhanced with lifecycle SM)
 
-Current dual-trigger stop (0.5% reversal AND 5¢ market drop) is conservative but rigid. Add:
-- **Trailing stop**: lock in profits as position moves in your favor
-- **Time-decay stop**: tighten stops as expiration approaches (not just the 60s cutoff)
-- **Volatility-adjusted stops**: widen during high-vol periods, tighten in calm markets
+Original dual-trigger stop (0.5% reversal AND 5¢ market drop) was conservative but rigid. Now replaced by a full position lifecycle state machine with 4-level trigger hierarchy (hard crash → dual-trigger + hysteresis → trailing with headroom fix → post-entry deferred), composite price freshness gating, depth-capped execution ladder with FOK→GTC refresh cycles, and recovery logic (opposite-side set completion + alpha re-entry). See `docs/plans/tailend-position-lifecycle-sm.md`.
 
 ### 9. Historical Performance Tracking & Strategy Selection
 

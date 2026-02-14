@@ -203,7 +203,7 @@ Configured via `[arbitrage]` in `config.toml`. Directory structure at `crates/po
 
 Strategy is disabled by default; set `enabled = true` in `[arbitrage]` to activate.
 
-`ArbitrageConfig` has core settings (coins, max_positions, min_profit_margin) plus `TailEndConfig` and shared sub-configs: `FeeConfig` (taker fee model), `SpikeConfig` (price spike detection), `OrderConfig` (GTC/FOK), `SizingConfig` (Kelly criterion), `StopLossConfig` (dual-trigger + trailing), `PerformanceConfig` (tracking + auto-disable). See `config.rs` for field details.
+`ArbitrageConfig` has core settings (coins, max_positions, min_profit_margin) plus `TailEndConfig` and shared sub-configs: `FeeConfig` (taker fee model), `SpikeConfig` (price spike detection), `OrderConfig` (GTC/FOK), `SizingConfig` (Kelly criterion), `StopLossConfig` (lifecycle state machine + dual-trigger + trailing), `PerformanceConfig` (tracking + auto-disable). See `config.rs` for field details.
 
 ### Key Features
 
@@ -211,7 +211,9 @@ Strategy is disabled by default; set `enabled = true` in `[arbitrage]` to activa
 - **Hybrid order execution**: GTC maker orders (0% fee) for most trades, FOK taker orders only for tail-end urgency. FOK has stricter USDC precision (see `rounding.rs`)
 - **Kelly criterion sizing**: Position size scales with confidence and edge, clamped to [min_size, max_size]
 - **Spike detection**: Pre-filters small moves, triggers evaluation only on significant price changes or when delta exceeds fee+margin threshold
-- **Trailing stop-loss**: Locks in profits as position moves favorably, with optional time decay near expiration
+- **Position lifecycle state machine**: Per-position 6-state lifecycle (Healthy → DeferredExit → ExitExecuting → ResidualRisk → RecoveryProbe → Cooldown) replacing scattered HashMap-based stop-loss tracking. Driven by explicit state transitions with 4-level trigger hierarchy: hard crash → dual-trigger + hysteresis → trailing stop (with headroom fix) → post-entry deferred exit
+- **Composite price stop-loss**: All stop-loss decisions use freshness-gated composite price from multiple sources, preventing stale single-source exits
+- **Execution ladder**: Depth-capped FOK exit clips with geometric reduction, 2-second GTC refresh cycle for residual risk, and recovery logic (opposite-side set completion + alpha re-entry)
 - **Performance tracking**: Statistics with optional auto-disable when underperforming
 
 ## Polymarket API Endpoints
@@ -338,6 +340,7 @@ All outbound traffic from the polyrust container is routed through a proxy VPS (
 - `docs/plans/strategy-dashboard-views.md` — strategy dashboard views design
 - `docs/plans/backtesting-framework.md` — backtesting framework design
 - `docs/plans/arb-strategy-improvements.md` — arbitrage strategy improvement plan
+- `docs/plans/tailend-position-lifecycle-sm.md` — position lifecycle state machine design and implementation plan
 - `docs/research/polymarket-price-discovery.md` — reference price discovery (CLOB midpoint, RTDS feeds, Chainlink/Binance oracles)
 - `docs/research/crypto-arb-reference-price.md` — crypto arb reference price mechanics for 15-min markets
 - `docs/research/arb-strategy-improvements.md` — arbitrage strategy improvement research

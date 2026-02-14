@@ -96,6 +96,9 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # ask_threshold = 0.90           # Minimum ask price to enter (default 0.90)
 # min_sustained_ticks = 2        # Minimum price ticks confirming direction (default 2)
 # min_strike_distance_pct = 0.005   # Min crypto distance from strike (0.5% ≈ $10 at ETH $2000)
+# min_sell_delay_secs = 10       # Seconds after entry before any sell is allowed (CLOB settlement)
+# post_entry_exit_drop = 0.05    # Max bid drop from entry within post-entry window to trigger exit
+# post_entry_window_secs = 20    # Seconds after entry during which post-entry exit is active
 # use_composite_price = false     # Use weighted composite price from multiple sources (default false)
 # max_source_stale_secs = 10      # Max age per source in seconds (default 10)
 # min_sources = 2                 # Minimum fresh sources required (default 2)
@@ -157,6 +160,8 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # gtc_fallback = true         # Fall back to GTC after FOK liquidity rejection
 # gtc_fallback_tick_offset = 1 # Ticks below bid for GTC stop-loss (e.g. bid=0.91 → 0.90)
 # gtc_stop_loss_max_age_secs = 2   # Cancel stale GTC stop-loss orders after this (seconds)
+# stale_market_cooldown_secs = 120 # Cooldown after removing stale position before re-entry
+# min_remaining_secs = 45          # Suppress stop-loss below this many seconds remaining
 #
 # Hard crash detection — bypasses hysteresis, requires 1 fresh source + fresh book
 # hard_drop_abs = 0.08        # Absolute bid drop from entry to trigger (e.g. 0.95 → 0.87)

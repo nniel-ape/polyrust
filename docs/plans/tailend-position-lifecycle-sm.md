@@ -278,9 +278,9 @@ Refactor TailEnd position management into a per-position state machine that is r
 - [x] Review state transition logs format (useful for dashboard)
 
 ### Task 19: [Final] Update documentation
-- [ ] Update `config.example.toml` with all new stop-loss lifecycle fields and comments
-- [ ] Update CLAUDE.md if any architectural patterns changed (stop-loss section)
-- [ ] Add brief note to relevant design doc about state machine approach
+- [x] Update `config.example.toml` with all new stop-loss lifecycle fields and comments
+- [x] Update CLAUDE.md if any architectural patterns changed (stop-loss section)
+- [x] Add brief note to relevant design doc about state machine approach
 
 ## Technical Details
 
