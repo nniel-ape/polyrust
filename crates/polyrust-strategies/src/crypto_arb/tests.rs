@@ -2758,9 +2758,11 @@ fn arb_config_validate_valid_config_passes() {
 fn arb_config_validate_dead_zone_warning() {
     // This test verifies the dead zone check doesn't return an error
     // (it only warns), even with a large dead zone.
+    // Dead zone = min_strike_distance_pct - reversal_pct: when large, entries
+    // near strike distance can trigger stop-loss reversal immediately.
     let mut config = super::config::ArbitrageConfig::default();
-    config.stop_loss.reversal_pct = dec!(0.010); // 1%
-    config.tailend.min_strike_distance_pct = dec!(0.001); // 0.1%
+    config.stop_loss.reversal_pct = dec!(0.001); // 0.1%
+    config.tailend.min_strike_distance_pct = dec!(0.010); // 1%
     // Dead zone = 0.009 > 0.003 — triggers warning but not error
     assert!(config.validate().is_ok(), "Dead zone should warn but not error");
 }

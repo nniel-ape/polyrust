@@ -132,7 +132,7 @@ async fn render_positions(base: &CryptoArbBase, html: &mut String) {
             let current = cached_asks.get(&pos.token_id).copied();
             let (current_str, pnl_str, pnl_class) = match current {
                 Some(cp) => {
-                    let pnl = (cp - pos.entry_price) * pos.size - (pos.estimated_fee * pos.size);
+                    let pnl = (cp - pos.entry_price) * pos.size - (pos.entry_fee_per_share * pos.size);
                     let cls = if pnl >= Decimal::ZERO {
                         "bp-profit"
                     } else {

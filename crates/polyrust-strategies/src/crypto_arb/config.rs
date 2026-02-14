@@ -620,14 +620,16 @@ impl ArbitrageConfig {
             ));
         }
 
-        // Non-fatal: warn about large dead zone between reversal_pct and min_strike_distance_pct
-        let dead_zone = self.stop_loss.reversal_pct - self.tailend.min_strike_distance_pct;
+        // Non-fatal: warn when reversal_pct is much smaller than min_strike_distance_pct.
+        // A large gap means entries near the strike distance can trigger a stop-loss
+        // reversal immediately (because the reversal threshold is easily reached).
+        let dead_zone = self.tailend.min_strike_distance_pct - self.stop_loss.reversal_pct;
         if dead_zone > Decimal::new(3, 3) {
             tracing::warn!(
                 reversal_pct = %self.stop_loss.reversal_pct,
                 min_strike_distance_pct = %self.tailend.min_strike_distance_pct,
                 dead_zone = %dead_zone,
-                "Large dead zone between reversal_pct and min_strike_distance_pct (> 0.003); \
+                "Large dead zone between min_strike_distance_pct and reversal_pct (> 0.003); \
                  entries near strike may exit immediately"
             );
         }
