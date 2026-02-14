@@ -63,6 +63,14 @@ impl SweepRunner {
                 "Large sweep: {total} combinations. Consider reducing parameter ranges."
             );
         }
+        if self.backtest_config.data_fidelity_secs < 60 && total > 10 {
+            warn!(
+                data_fidelity_secs = self.backtest_config.data_fidelity_secs,
+                total_combinations = total,
+                "Sub-minute fidelity with large sweep grid — each run replays millions of events. \
+                 Consider data_fidelity_secs >= 60 for sweeps, or reduce parameter ranges."
+            );
+        }
 
         // Pre-load events ONCE
         info!("Pre-loading historical events (shared across all runs)...");
@@ -155,6 +163,7 @@ impl SweepRunner {
             arb_config.tailend.stale_ob_secs = i64::MAX; // Staleness meaningless in backtest
             arb_config.tailend.use_composite_price = false; // Composite price gating meaningless with deterministic data
             arb_config.stop_loss.sl_max_dispersion_bps = rust_decimal::Decimal::new(10000, 0); // Dispersion check disabled in backtest
+            arb_config.stop_loss.min_remaining_secs = 0; // Allow stop-loss evaluation until expiry (live default=45 suppresses most of the short position lifetime)
 
             let combo_index = combo.index;
 

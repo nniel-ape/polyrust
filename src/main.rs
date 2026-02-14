@@ -96,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
     // Sweep mode: suppress per-run strategy/engine noise so the progress bar stays visible.
     // RUST_LOG still overrides if the user wants verbose output.
     let default_filter = if backtest_sweep_mode {
-        "warn,polyrust_backtest::sweep=info"
+        "warn,polyrust_backtest=info"
     } else {
         "info,polyrust=debug"
     };
@@ -710,6 +710,7 @@ async fn run_backtest() -> anyhow::Result<()> {
     arb_config.tailend.stale_ob_secs = i64::MAX; // Staleness meaningless in backtest
     arb_config.tailend.use_composite_price = false; // Composite price gating meaningless with deterministic data
     arb_config.stop_loss.sl_max_dispersion_bps = Decimal::new(10000, 0); // Dispersion check disabled in backtest
+    arb_config.stop_loss.min_remaining_secs = 0; // Allow stop-loss evaluation until expiry (live default=45 suppresses most of the short position lifetime)
 
     // Apply backtest-specific sizing overrides (if configured)
     if let Some(ref sizing_override) = backtest_config.sizing {
@@ -891,6 +892,7 @@ async fn run_backtest_sweep() -> anyhow::Result<()> {
     arb_config.tailend.min_reference_quality = ReferenceQualityLevel::Current;
     arb_config.tailend.use_composite_price = false; // Composite price gating meaningless with deterministic data
     arb_config.stop_loss.sl_max_dispersion_bps = Decimal::new(10000, 0); // Dispersion check disabled in backtest
+    arb_config.stop_loss.min_remaining_secs = 0; // Allow stop-loss evaluation until expiry (live default=45 suppresses most of the short position lifetime)
 
     // Run sweep
     let rank_by = sweep_config
