@@ -95,10 +95,8 @@ impl GammaScanner {
             let page_len = page.len();
 
             for raw in page {
-                if let Some(info) = self.convert_and_filter(raw, now, max_end) {
-                    if !known_market_ids.contains(&info.id) {
-                        all_markets.push(info);
-                    }
+                if let Some(info) = self.convert_and_filter(raw, now, max_end) && !known_market_ids.contains(&info.id) {
+                    all_markets.push(info);
                 }
             }
 
@@ -281,33 +279,34 @@ impl GammaScanner {
                 "Dutch Book scanner started"
             );
 
+            let scanner = match GammaScanner::new(config) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "Failed to create GammaScanner — scanner will not run");
+                    return;
+                }
+            };
+
             // Run first scan immediately, then loop on interval
             loop {
-                match GammaScanner::new(config.clone()) {
-                    Ok(scanner) => {
-                        let known = known_market_ids.lock().await.clone();
-                        match scanner.scan_markets(&known).await {
-                            Ok(new_markets) => {
-                                let count = new_markets.len();
-                                if count > 0 {
-                                    let mut known = known_market_ids.lock().await;
-                                    let mut pending = pending_subscriptions.lock().await;
-                                    for market in new_markets {
-                                        known.insert(market.id.clone());
-                                        pending.push(market);
-                                    }
-                                    info!(count, "Queued new markets for subscription");
-                                } else {
-                                    debug!("No new markets found in scan");
-                                }
+                let known = known_market_ids.lock().await.clone();
+                match scanner.scan_markets(&known).await {
+                    Ok(new_markets) => {
+                        let count = new_markets.len();
+                        if count > 0 {
+                            let mut known = known_market_ids.lock().await;
+                            let mut pending = pending_subscriptions.lock().await;
+                            for market in new_markets {
+                                known.insert(market.id.clone());
+                                pending.push(market);
                             }
-                            Err(e) => {
-                                warn!(error = %e, "Gamma scan failed");
-                            }
+                            info!(count, "Queued new markets for subscription");
+                        } else {
+                            debug!("No new markets found in scan");
                         }
                     }
                     Err(e) => {
-                        warn!(error = %e, "Failed to create GammaScanner");
+                        warn!(error = %e, "Gamma scan failed");
                     }
                 }
 

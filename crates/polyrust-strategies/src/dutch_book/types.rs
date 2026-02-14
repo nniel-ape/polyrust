@@ -50,6 +50,12 @@ pub struct PairedOrder {
 pub struct PairedPosition {
     /// Polymarket condition_id
     pub market_id: MarketId,
+    /// Token ID for outcome A (YES/Up)
+    pub yes_token_id: TokenId,
+    /// Token ID for outcome B (NO/Down)
+    pub no_token_id: TokenId,
+    /// Whether this market uses neg_risk
+    pub neg_risk: bool,
     /// Entry price for the YES/outcome_a token
     pub yes_entry_price: Decimal,
     /// Entry price for the NO/outcome_b token
@@ -94,13 +100,19 @@ pub enum ExecutionState {
     Complete,
 }
 
-impl ExecutionState {
-    /// Create a new AwaitingFills state with neither side filled.
-    pub fn new() -> Self {
+impl Default for ExecutionState {
+    fn default() -> Self {
         Self::AwaitingFills {
             yes_filled: false,
             no_filled: false,
         }
+    }
+}
+
+impl ExecutionState {
+    /// Create a new AwaitingFills state with neither side filled.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Mark the YES side as filled. Returns the new state.
@@ -181,23 +193,11 @@ impl ExecutionState {
         }
     }
 
-    /// Mark unwind as complete.
-    pub fn complete_unwind(self) -> Self {
-        match self {
-            Self::Unwinding { .. } => Self::Complete,
-            other => other,
-        }
-    }
-
     /// Whether this state requires action (partial fill needing unwind).
     pub fn needs_unwind(&self) -> bool {
         matches!(self, Self::PartialFill { .. })
     }
 
-    /// Whether execution is finished (no more events expected).
-    pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::BothFilled | Self::Complete)
-    }
 }
 
 /// A market being tracked for Dutch Book opportunities.
@@ -211,10 +211,6 @@ pub struct MarketEntry {
     pub token_b: TokenId,
     /// Whether this market uses neg_risk
     pub neg_risk: bool,
-    /// When the market resolves
-    pub end_date: DateTime<Utc>,
-    /// Market liquidity in USD at time of discovery
-    pub liquidity: Decimal,
 }
 
 /// Shared state between the strategy and dashboard.
@@ -239,8 +235,8 @@ pub struct DutchBookState {
     pub total_unwind_losses: Decimal,
 }
 
-impl DutchBookState {
-    pub fn new() -> Self {
+impl Default for DutchBookState {
+    fn default() -> Self {
         Self {
             tracked_markets: 0,
             positions: Vec::new(),
@@ -250,6 +246,12 @@ impl DutchBookState {
             total_realized_pnl: Decimal::ZERO,
             total_unwind_losses: Decimal::ZERO,
         }
+    }
+}
+
+impl DutchBookState {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Record a new opportunity, maintaining a ring buffer of the last 50.

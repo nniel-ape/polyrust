@@ -14,6 +14,7 @@ use super::types::{ArbitrageOpportunity, MarketEntry};
 /// Maintains a mapping from token IDs to their parent market, so that when
 /// an orderbook update arrives for any token, we can look up both sides
 /// and check whether the combined ask is below $1.00.
+#[derive(Default)]
 pub struct ArbitrageAnalyzer {
     /// Market ID → MarketEntry (token_a, token_b, metadata)
     tracked_markets: HashMap<MarketId, MarketEntry>,
@@ -23,10 +24,7 @@ pub struct ArbitrageAnalyzer {
 
 impl ArbitrageAnalyzer {
     pub fn new() -> Self {
-        Self {
-            tracked_markets: HashMap::new(),
-            token_to_market: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Register a market for arbitrage tracking.
@@ -39,8 +37,6 @@ impl ArbitrageAnalyzer {
             token_a: market.token_ids.outcome_a.clone(),
             token_b: market.token_ids.outcome_b.clone(),
             neg_risk: market.neg_risk,
-            end_date: market.end_date,
-            liquidity: Decimal::ZERO, // Updated from orderbook data
         };
 
         self.token_to_market

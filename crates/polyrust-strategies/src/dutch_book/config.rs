@@ -36,9 +36,6 @@ pub struct DutchBookConfig {
 
     /// Discount applied when emergency-unwinding a partial fill (default: 0.03 = sell at 97%)
     pub unwind_discount: Decimal,
-
-    /// Seconds to wait for on-chain settlement before emergency unwind (default: 5)
-    pub unwind_settle_secs: u64,
 }
 
 impl Default for DutchBookConfig {
@@ -53,7 +50,6 @@ impl Default for DutchBookConfig {
             scan_interval_secs: 600,
             max_concurrent_positions: 10,
             unwind_discount: Decimal::new(3, 2),          // 0.03
-            unwind_settle_secs: 5,
         }
     }
 }

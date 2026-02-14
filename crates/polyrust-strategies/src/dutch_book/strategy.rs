@@ -127,11 +127,11 @@ impl DutchBookStrategy {
         };
         drop(md);
 
-        self.execute_opportunity(opportunity, &market_entry)
+        self.execute_opportunity(opportunity, &market_entry).await
     }
 
     /// Create paired FOK orders for a detected arbitrage opportunity.
-    fn execute_opportunity(
+    async fn execute_opportunity(
         &mut self,
         opp: ArbitrageOpportunity,
         market_entry: &super::types::MarketEntry,
@@ -167,8 +167,9 @@ impl DutchBookStrategy {
             "Executing Dutch Book arbitrage"
         );
 
-        // Record opportunity in shared dashboard state (non-blocking try_write)
-        if let Ok(mut state) = self.shared_state.try_write() {
+        // Record opportunity in shared dashboard state
+        {
+            let mut state = self.shared_state.write().await;
             state.record_opportunity(opp.clone());
         }
 
@@ -202,27 +203,15 @@ impl DutchBookStrategy {
             None => return vec![],
         };
 
-        // Find which active execution this placement belongs to by matching token_id
-        let market_id = {
-            let mut found = None;
-            for (mid, _exec) in &self.active_executions {
-                if let Some(entry) = self.analyzer.market_for_token(&result.token_id) {
-                    if entry.market_id == *mid {
-                        found = Some(mid.clone());
-                        break;
-                    }
-                }
-            }
-            match found {
-                Some(mid) => mid,
-                None => return vec![],
-            }
-        };
-
+        // Find which market this token belongs to, then check if we have an active execution
         let entry = match self.analyzer.market_for_token(&result.token_id) {
             Some(e) => e.clone(),
             None => return vec![],
         };
+        let market_id = entry.market_id.clone();
+        if !self.active_executions.contains_key(&market_id) {
+            return vec![];
+        }
 
         if let Some(exec) = self.active_executions.get_mut(&market_id) {
             // Check if this is an unwind sell order (execution in PartialFill state + SELL side)
@@ -251,7 +240,7 @@ impl DutchBookStrategy {
     }
 
     /// Handle an order fill event — update execution state.
-    pub(crate) fn handle_order_filled(
+    pub(crate) async fn handle_order_filled(
         &mut self,
         order_id: &str,
         token_id: &str,
@@ -259,7 +248,7 @@ impl DutchBookStrategy {
         size: Decimal,
     ) -> Vec<Action> {
         // Check if this is an unwind order fill
-        if let Some(actions) = self.handle_unwind_order_event(order_id, true) {
+        if let Some(actions) = self.handle_unwind_order_event(order_id, true).await {
             return actions;
         }
 
@@ -314,6 +303,12 @@ impl DutchBookStrategy {
             None => return vec![],
         };
 
+        // Look up market entry for token IDs and neg_risk
+        let entry = match self.analyzer.market_for_market_id(market_id) {
+            Some(e) => e.clone(),
+            None => return vec![],
+        };
+
         let yes_price = exec.yes_fill_price.unwrap_or(Decimal::ZERO);
         let no_price = exec.no_fill_price.unwrap_or(Decimal::ZERO);
         let combined_cost = (yes_price + no_price) * exec.size;
@@ -335,6 +330,9 @@ impl DutchBookStrategy {
 
         let position = PairedPosition {
             market_id: market_id.to_string(),
+            yes_token_id: entry.token_a,
+            no_token_id: entry.token_b,
+            neg_risk: entry.neg_risk,
             yes_entry_price: yes_price,
             no_entry_price: no_price,
             size: exec.size,
@@ -355,9 +353,9 @@ impl DutchBookStrategy {
     }
 
     /// Handle an order cancellation — update execution state, trigger unwind if needed.
-    pub(crate) fn handle_order_cancelled(&mut self, order_id: &str) -> Vec<Action> {
+    pub(crate) async fn handle_order_cancelled(&mut self, order_id: &str) -> Vec<Action> {
         // Check if this is an unwind order completion (cancel/timeout of sell)
-        if let Some(actions) = self.handle_unwind_order_event(order_id, false) {
+        if let Some(actions) = self.handle_unwind_order_event(order_id, false).await {
             return actions;
         }
 
@@ -414,21 +412,16 @@ impl DutchBookStrategy {
             None => return vec![],
         };
 
+        let entry = match self.analyzer.market_for_market_id(market_id) {
+            Some(e) => e.clone(),
+            None => return vec![],
+        };
+
         let (filled_side, filled_token_id, fill_price) = match &exec.state {
             ExecutionState::PartialFill {
                 filled_side,
                 filled_order_id: _,
             } => {
-                let entry = match self.analyzer.market_for_token(&exec.yes_order_id) {
-                    Some(e) => e,
-                    None => {
-                        // Try looking up by market_id from tracked_markets
-                        match self.analyzer.market_for_market_id(market_id) {
-                            Some(e) => e,
-                            None => return vec![],
-                        }
-                    }
-                };
                 let (token_id, price) = match filled_side {
                     FilledSide::Yes => (
                         entry.token_a.clone(),
@@ -456,11 +449,6 @@ impl DutchBookStrategy {
             "Emergency unwind: selling filled side at discounted price"
         );
 
-        let entry = match self.analyzer.market_for_market_id(market_id) {
-            Some(e) => e.clone(),
-            None => return vec![],
-        };
-
         // Build GTC SELL order for the filled side
         let sell_order = OrderRequest::new(
             filled_token_id,
@@ -476,16 +464,14 @@ impl DutchBookStrategy {
 
     /// Handle a fill or cancel event for an unwind order.
     /// Returns Some(actions) if the order_id matched an unwinding execution, None otherwise.
-    fn handle_unwind_order_event(&mut self, order_id: &str, is_fill: bool) -> Option<Vec<Action>> {
+    async fn handle_unwind_order_event(&mut self, order_id: &str, is_fill: bool) -> Option<Vec<Action>> {
         // Find which execution is in Unwinding state with this sell_order_id
         let market_id = {
             let mut found = None;
             for (mid, exec) in &self.active_executions {
-                if let ExecutionState::Unwinding { sell_order_id } = &exec.state {
-                    if sell_order_id == order_id {
-                        found = Some(mid.clone());
-                        break;
-                    }
+                if let ExecutionState::Unwinding { sell_order_id } = &exec.state && sell_order_id == order_id {
+                    found = Some(mid.clone());
+                    break;
                 }
             }
             found?
@@ -511,7 +497,8 @@ impl DutchBookStrategy {
             );
 
             // Record unwind loss in shared state
-            if let Ok(mut state) = self.shared_state.try_write() {
+            {
+                let mut state = self.shared_state.write().await;
                 state.total_unwind_losses += loss;
             }
 
@@ -533,34 +520,32 @@ impl DutchBookStrategy {
 
     /// Handle a market expiration event.
     fn handle_market_expired(&mut self, market_id: &str) -> Vec<Action> {
-        self.analyzer.remove_market(market_id);
-
         // Check if we have an open position that should be redeemed
-        if let Some(pos) = self.open_positions.remove(market_id) {
+        let result = if let Some(pos) = self.open_positions.remove(market_id) {
             info!(
                 %market_id,
                 expected_profit = %pos.expected_profit,
                 "Market expired with open Dutch Book position — requesting redemption"
             );
-            // Redemption is handled by the engine's CtfRedeemer / ClaimMonitor.
-            // We emit a RedeemPosition action.
-            // Note: We need the condition_id and token_ids — use the market_id
-            // which is the condition_id in Polymarket.
-            return vec![Action::RedeemPosition(RedeemRequest {
+            vec![Action::RedeemPosition(RedeemRequest {
                 market_id: market_id.to_string(),
                 condition_id: market_id.to_string(),
-                token_ids: vec![pos.yes_entry_price.to_string(), pos.no_entry_price.to_string()],
-                neg_risk: false,
-            })];
-        }
+                token_ids: vec![pos.yes_token_id, pos.no_token_id],
+                neg_risk: pos.neg_risk,
+            })]
+        } else {
+            // Clean up any active execution for this market
+            if let Some(exec) = self.active_executions.remove(market_id) {
+                self.order_to_market.remove(&exec.yes_order_id);
+                self.order_to_market.remove(&exec.no_order_id);
+            }
+            vec![]
+        };
 
-        // Clean up any active execution for this market
-        if let Some(exec) = self.active_executions.remove(market_id) {
-            self.order_to_market.remove(&exec.yes_order_id);
-            self.order_to_market.remove(&exec.no_order_id);
-        }
+        // Remove market from analyzer after extracting any needed data
+        self.analyzer.remove_market(market_id);
 
-        vec![]
+        result
     }
 
     /// Get the number of tracked markets.
@@ -634,16 +619,16 @@ impl Strategy for DutchBookStrategy {
                 price,
                 size,
                 ..
-            }) => self.handle_order_filled(order_id, token_id, *price, *size),
+            }) => self.handle_order_filled(order_id, token_id, *price, *size).await,
 
             Event::OrderUpdate(OrderEvent::Cancelled(order_id)) => {
-                self.handle_order_cancelled(order_id)
+                self.handle_order_cancelled(order_id).await
             }
 
             Event::OrderUpdate(OrderEvent::Rejected { order_id, reason, .. }) => {
                 if let Some(oid) = order_id {
                     debug!(%oid, %reason, "Dutch Book order rejected");
-                    self.handle_order_cancelled(oid)
+                    self.handle_order_cancelled(oid).await
                 } else {
                     vec![]
                 }
@@ -658,8 +643,10 @@ impl Strategy for DutchBookStrategy {
 
         actions.extend(event_actions);
 
-        // Sync state to dashboard after processing
-        self.sync_dashboard_state().await;
+        // Sync dashboard state when there's active state to display
+        if !actions.is_empty() || !self.open_positions.is_empty() || !self.active_executions.is_empty() {
+            self.sync_dashboard_state().await;
+        }
 
         Ok(actions)
     }

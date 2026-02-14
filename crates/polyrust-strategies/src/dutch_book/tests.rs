@@ -35,7 +35,6 @@ fn config_default_is_valid() {
     assert_eq!(config.scan_interval_secs, 600);
     assert_eq!(config.max_concurrent_positions, 10);
     assert_eq!(config.unwind_discount, dec!(0.03));
-    assert_eq!(config.unwind_settle_secs, 5);
 }
 
 #[test]
@@ -144,7 +143,6 @@ fn config_deserializes_from_toml() {
         scan_interval_secs = 300
         max_concurrent_positions = 5
         unwind_discount = 0.05
-        unwind_settle_secs = 10
     "#;
 
     let config: DutchBookConfig = toml::from_str(toml_str).unwrap();
@@ -157,7 +155,6 @@ fn config_deserializes_from_toml() {
     assert_eq!(config.scan_interval_secs, 300);
     assert_eq!(config.max_concurrent_positions, 5);
     assert_eq!(config.unwind_discount, dec!(0.05));
-    assert_eq!(config.unwind_settle_secs, 10);
     assert!(config.validate().is_ok());
 }
 
@@ -189,7 +186,6 @@ fn execution_state_new_starts_awaiting() {
             no_filled: false
         }
     );
-    assert!(!state.is_terminal());
     assert!(!state.needs_unwind());
 }
 
@@ -204,11 +200,9 @@ fn execution_state_both_fill_yes_first() {
             no_filled: false
         }
     );
-    assert!(!state.is_terminal());
 
     let state = state.fill_no();
     assert_eq!(state, ExecutionState::BothFilled);
-    assert!(state.is_terminal());
 }
 
 #[test]
@@ -217,7 +211,6 @@ fn execution_state_both_fill_no_first() {
     let state = state.fill_no();
     let state = state.fill_yes();
     assert_eq!(state, ExecutionState::BothFilled);
-    assert!(state.is_terminal());
 }
 
 #[test]
@@ -233,7 +226,6 @@ fn execution_state_partial_fill_yes_then_cancel_no() {
         }
     );
     assert!(state.needs_unwind());
-    assert!(!state.is_terminal());
 }
 
 #[test]
@@ -257,7 +249,6 @@ fn execution_state_both_cancelled_is_complete() {
     // Cancel YES first when NO hasn't filled either
     let state = state.cancel_yes("no_order".to_string());
     assert_eq!(state, ExecutionState::Complete);
-    assert!(state.is_terminal());
 }
 
 #[test]
@@ -265,7 +256,6 @@ fn execution_state_both_cancelled_no_first() {
     let state = ExecutionState::new();
     let state = state.cancel_no("yes_order".to_string());
     assert_eq!(state, ExecutionState::Complete);
-    assert!(state.is_terminal());
 }
 
 #[test]
@@ -283,11 +273,6 @@ fn execution_state_unwind_lifecycle() {
         }
     );
     assert!(!state.needs_unwind());
-    assert!(!state.is_terminal());
-
-    let state = state.complete_unwind();
-    assert_eq!(state, ExecutionState::Complete);
-    assert!(state.is_terminal());
 }
 
 #[test]
@@ -324,6 +309,9 @@ fn paired_position_profit_calculation() {
     let now = Utc::now();
     let pos = PairedPosition {
         market_id: "market_1".to_string(),
+        yes_token_id: "tok_yes".to_string(),
+        no_token_id: "tok_no".to_string(),
+        neg_risk: false,
         yes_entry_price: dec!(0.48),
         no_entry_price: dec!(0.49),
         size: dec!(100),
@@ -346,21 +334,17 @@ fn paired_position_profit_calculation() {
 
 #[test]
 fn market_entry_construction() {
-    let end_date = Utc::now() + Duration::days(3);
     let entry = MarketEntry {
         market_id: "cond_123".to_string(),
         token_a: "token_yes".to_string(),
         token_b: "token_no".to_string(),
         neg_risk: false,
-        end_date,
-        liquidity: dec!(50000),
     };
 
     assert_eq!(entry.market_id, "cond_123");
     assert_eq!(entry.token_a, "token_yes");
     assert_eq!(entry.token_b, "token_no");
     assert!(!entry.neg_risk);
-    assert_eq!(entry.liquidity, dec!(50000));
 }
 
 // ---------------------------------------------------------------------------
@@ -1448,11 +1432,11 @@ async fn strategy_both_filled_promotes_to_position() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Fill YES
-    let actions_yes = strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.48), dec!(100));
+    let actions_yes = strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.48), dec!(100)).await;
     assert!(actions_yes.is_empty()); // Not complete yet
 
     // Fill NO — should trigger promotion to PairedPosition
-    let actions_no = strategy.handle_order_filled(&no_oid, "tok_no", dec!(0.49), dec!(100));
+    let actions_no = strategy.handle_order_filled(&no_oid, "tok_no", dec!(0.49), dec!(100)).await;
     assert!(!actions_no.is_empty()); // Should have a Log action
 
     // Active execution removed, position created
@@ -1475,7 +1459,7 @@ async fn strategy_fill_unknown_order_is_noop() {
     let config = DutchBookConfig::default();
     let mut strategy = DutchBookStrategy::new(config);
 
-    let actions = strategy.handle_order_filled("unknown_order", "tok_yes", dec!(0.50), dec!(10));
+    let actions = strategy.handle_order_filled("unknown_order", "tok_yes", dec!(0.50), dec!(10)).await;
     assert!(actions.is_empty());
 }
 
@@ -1495,7 +1479,7 @@ async fn strategy_both_cancelled_cleans_up() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Cancel both (neither filled)
-    strategy.handle_order_cancelled(&yes_oid);
+    strategy.handle_order_cancelled(&yes_oid).await;
     // After first cancel (neither side was filled), state goes to Complete
     assert_eq!(strategy.active_execution_count(), 0);
 
@@ -1516,10 +1500,10 @@ async fn strategy_partial_fill_triggers_unwind() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Fill YES first
-    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.48), dec!(100));
+    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.48), dec!(100)).await;
 
     // Cancel NO — partial fill triggers emergency unwind
-    let actions = strategy.handle_order_cancelled(&no_oid);
+    let actions = strategy.handle_order_cancelled(&no_oid).await;
 
     // Should emit a PlaceOrder (GTC SELL) for the filled YES side
     assert_eq!(actions.len(), 1);
@@ -1544,7 +1528,7 @@ async fn strategy_cancel_unknown_order_is_noop() {
     let config = DutchBookConfig::default();
     let mut strategy = DutchBookStrategy::new(config);
 
-    let actions = strategy.handle_order_cancelled("unknown_order");
+    let actions = strategy.handle_order_cancelled("unknown_order").await;
     assert!(actions.is_empty());
 }
 
@@ -1576,6 +1560,9 @@ async fn strategy_market_expired_with_position_emits_redeem() {
     // Manually insert an open position
     let pos = PairedPosition {
         market_id: "m1".to_string(),
+        yes_token_id: "tok_yes".to_string(),
+        no_token_id: "tok_no".to_string(),
+        neg_risk: false,
         yes_entry_price: dec!(0.48),
         no_entry_price: dec!(0.49),
         size: dec!(100),
@@ -1590,11 +1577,13 @@ async fn strategy_market_expired_with_position_emits_redeem() {
     let event = Event::MarketData(MarketDataEvent::MarketExpired("m1".to_string()));
     let actions = strategy.on_event(&event, &ctx).await.unwrap();
 
-    // Should emit RedeemPosition
+    // Should emit RedeemPosition with correct token IDs and neg_risk
     assert_eq!(actions.len(), 1);
     match &actions[0] {
         Action::RedeemPosition(req) => {
             assert_eq!(req.market_id, "m1");
+            assert_eq!(req.token_ids, vec!["tok_yes", "tok_no"]);
+            assert!(!req.neg_risk);
         }
         other => panic!("Expected RedeemPosition, got {:?}", other),
     }
@@ -1743,8 +1732,8 @@ async fn lifecycle_both_filled_creates_position_with_correct_prices() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Fill both sides at the ask prices
-    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.45), dec!(100));
-    let actions = strategy.handle_order_filled(&no_oid, "tok_no", dec!(0.50), dec!(100));
+    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.45), dec!(100)).await;
+    let actions = strategy.handle_order_filled(&no_oid, "tok_no", dec!(0.50), dec!(100)).await;
 
     // Should have a Log action
     assert!(!actions.is_empty());
@@ -1775,8 +1764,8 @@ async fn lifecycle_both_filled_no_first_then_yes() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Fill NO first, then YES
-    strategy.handle_order_filled(&no_oid, "tok_no", dec!(0.49), dec!(100));
-    let actions = strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.48), dec!(100));
+    strategy.handle_order_filled(&no_oid, "tok_no", dec!(0.49), dec!(100)).await;
+    let actions = strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.48), dec!(100)).await;
 
     assert!(!actions.is_empty());
     assert_eq!(strategy.active_execution_count(), 0);
@@ -1802,10 +1791,10 @@ async fn lifecycle_partial_fill_no_side_triggers_unwind_sell_no() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Fill NO side
-    strategy.handle_order_filled(&no_oid, "tok_no", dec!(0.49), dec!(100));
+    strategy.handle_order_filled(&no_oid, "tok_no", dec!(0.49), dec!(100)).await;
 
     // Cancel YES — partial fill, NO side filled, should sell NO
-    let actions = strategy.handle_order_cancelled(&yes_oid);
+    let actions = strategy.handle_order_cancelled(&yes_oid).await;
 
     assert_eq!(actions.len(), 1);
     match &actions[0] {
@@ -1850,8 +1839,8 @@ async fn lifecycle_unwind_discount_configurable() {
     strategy.on_event(&event, &ctx).await.unwrap();
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
-    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100));
-    let actions = strategy.handle_order_cancelled(&no_oid);
+    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100)).await;
+    let actions = strategy.handle_order_cancelled(&no_oid).await;
 
     match &actions[0] {
         Action::PlaceOrder(order) => {
@@ -1877,7 +1866,7 @@ async fn lifecycle_both_cancelled_first_yes_then_no() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Cancel YES first (neither filled yet) — goes to Complete immediately
-    let actions = strategy.handle_order_cancelled(&yes_oid);
+    let actions = strategy.handle_order_cancelled(&yes_oid).await;
     assert!(actions.is_empty());
 
     // Execution should be fully cleaned up
@@ -1898,7 +1887,7 @@ async fn lifecycle_both_cancelled_first_no_then_yes() {
     let (_yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Cancel NO first
-    let actions = strategy.handle_order_cancelled(&no_oid);
+    let actions = strategy.handle_order_cancelled(&no_oid).await;
     assert!(actions.is_empty());
     assert_eq!(strategy.active_execution_count(), 0);
 }
@@ -1918,8 +1907,8 @@ async fn lifecycle_unwind_placed_transitions_to_unwinding() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Partial fill: YES fills, NO cancels
-    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.48), dec!(100));
-    let _unwind_actions = strategy.handle_order_cancelled(&no_oid);
+    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.48), dec!(100)).await;
+    let _unwind_actions = strategy.handle_order_cancelled(&no_oid).await;
 
     // Simulate unwind sell order placement
     let unwind_result = OrderResult {
@@ -1956,8 +1945,8 @@ async fn lifecycle_unwind_fill_completes_execution() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Partial fill: YES fills, NO cancels
-    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.48), dec!(100));
-    strategy.handle_order_cancelled(&no_oid);
+    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.48), dec!(100)).await;
+    strategy.handle_order_cancelled(&no_oid).await;
 
     // Place unwind sell order
     let unwind_result = OrderResult {
@@ -1974,7 +1963,7 @@ async fn lifecycle_unwind_fill_completes_execution() {
 
     // Unwind sell fills
     let actions =
-        strategy.handle_order_filled("unwind_sell_1", "tok_yes", dec!(0.4656), dec!(100));
+        strategy.handle_order_filled("unwind_sell_1", "tok_yes", dec!(0.4656), dec!(100)).await;
 
     // Should emit a warning log about loss
     assert_eq!(actions.len(), 1);
@@ -2007,8 +1996,8 @@ async fn lifecycle_unwind_cancel_keeps_tracking() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Partial fill: YES fills, NO cancels
-    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.48), dec!(100));
-    strategy.handle_order_cancelled(&no_oid);
+    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.48), dec!(100)).await;
+    strategy.handle_order_cancelled(&no_oid).await;
 
     // Place unwind sell order
     let unwind_result = OrderResult {
@@ -2024,7 +2013,7 @@ async fn lifecycle_unwind_cancel_keeps_tracking() {
     strategy.handle_order_placed(&unwind_result);
 
     // Unwind sell order gets cancelled (e.g. timeout)
-    let actions = strategy.handle_order_cancelled("unwind_sell_1");
+    let actions = strategy.handle_order_cancelled("unwind_sell_1").await;
 
     // Should return empty (logged warning internally)
     assert!(actions.is_empty());
@@ -2255,6 +2244,9 @@ fn make_test_state() -> DutchBookState {
     // Add a position
     state.positions.push(PairedPosition {
         market_id: "0xabc123def456".to_string(),
+        yes_token_id: "tok_yes".to_string(),
+        no_token_id: "tok_no".to_string(),
+        neg_risk: false,
         yes_entry_price: dec!(0.48),
         no_entry_price: dec!(0.49),
         size: dec!(100),
@@ -2441,6 +2433,9 @@ async fn strategy_syncs_state_to_dashboard() {
         "m1".to_string(),
         PairedPosition {
             market_id: "m1".to_string(),
+            yes_token_id: "tok_yes".to_string(),
+            no_token_id: "tok_no".to_string(),
+            neg_risk: false,
             yes_entry_price: dec!(0.48),
             no_entry_price: dec!(0.49),
             size: dec!(100),

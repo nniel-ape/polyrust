@@ -231,7 +231,7 @@ Configured via `[dutch_book]` in `config.toml`. Directory structure at `crates/p
 
 Strategy is disabled by default; set `enabled = true` in `[dutch_book]` to activate.
 
-`DutchBookConfig` settings: `max_combined_cost` (fee buffer), `min_profit_threshold`, `max_position_size`, `min_liquidity_usd`, `max_days_until_resolution`, `scan_interval_secs`, `max_concurrent_positions`, `unwind_discount`, `unwind_settle_secs`. See `config.rs` for field details.
+`DutchBookConfig` settings: `max_combined_cost` (fee buffer), `min_profit_threshold`, `max_position_size`, `min_liquidity_usd`, `max_days_until_resolution`, `scan_interval_secs`, `max_concurrent_positions`, `unwind_discount`. See `config.rs` for field details.
 
 ### Key Features
 

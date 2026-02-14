@@ -13,6 +13,16 @@ use tokio::sync::RwLock;
 
 use polyrust_core::prelude::*;
 
+/// Safely truncate a string ID for display, avoiding panics on non-ASCII boundaries.
+fn truncate_id(id: &str, max_len: usize) -> String {
+    if id.len() > max_len {
+        let truncated: String = id.chars().take(max_len).collect();
+        format!("{truncated}...")
+    } else {
+        id.to_string()
+    }
+}
+
 use super::types::{DutchBookState, ExecutionState};
 
 /// Dashboard view for the Dutch Book arbitrage strategy.
@@ -150,11 +160,7 @@ fn render_positions(state: &DutchBookState, html: &mut String) {
                 format!("{}m", age.num_minutes())
             };
 
-            let market_short = if pos.market_id.len() > 8 {
-                format!("{}...", &pos.market_id[..8])
-            } else {
-                pos.market_id.clone()
-            };
+            let market_short = truncate_id(&pos.market_id, 8);
 
             let _ = write!(
                 html,
@@ -207,11 +213,7 @@ fn render_opportunities(state: &DutchBookState, html: &mut String) {
                 format!("{}s ago", age.num_seconds())
             };
 
-            let market_short = if opp.market_id.len() > 8 {
-                format!("{}...", &opp.market_id[..8])
-            } else {
-                opp.market_id.clone()
-            };
+            let market_short = truncate_id(&opp.market_id, 8);
 
             let profit_pct_display = opp.profit_pct * Decimal::new(100, 0);
 
@@ -257,11 +259,7 @@ fn render_executions(state: &DutchBookState, html: &mut String) {
         let age = chrono::Utc::now() - exec.submitted_at;
         let age_str = format!("{}s", age.num_seconds());
 
-        let market_short = if exec.market_id.len() > 8 {
-            format!("{}...", &exec.market_id[..8])
-        } else {
-            exec.market_id.clone()
-        };
+        let market_short = truncate_id(&exec.market_id, 8);
 
         let state_str = match &exec.state {
             ExecutionState::AwaitingFills {
