@@ -19,10 +19,9 @@ use super::base::{
 };
 use super::config::{ArbitrageConfig, SizingConfig};
 use super::types::{
-    compute_exit_clip, ArbitragePosition, BoundarySnapshot, CompositePriceSnapshot,
-    ExitOrderMeta, MarketWithReference, ModeStats, OpenLimitOrder,
-    PositionLifecycle, PositionLifecycleState, ReferenceQuality, StopLossTriggerKind,
-    TriggerEvalContext,
+    ArbitragePosition, BoundarySnapshot, CompositePriceSnapshot, ExitOrderMeta,
+    MarketWithReference, ModeStats, OpenLimitOrder, PositionLifecycle, PositionLifecycleState,
+    ReferenceQuality, StopLossTriggerKind, TriggerEvalContext, compute_exit_clip,
 };
 
 // ---------------------------------------------------------------------------
@@ -515,7 +514,6 @@ async fn base_can_open_position() {
                 entry_order_type: OrderType::Gtc,
                 entry_fee_per_share: Decimal::ZERO,
                 recovery_cost: Decimal::ZERO,
-
             };
             positions
                 .entry(pos.market_id.clone())
@@ -537,17 +535,10 @@ async fn reservation_blocks_concurrent_access() {
     let base = make_base_no_chainlink();
 
     // First reservation succeeds
-    assert!(
-        base.try_reserve_market(&"market1".to_string(), 1)
-            .await
-    );
+    assert!(base.try_reserve_market(&"market1".to_string(), 1).await);
 
     // Second reservation for same market fails
-    assert!(
-        !base
-            .try_reserve_market(&"market1".to_string(), 2)
-            .await
-    );
+    assert!(!base.try_reserve_market(&"market1".to_string(), 2).await);
 }
 
 #[tokio::test]
@@ -558,10 +549,7 @@ async fn reservation_counted_in_has_market_exposure() {
     assert!(!base.has_market_exposure(&"market1".to_string()).await);
 
     // Reserve the market
-    assert!(
-        base.try_reserve_market(&"market1".to_string(), 1)
-            .await
-    );
+    assert!(base.try_reserve_market(&"market1".to_string(), 1).await);
 
     // Now has exposure
     assert!(base.has_market_exposure(&"market1".to_string()).await);
@@ -577,18 +565,11 @@ async fn reservation_counted_in_can_open_position() {
     assert!(base.can_open_position().await);
 
     // Reserve 2 slots
-    assert!(
-        base.try_reserve_market(&"market1".to_string(), 2)
-            .await
-    );
+    assert!(base.try_reserve_market(&"market1".to_string(), 2).await);
 
     // Now at capacity (1 reservation counts as 1 in the map, but total=1 + slot_count check)
     // Actually the reservation uses 1 map entry. Let's reserve another.
-    assert!(
-        !base
-            .try_reserve_market(&"market2".to_string(), 1)
-            .await
-    );
+    assert!(!base.try_reserve_market(&"market2".to_string(), 1).await);
 }
 
 #[tokio::test]
@@ -596,20 +577,14 @@ async fn release_reservation_makes_market_available() {
     let base = make_base_no_chainlink();
 
     // Reserve and then release
-    assert!(
-        base.try_reserve_market(&"market1".to_string(), 1)
-            .await
-    );
+    assert!(base.try_reserve_market(&"market1".to_string(), 1).await);
     assert!(base.has_market_exposure(&"market1".to_string()).await);
 
     base.release_reservation(&"market1".to_string()).await;
 
     // Market is now available again
     assert!(!base.has_market_exposure(&"market1".to_string()).await);
-    assert!(
-        base.try_reserve_market(&"market1".to_string(), 2)
-            .await
-    );
+    assert!(base.try_reserve_market(&"market1".to_string(), 2).await);
 }
 
 #[tokio::test]
@@ -617,10 +592,7 @@ async fn consume_reservation_then_pending_preserves_exposure() {
     let base = make_base_no_chainlink();
 
     // Reserve market
-    assert!(
-        base.try_reserve_market(&"market1".to_string(), 1)
-            .await
-    );
+    assert!(base.try_reserve_market(&"market1".to_string(), 1).await);
 
     // Consume reservation and insert pending order
     base.consume_reservation(&"market1".to_string()).await;
@@ -663,12 +635,9 @@ async fn base_is_auto_disabled() {
     assert!(!base.is_auto_disabled().await);
 
     // Record losing trades
-    base.record_trade_pnl(dec!(-1.0))
-        .await;
-    base.record_trade_pnl(dec!(-1.0))
-        .await;
-    base.record_trade_pnl(dec!(-1.0))
-        .await;
+    base.record_trade_pnl(dec!(-1.0)).await;
+    base.record_trade_pnl(dec!(-1.0)).await;
+    base.record_trade_pnl(dec!(-1.0)).await;
 
     // Now should be disabled (0% win rate after 3 trades)
     assert!(base.is_auto_disabled().await);
@@ -1057,7 +1026,6 @@ fn make_position(
         entry_order_type: OrderType::Gtc,
         entry_fee_per_share: Decimal::ZERO,
         recovery_cost: Decimal::ZERO,
-
     }
 }
 
@@ -1257,12 +1225,10 @@ async fn auto_disable_boundary_at_min_trades() {
 
     // Record exactly 20 trades: 8 wins (40%), 12 losses
     for _ in 0..8 {
-        base.record_trade_pnl(dec!(1.0))
-            .await;
+        base.record_trade_pnl(dec!(1.0)).await;
     }
     for _ in 0..12 {
-        base.record_trade_pnl(dec!(-1.0))
-            .await;
+        base.record_trade_pnl(dec!(-1.0)).await;
     }
 
     // 40% win rate = exactly at threshold → NOT disabled (need to be strictly below)
@@ -1282,12 +1248,10 @@ async fn auto_disable_below_threshold() {
 
     // Record 20 trades: 7 wins (35%), 13 losses
     for _ in 0..7 {
-        base.record_trade_pnl(dec!(1.0))
-            .await;
+        base.record_trade_pnl(dec!(1.0)).await;
     }
     for _ in 0..13 {
-        base.record_trade_pnl(dec!(-1.0))
-            .await;
+        base.record_trade_pnl(dec!(-1.0)).await;
     }
 
     assert!(
@@ -1654,7 +1618,6 @@ fn post_entry_window_greater_than_sell_delay() {
         config.tailend.min_sell_delay_secs,
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // Reference quality retroactive upgrade tests
@@ -2515,7 +2478,10 @@ async fn reduce_or_remove_partial_close() {
     // Lifecycle should be preserved (position still open)
     drop(positions);
     let lifecycles = base.position_lifecycle.read().await;
-    assert!(lifecycles.contains_key("t1"), "Lifecycle preserved on partial close");
+    assert!(
+        lifecycles.contains_key("t1"),
+        "Lifecycle preserved on partial close"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2563,23 +2529,65 @@ fn stop_loss_config_lifecycle_defaults_are_sane() {
     let config = super::config::StopLossConfig::default();
 
     // All numeric values should be positive where required
-    assert!(config.hard_drop_abs > Decimal::ZERO, "hard_drop_abs must be positive");
-    assert!(config.hard_reversal_pct > Decimal::ZERO, "hard_reversal_pct must be positive");
-    assert!(config.sl_max_book_age_ms > 0, "sl_max_book_age_ms must be positive");
-    assert!(config.sl_max_external_age_ms > 0, "sl_max_external_age_ms must be positive");
+    assert!(
+        config.hard_drop_abs > Decimal::ZERO,
+        "hard_drop_abs must be positive"
+    );
+    assert!(
+        config.hard_reversal_pct > Decimal::ZERO,
+        "hard_reversal_pct must be positive"
+    );
+    assert!(
+        config.sl_max_book_age_ms > 0,
+        "sl_max_book_age_ms must be positive"
+    );
+    assert!(
+        config.sl_max_external_age_ms > 0,
+        "sl_max_external_age_ms must be positive"
+    );
     assert!(config.sl_min_sources > 0, "sl_min_sources must be positive");
-    assert!(config.sl_max_dispersion_bps > Decimal::ZERO, "sl_max_dispersion_bps must be positive");
-    assert!(config.dual_trigger_consecutive_ticks > 0, "dual_trigger_consecutive_ticks must be positive");
-    assert!(config.short_limit_refresh_secs >= 1, "short_limit_refresh_secs must be >= 1");
-    assert!(config.trailing_arm_distance > Decimal::ZERO, "trailing_arm_distance must be positive");
-    assert!(config.exit_depth_cap_factor > Decimal::ZERO && config.exit_depth_cap_factor <= Decimal::ONE,
-        "exit_depth_cap_factor must be in (0, 1]");
-    assert!(config.max_exit_retries > 0, "max_exit_retries must be positive");
-    assert!(config.recovery_max_set_cost > Decimal::ZERO, "recovery_max_set_cost must be positive");
-    assert!(config.recovery_max_extra_frac > Decimal::ZERO && config.recovery_max_extra_frac < Decimal::ONE,
-        "recovery_max_extra_frac must be in (0, 1)");
-    assert!(config.reentry_confirm_ticks > 0, "reentry_confirm_ticks must be positive");
-    assert!(config.reentry_cooldown_secs > 0, "reentry_cooldown_secs must be positive");
+    assert!(
+        config.sl_max_dispersion_bps > Decimal::ZERO,
+        "sl_max_dispersion_bps must be positive"
+    );
+    assert!(
+        config.dual_trigger_consecutive_ticks > 0,
+        "dual_trigger_consecutive_ticks must be positive"
+    );
+    assert!(
+        config.short_limit_refresh_secs >= 1,
+        "short_limit_refresh_secs must be >= 1"
+    );
+    assert!(
+        config.trailing_arm_distance > Decimal::ZERO,
+        "trailing_arm_distance must be positive"
+    );
+    assert!(
+        config.exit_depth_cap_factor > Decimal::ZERO
+            && config.exit_depth_cap_factor <= Decimal::ONE,
+        "exit_depth_cap_factor must be in (0, 1]"
+    );
+    assert!(
+        config.max_exit_retries > 0,
+        "max_exit_retries must be positive"
+    );
+    assert!(
+        config.recovery_max_set_cost > Decimal::ZERO,
+        "recovery_max_set_cost must be positive"
+    );
+    assert!(
+        config.recovery_max_extra_frac > Decimal::ZERO
+            && config.recovery_max_extra_frac < Decimal::ONE,
+        "recovery_max_extra_frac must be in (0, 1)"
+    );
+    assert!(
+        config.reentry_confirm_ticks > 0,
+        "reentry_confirm_ticks must be positive"
+    );
+    assert!(
+        config.reentry_cooldown_secs > 0,
+        "reentry_cooldown_secs must be positive"
+    );
 }
 
 #[test]
@@ -2712,7 +2720,10 @@ fn stop_loss_validate_exit_depth_cap_factor_bounds() {
 #[test]
 fn stop_loss_validate_valid_config_passes() {
     let config = super::config::StopLossConfig::default();
-    assert!(config.validate().is_ok(), "Default StopLossConfig should pass validation");
+    assert!(
+        config.validate().is_ok(),
+        "Default StopLossConfig should pass validation"
+    );
 }
 
 #[test]
@@ -2738,7 +2749,10 @@ fn arb_config_validate_post_entry_lte_sell_delay_errors() {
 #[test]
 fn arb_config_validate_valid_config_passes() {
     let config = super::config::ArbitrageConfig::default();
-    assert!(config.validate().is_ok(), "Default ArbitrageConfig should pass validation");
+    assert!(
+        config.validate().is_ok(),
+        "Default ArbitrageConfig should pass validation"
+    );
 }
 
 #[test]
@@ -2751,7 +2765,10 @@ fn arb_config_validate_dead_zone_warning() {
     config.stop_loss.reversal_pct = dec!(0.001); // 0.1%
     config.tailend.min_strike_distance_pct = dec!(0.010); // 1%
     // Dead zone = 0.009 > 0.003 — triggers warning but not error
-    assert!(config.validate().is_ok(), "Dead zone should warn but not error");
+    assert!(
+        config.validate().is_ok(),
+        "Dead zone should warn but not error"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2782,7 +2799,9 @@ fn lifecycle_all_valid_transitions_succeed() {
     let mut lc = PositionLifecycle::new();
     let result = lc.transition(
         PositionLifecycleState::DeferredExit {
-            trigger: StopLossTriggerKind::PostEntryExit { bid_drop: dec!(0.05) },
+            trigger: StopLossTriggerKind::PostEntryExit {
+                bid_drop: dec!(0.05),
+            },
             armed_at: t,
         },
         "trigger during sell delay",
@@ -2856,7 +2875,9 @@ fn lifecycle_all_valid_transitions_succeed() {
 
     // RecoveryProbe -> Cooldown
     let result = lc.transition(
-        PositionLifecycleState::Cooldown { until: t + Duration::seconds(8) },
+        PositionLifecycleState::Cooldown {
+            until: t + Duration::seconds(8),
+        },
         "recovery filled",
         t,
     );
@@ -2885,7 +2906,10 @@ fn lifecycle_healthy_to_exit_executing() {
         t,
     );
     assert!(result.is_ok());
-    assert!(matches!(lc.state, PositionLifecycleState::ExitExecuting { .. }));
+    assert!(matches!(
+        lc.state,
+        PositionLifecycleState::ExitExecuting { .. }
+    ));
 }
 
 #[test]
@@ -2894,7 +2918,9 @@ fn lifecycle_deferred_exit_to_healthy() {
     let mut lc = PositionLifecycle::new();
     lc.transition(
         PositionLifecycleState::DeferredExit {
-            trigger: StopLossTriggerKind::DualTrigger { consecutive_ticks: 2 },
+            trigger: StopLossTriggerKind::DualTrigger {
+                consecutive_ticks: 2,
+            },
             armed_at: t,
         },
         "dual trigger armed",
@@ -3063,7 +3089,9 @@ fn lifecycle_invalid_transitions_return_error() {
     let mut lc = PositionLifecycle::new();
     lc.transition(
         PositionLifecycleState::DeferredExit {
-            trigger: StopLossTriggerKind::PostEntryExit { bid_drop: dec!(0.05) },
+            trigger: StopLossTriggerKind::PostEntryExit {
+                bid_drop: dec!(0.05),
+            },
             armed_at: t,
         },
         "deferred",
@@ -3153,7 +3181,10 @@ fn lifecycle_invalid_transition_preserves_state() {
         t,
     );
     assert_eq!(lc.state, PositionLifecycleState::Healthy);
-    assert!(lc.transition_log.is_empty(), "Failed transition should not log");
+    assert!(
+        lc.transition_log.is_empty(),
+        "Failed transition should not log"
+    );
 }
 
 #[test]
@@ -3243,7 +3274,6 @@ fn gtc_entry_has_zero_fee_per_share() {
 
     assert_eq!(pos.entry_order_type, OrderType::Gtc);
     assert_eq!(pos.entry_fee_per_share, Decimal::ZERO);
-
 }
 
 #[test]
@@ -3272,7 +3302,6 @@ fn fok_entry_has_computed_taker_fee_per_share() {
         entry_order_type: OrderType::Fok,
         entry_fee_per_share: expected_fee,
         recovery_cost: Decimal::ZERO,
-
     };
 
     assert_eq!(pos.entry_order_type, OrderType::Fok);
@@ -3280,7 +3309,6 @@ fn fok_entry_has_computed_taker_fee_per_share() {
     assert!(pos.entry_fee_per_share > Decimal::ZERO);
     // At p=0.92: fee = 2 * 0.92 * 0.08 * 0.0315 = 0.0046368
     assert_eq!(pos.entry_fee_per_share, dec!(0.0046368));
-
 }
 
 #[test]
@@ -3305,7 +3333,15 @@ async fn position_creation_creates_lifecycle_in_healthy_state() {
     let base = make_base_with_market("m1", 300).await;
 
     // Create and record a position
-    let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    let pos = make_position(
+        "m1",
+        "token_up",
+        OutcomeSide::Up,
+        dec!(0.90),
+        dec!(10),
+        dec!(50000),
+        dec!(0.90),
+    );
     base.record_position(pos).await;
 
     // Verify lifecycle was created in Healthy state
@@ -3320,7 +3356,15 @@ async fn position_removal_cleans_up_lifecycle() {
     let base = make_base_with_market("m1", 300).await;
 
     // Create and record a position
-    let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    let pos = make_position(
+        "m1",
+        "token_up",
+        OutcomeSide::Up,
+        dec!(0.90),
+        dec!(10),
+        dec!(50000),
+        dec!(0.90),
+    );
     base.record_position(pos).await;
 
     // Verify lifecycle exists
@@ -3342,7 +3386,15 @@ async fn partial_close_preserves_lifecycle() {
     let base = make_base_with_market("m1", 300).await;
 
     // Create and record a position of size 10
-    let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    let pos = make_position(
+        "m1",
+        "token_up",
+        OutcomeSide::Up,
+        dec!(0.90),
+        dec!(10),
+        dec!(50000),
+        dec!(0.90),
+    );
     base.record_position(pos).await;
 
     // Partially close (5 of 10)
@@ -3363,7 +3415,15 @@ async fn full_close_via_reduce_removes_lifecycle() {
     let base = make_base_with_market("m1", 300).await;
 
     // Create and record a position of size 10
-    let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    let pos = make_position(
+        "m1",
+        "token_up",
+        OutcomeSide::Up,
+        dec!(0.90),
+        dec!(10),
+        dec!(50000),
+        dec!(0.90),
+    );
     base.record_position(pos).await;
 
     // Fully close (10 of 10)
@@ -3403,7 +3463,15 @@ async fn remove_lifecycle_also_cleans_exit_orders() {
     let base = make_base_with_market("m1", 300).await;
 
     // Create a position and its lifecycle
-    let pos = make_position("m1", "token_up", OutcomeSide::Up, dec!(0.90), dec!(10), dec!(50000), dec!(0.90));
+    let pos = make_position(
+        "m1",
+        "token_up",
+        OutcomeSide::Up,
+        dec!(0.90),
+        dec!(10),
+        dec!(50000),
+        dec!(0.90),
+    );
     base.record_position(pos).await;
 
     // Simulate adding an exit order for this token
@@ -3618,8 +3686,7 @@ async fn sl_composite_cache_propagates_to_lifecycle() {
 
     // Propagate to lifecycle (simulating what update_sl_composite_cache does)
     {
-        let snapshot =
-            super::types::CompositePriceSnapshot::from_result(&composite);
+        let snapshot = super::types::CompositePriceSnapshot::from_result(&composite);
         let positions = base.positions.read().await;
         let mut lifecycles = base.position_lifecycle.write().await;
         for positions_vec in positions.values() {
@@ -3690,13 +3757,13 @@ fn evaluate_triggers_hard_crash_bid_drop() {
 
     // Entry at 0.95, bid dropped to 0.86 => drop = 0.09 >= 0.08
     let ctx = make_trigger_ctx(
-        dec!(0.95),  // entry
-        dec!(0.95),  // peak (no profit yet)
-        dec!(0.86),  // current bid (dropped 0.09)
-        dec!(90000), // reference BTC price
+        dec!(0.95),        // entry
+        dec!(0.95),        // peak (no profit yet)
+        dec!(0.86),        // current bid (dropped 0.09)
+        dec!(90000),       // reference BTC price
         Some(dec!(90000)), // no external reversal
-        300,         // time remaining
-        15,          // seconds since entry (past sell delay)
+        300,               // time remaining
+        15,                // seconds since entry (past sell delay)
     );
 
     let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
@@ -3718,21 +3785,27 @@ fn evaluate_triggers_hard_crash_external_reversal() {
 
     // Up position: reference=90000, external dropped to 89400 => reversal = 600/90000 = 0.667%
     let ctx = make_trigger_ctx(
-        dec!(0.95),  // entry
-        dec!(0.95),  // peak
-        dec!(0.94),  // bid only dropped 0.01 (not enough for bid-based hard crash)
-        dec!(90000), // reference
+        dec!(0.95),        // entry
+        dec!(0.95),        // peak
+        dec!(0.94),        // bid only dropped 0.01 (not enough for bid-based hard crash)
+        dec!(90000),       // reference
         Some(dec!(89400)), // external dropped 0.667%
         300,
         15,
     );
 
     let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
-    assert!(trigger.is_some(), "Hard crash should fire on 0.667% reversal");
+    assert!(
+        trigger.is_some(),
+        "Hard crash should fire on 0.667% reversal"
+    );
     match trigger.unwrap() {
         StopLossTriggerKind::HardCrash { reversal_pct, .. } => {
             // reversal = (90000-89400)/90000 = 600/90000 ≈ 0.00667
-            assert!(reversal_pct >= dec!(0.006), "Reversal {reversal_pct} should be >= 0.006");
+            assert!(
+                reversal_pct >= dec!(0.006),
+                "Reversal {reversal_pct} should be >= 0.006"
+            );
         }
         other => panic!("Expected HardCrash, got {other}"),
     }
@@ -3764,8 +3837,14 @@ fn evaluate_triggers_hard_crash_works_with_stale_composite() {
     };
 
     let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
-    assert!(trigger.is_some(), "Hard crash should work with single fresh source (no composite)");
-    assert!(matches!(trigger.unwrap(), StopLossTriggerKind::HardCrash { .. }));
+    assert!(
+        trigger.is_some(),
+        "Hard crash should work with single fresh source (no composite)"
+    );
+    assert!(matches!(
+        trigger.unwrap(),
+        StopLossTriggerKind::HardCrash { .. }
+    ));
 }
 
 #[test]
@@ -3781,9 +3860,9 @@ fn evaluate_triggers_dual_trigger_requires_consecutive_ticks() {
     // seconds_since_entry=25 to be beyond post_entry_window_secs (20) so Level 4
     // doesn't fire first.
     let ctx = make_trigger_ctx(
-        dec!(0.95),  // entry
-        dec!(0.95),  // peak
-        dec!(0.90),  // bid dropped 0.05 (= min_drop, satisfies market_dropped but not hard crash)
+        dec!(0.95),        // entry
+        dec!(0.95),        // peak
+        dec!(0.90), // bid dropped 0.05 (= min_drop, satisfies market_dropped but not hard crash)
         dec!(90000), // reference
         Some(dec!(89700)), // reversal = 300/90000 = 0.333% >= reversal_pct (0.003)
         300,
@@ -3792,12 +3871,18 @@ fn evaluate_triggers_dual_trigger_requires_consecutive_ticks() {
 
     // First tick: counter goes to 1, not yet at threshold (2)
     let trigger1 = lifecycle.evaluate_triggers(&ctx, &sl, &te);
-    assert!(trigger1.is_none(), "First tick should not trigger (need 2 consecutive)");
+    assert!(
+        trigger1.is_none(),
+        "First tick should not trigger (need 2 consecutive)"
+    );
     assert_eq!(lifecycle.dual_trigger_ticks, 1);
 
     // Second tick: counter goes to 2, threshold met
     let trigger2 = lifecycle.evaluate_triggers(&ctx, &sl, &te);
-    assert!(trigger2.is_some(), "Second tick should trigger (2 consecutive)");
+    assert!(
+        trigger2.is_some(),
+        "Second tick should trigger (2 consecutive)"
+    );
     match trigger2.unwrap() {
         StopLossTriggerKind::DualTrigger { consecutive_ticks } => {
             assert_eq!(consecutive_ticks, 2);
@@ -3839,7 +3924,10 @@ fn evaluate_triggers_dual_trigger_resets_on_clear() {
         26,
     );
     lifecycle.evaluate_triggers(&ctx2, &sl, &te);
-    assert_eq!(lifecycle.dual_trigger_ticks, 0, "Counter should reset when market condition clears");
+    assert_eq!(
+        lifecycle.dual_trigger_ticks, 0,
+        "Counter should reset when market condition clears"
+    );
 }
 
 #[test]
@@ -3851,9 +3939,9 @@ fn evaluate_triggers_trailing_unarmable_at_high_entry() {
     let mut lifecycle = PositionLifecycle::new();
 
     let ctx = make_trigger_ctx(
-        dec!(0.99),  // entry (very high)
-        dec!(0.99),  // peak
-        dec!(0.97),  // bid dropped 0.02
+        dec!(0.99), // entry (very high)
+        dec!(0.99), // peak
+        dec!(0.97), // bid dropped 0.02
         dec!(90000),
         Some(dec!(90000)), // no reversal
         300,
@@ -3865,7 +3953,10 @@ fn evaluate_triggers_trailing_unarmable_at_high_entry() {
     // Hard crash doesn't fire (bid_drop=0.02 < 0.08, no external reversal)
     // Dual trigger doesn't fire (market_dropped but no crypto reversal)
     // Trailing should be marked unarmable
-    assert!(lifecycle.trailing_unarmable, "Trailing should be unarmable at entry 0.99");
+    assert!(
+        lifecycle.trailing_unarmable,
+        "Trailing should be unarmable at entry 0.99"
+    );
 
     // Hard crash should still work at entry 0.99 (higher priority than trailing).
     // Since hard crash returns early, trailing_unarmable may not be set on the same call.
@@ -3880,8 +3971,14 @@ fn evaluate_triggers_trailing_unarmable_at_high_entry() {
         15,
     );
     let trigger2 = lifecycle.evaluate_triggers(&ctx2, &sl, &te);
-    assert!(trigger2.is_some(), "Hard crash should work even when trailing is unarmable");
-    assert!(matches!(trigger2.unwrap(), StopLossTriggerKind::HardCrash { .. }));
+    assert!(
+        trigger2.is_some(),
+        "Hard crash should work even when trailing is unarmable"
+    );
+    assert!(matches!(
+        trigger2.unwrap(),
+        StopLossTriggerKind::HardCrash { .. }
+    ));
 }
 
 #[test]
@@ -3897,9 +3994,9 @@ fn evaluate_triggers_trailing_at_normal_entry() {
 
     // Peak at 0.96, current bid at 0.93 => drop = 0.03 >= 0.025
     let ctx = make_trigger_ctx(
-        dec!(0.90),  // entry
-        dec!(0.96),  // peak (armed: 0.96 >= 0.915)
-        dec!(0.93),  // current bid
+        dec!(0.90), // entry
+        dec!(0.96), // peak (armed: 0.96 >= 0.915)
+        dec!(0.93), // current bid
         dec!(90000),
         Some(dec!(90000)),
         450, // time remaining
@@ -3907,16 +4004,26 @@ fn evaluate_triggers_trailing_at_normal_entry() {
     );
 
     let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
-    assert!(trigger.is_some(), "Trailing should trigger on 0.03 drop from peak at 450s");
+    assert!(
+        trigger.is_some(),
+        "Trailing should trigger on 0.03 drop from peak at 450s"
+    );
     match trigger.unwrap() {
-        StopLossTriggerKind::TrailingStop { peak_bid, current_bid, effective_distance } => {
+        StopLossTriggerKind::TrailingStop {
+            peak_bid,
+            current_bid,
+            effective_distance,
+        } => {
             assert_eq!(peak_bid, dec!(0.96));
             assert_eq!(current_bid, dec!(0.93));
             assert_eq!(effective_distance, dec!(0.025));
         }
         other => panic!("Expected TrailingStop, got {other}"),
     }
-    assert!(!lifecycle.trailing_unarmable, "Should NOT be unarmable at entry 0.90");
+    assert!(
+        !lifecycle.trailing_unarmable,
+        "Should NOT be unarmable at entry 0.90"
+    );
 }
 
 #[test]
@@ -3939,10 +4046,19 @@ fn evaluate_triggers_trailing_time_decay() {
     );
 
     let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
-    assert!(trigger.is_some(), "Trailing should trigger with floor distance at 90s");
+    assert!(
+        trigger.is_some(),
+        "Trailing should trigger with floor distance at 90s"
+    );
     match trigger.unwrap() {
-        StopLossTriggerKind::TrailingStop { effective_distance, .. } => {
-            assert_eq!(effective_distance, dec!(0.015), "Floor should prevent decay below 0.015");
+        StopLossTriggerKind::TrailingStop {
+            effective_distance, ..
+        } => {
+            assert_eq!(
+                effective_distance,
+                dec!(0.015),
+                "Floor should prevent decay below 0.015"
+            );
         }
         other => panic!("Expected TrailingStop, got {other}"),
     }
@@ -3958,9 +4074,9 @@ fn evaluate_triggers_post_entry_deferred() {
     // Within sell delay (5s < min_sell_delay_secs=10) and post_entry_window (5s <= 20s)
     // Bid dropped 0.06 from entry (>= post_entry_exit_drop=0.05)
     let ctx = make_trigger_ctx(
-        dec!(0.95),  // entry
-        dec!(0.95),  // peak
-        dec!(0.89),  // bid dropped 0.06
+        dec!(0.95), // entry
+        dec!(0.95), // peak
+        dec!(0.89), // bid dropped 0.06
         dec!(90000),
         Some(dec!(90000)),
         300,
@@ -3968,7 +4084,10 @@ fn evaluate_triggers_post_entry_deferred() {
     );
 
     let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
-    assert!(trigger.is_some(), "Post-entry deferred should fire within sell delay");
+    assert!(
+        trigger.is_some(),
+        "Post-entry deferred should fire within sell delay"
+    );
     match trigger.unwrap() {
         StopLossTriggerKind::PostEntryExit { bid_drop } => {
             assert_eq!(bid_drop, dec!(0.06));
@@ -3995,7 +4114,7 @@ fn evaluate_triggers_stale_orderbook_suppresses_all_except_hard_crash() {
         tick_size: dec!(0.01),
         entry_time: now - Duration::seconds(15),
         current_bid: dec!(0.90),
-        book_age_ms: 5000, // STALE book (> 1200ms)
+        book_age_ms: 5000,                 // STALE book (> 1200ms)
         external_price: Some(dec!(89700)), // crypto reversed
         external_age_ms: Some(500),
         composite_sources: Some(3),
@@ -4006,7 +4125,10 @@ fn evaluate_triggers_stale_orderbook_suppresses_all_except_hard_crash() {
     let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
     // Book is stale, so: hard crash (needs fresh book) = no,
     // dual trigger = no, trailing = no, post-entry = no
-    assert!(trigger.is_none(), "All triggers should be suppressed with stale orderbook");
+    assert!(
+        trigger.is_none(),
+        "All triggers should be suppressed with stale orderbook"
+    );
 }
 
 #[test]
@@ -4021,17 +4143,23 @@ fn evaluate_triggers_no_external_price_suppresses_hard_and_dual() {
     // at 900s: decay_factor=1, raw=0.05, floor=0.015, effective=0.05
     let ctx = make_trigger_ctx(
         dec!(0.90),
-        dec!(0.96),       // peak (armed)
-        dec!(0.90),       // drop = 0.06 >= 0.05
+        dec!(0.96), // peak (armed)
+        dec!(0.90), // drop = 0.06 >= 0.05
         dec!(90000),
-        None,             // NO external price
+        None, // NO external price
         900,
         15,
     );
 
     let trigger = lifecycle.evaluate_triggers(&ctx, &sl, &te);
-    assert!(trigger.is_some(), "Trailing should work without external price");
-    assert!(matches!(trigger.unwrap(), StopLossTriggerKind::TrailingStop { .. }));
+    assert!(
+        trigger.is_some(),
+        "Trailing should work without external price"
+    );
+    assert!(matches!(
+        trigger.unwrap(),
+        StopLossTriggerKind::TrailingStop { .. }
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -4049,14 +4177,22 @@ fn exit_clip_remaining_is_limit() {
 fn exit_clip_depth_is_limit() {
     // remaining=10, bid_depth=5, cap=0.8 → depth_capped=4, clip=min(10,4)=4
     let clip = compute_exit_clip(dec!(10), dec!(5), dec!(0.8), dec!(1));
-    assert_eq!(clip, dec!(4), "Depth * cap_factor should be the limiting factor");
+    assert_eq!(
+        clip,
+        dec!(4),
+        "Depth * cap_factor should be the limiting factor"
+    );
 }
 
 #[test]
 fn exit_clip_below_min_size_returns_zero() {
     // remaining=10, bid_depth=0.5, cap=0.8 → depth_capped=0.4, below min_size=1 → 0
     let clip = compute_exit_clip(dec!(10), dec!(0.5), dec!(0.8), dec!(1));
-    assert_eq!(clip, Decimal::ZERO, "Below min_size should return zero (dust)");
+    assert_eq!(
+        clip,
+        Decimal::ZERO,
+        "Below min_size should return zero (dust)"
+    );
 }
 
 #[test]
@@ -4235,7 +4371,10 @@ async fn recovery_same_side_reentry_blocked_during_cooldown() {
 
     // Verify cooldown is active
     let cooled = base.is_recovery_exit_cooled_down(&"m1".to_string()).await;
-    assert!(cooled, "Recovery exit cooldown should be active immediately after recording");
+    assert!(
+        cooled,
+        "Recovery exit cooldown should be active immediately after recording"
+    );
 }
 
 /// Test same-side re-entry allowed: cooldown elapsed → allows re-entry.
@@ -4348,7 +4487,10 @@ async fn recovery_failure_resolves_position_with_loss() {
     let token_up_exists = m1_positions
         .map(|v| v.iter().any(|p| p.token_id == "token_up"))
         .unwrap_or(false);
-    assert!(!token_up_exists, "Position should be removed after recovery failure");
+    assert!(
+        !token_up_exists,
+        "Position should be removed after recovery failure"
+    );
 }
 
 /// Test lifecycle transitions through the full recovery cycle:

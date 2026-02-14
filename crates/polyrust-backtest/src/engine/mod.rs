@@ -454,10 +454,8 @@ impl BacktestEngine {
                     md.orderbooks.get(token_id).cloned()
                 };
                 if let Some(snapshot) = snapshot {
-                    let ob_event =
-                        Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
-                    let ob_actions =
-                        self.strategy.on_event(&ob_event, &self.ctx).await?;
+                    let ob_event = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+                    let ob_actions = self.strategy.on_event(&ob_event, &self.ctx).await?;
                     trades.extend(self.execute_strategy_actions(ob_actions).await?);
                 }
             }

@@ -132,7 +132,6 @@ impl MarketWithReference {
     }
 }
 
-
 /// A detected arbitrage opportunity ready for execution.
 ///
 /// Contains all information needed to place an order: market, outcome, price,
@@ -480,13 +479,20 @@ pub enum StopLossTriggerKind {
 impl fmt::Display for StopLossTriggerKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::HardCrash { bid_drop, reversal_pct } => {
+            Self::HardCrash {
+                bid_drop,
+                reversal_pct,
+            } => {
                 write!(f, "HardCrash(bid_drop={bid_drop}, reversal={reversal_pct})")
             }
             Self::DualTrigger { consecutive_ticks } => {
                 write!(f, "DualTrigger(ticks={consecutive_ticks})")
             }
-            Self::TrailingStop { peak_bid, current_bid, effective_distance } => {
+            Self::TrailingStop {
+                peak_bid,
+                current_bid,
+                effective_distance,
+            } => {
                 write!(
                     f,
                     "TrailingStop(peak={peak_bid}, current={current_bid}, dist={effective_distance})"
@@ -543,9 +549,7 @@ pub enum PositionLifecycleState {
         submitted_at: DateTime<Utc>,
     },
     /// Post-recovery cooldown before position can be re-evaluated.
-    Cooldown {
-        until: DateTime<Utc>,
-    },
+    Cooldown { until: DateTime<Utc> },
 }
 
 impl fmt::Display for PositionLifecycleState {
@@ -553,11 +557,22 @@ impl fmt::Display for PositionLifecycleState {
         match self {
             Self::Healthy => write!(f, "Healthy"),
             Self::DeferredExit { trigger, .. } => write!(f, "DeferredExit({trigger})"),
-            Self::ExitExecuting { order_type, exit_price, .. } => {
+            Self::ExitExecuting {
+                order_type,
+                exit_price,
+                ..
+            } => {
                 write!(f, "ExitExecuting({order_type:?}@{exit_price})")
             }
-            Self::ResidualRisk { remaining_size, retry_count, .. } => {
-                write!(f, "ResidualRisk(remaining={remaining_size}, retries={retry_count})")
+            Self::ResidualRisk {
+                remaining_size,
+                retry_count,
+                ..
+            } => {
+                write!(
+                    f,
+                    "ResidualRisk(remaining={remaining_size}, retries={retry_count})"
+                )
             }
             Self::RecoveryProbe { probe_side, .. } => {
                 write!(f, "RecoveryProbe({probe_side:?})")
@@ -768,11 +783,7 @@ impl PositionLifecycle {
             let hard_bid = bid_drop >= sl_config.hard_drop_abs;
 
             let hard_reversal = if let Some(ext_price) = ctx.external_price {
-                let reversal = compute_reversal(
-                    ctx.side,
-                    ctx.reference_price,
-                    ext_price,
-                );
+                let reversal = compute_reversal(ctx.side, ctx.reference_price, ext_price);
                 reversal >= sl_config.hard_reversal_pct
             } else {
                 false
@@ -802,14 +813,12 @@ impl PositionLifecycle {
                 .is_some_and(|s| s >= sl_config.sl_min_sources);
 
             let crypto_reversed = if let Some(ext_price) = ctx.external_price {
-                compute_reversal(ctx.side, ctx.reference_price, ext_price)
-                    >= sl_config.reversal_pct
+                compute_reversal(ctx.side, ctx.reference_price, ext_price) >= sl_config.reversal_pct
             } else {
                 false
             };
 
-            let market_dropped =
-                (ctx.entry_price - ctx.current_bid) >= sl_config.min_drop;
+            let market_dropped = (ctx.entry_price - ctx.current_bid) >= sl_config.min_drop;
 
             if composite_ok && crypto_reversed && market_dropped {
                 self.dual_trigger_ticks += 1;
@@ -829,26 +838,21 @@ impl PositionLifecycle {
         if book_fresh && sl_config.trailing_enabled {
             let price_cap = Decimal::ONE - ctx.tick_size;
             let headroom = (price_cap - ctx.entry_price).max(Decimal::ZERO);
-            let effective_arm_distance =
-                sl_config.trailing_arm_distance.min(headroom);
+            let effective_arm_distance = sl_config.trailing_arm_distance.min(headroom);
 
             if effective_arm_distance < ctx.tick_size {
                 self.trailing_unarmable = true;
             } else {
                 // Arming check: peak_bid >= entry + effective_arm_distance
-                let armed =
-                    ctx.peak_bid >= ctx.entry_price + effective_arm_distance;
+                let armed = ctx.peak_bid >= ctx.entry_price + effective_arm_distance;
                 if armed {
                     // Compute effective trailing distance with time decay
                     let base_distance = sl_config.trailing_distance;
                     let effective_distance = if sl_config.time_decay {
                         let decay_factor =
                             Decimal::from(ctx.time_remaining) / Decimal::from(900i64);
-                        let clamped = decay_factor
-                            .max(Decimal::ZERO)
-                            .min(Decimal::ONE);
-                        (base_distance * clamped)
-                            .max(sl_config.trailing_min_distance)
+                        let clamped = decay_factor.max(Decimal::ZERO).min(Decimal::ONE);
+                        (base_distance * clamped).max(sl_config.trailing_min_distance)
                     } else {
                         base_distance
                     };
@@ -869,12 +873,8 @@ impl PositionLifecycle {
         // Fires within post_entry_window_secs of entry when adverse move detected.
         // During sell delay: caller defers to DeferredExit state.
         // After sell delay but within window: caller executes exit immediately.
-        let seconds_since_entry = ctx
-            .now
-            .signed_duration_since(ctx.entry_time)
-            .num_seconds();
-        let within_post_entry_window =
-            seconds_since_entry < tailend_config.post_entry_window_secs;
+        let seconds_since_entry = ctx.now.signed_duration_since(ctx.entry_time).num_seconds();
+        let within_post_entry_window = seconds_since_entry < tailend_config.post_entry_window_secs;
 
         if within_post_entry_window && book_fresh {
             let bid_drop = ctx.entry_price - ctx.current_bid;
@@ -901,12 +901,8 @@ fn compute_reversal(
         return Decimal::ZERO;
     }
     match side {
-        OutcomeSide::Up | OutcomeSide::Yes => {
-            (reference_price - current_price) / reference_price
-        }
-        OutcomeSide::Down | OutcomeSide::No => {
-            (current_price - reference_price) / reference_price
-        }
+        OutcomeSide::Up | OutcomeSide::Yes => (reference_price - current_price) / reference_price,
+        OutcomeSide::Down | OutcomeSide::No => (current_price - reference_price) / reference_price,
     }
 }
 

@@ -364,7 +364,6 @@ pub struct StopLossConfig {
     pub reentry_cooldown_secs: i64,
 }
 
-
 impl Default for StopLossConfig {
     fn default() -> Self {
         Self {
@@ -380,8 +379,8 @@ impl Default for StopLossConfig {
             gtc_fallback_tick_offset: 1,
             gtc_stop_loss_max_age_secs: 2,
             // Hard crash
-            hard_drop_abs: Decimal::new(8, 2),      // 0.08
-            hard_reversal_pct: Decimal::new(6, 3),   // 0.006
+            hard_drop_abs: Decimal::new(8, 2),     // 0.08
+            hard_reversal_pct: Decimal::new(6, 3), // 0.006
             // Freshness gating
             sl_max_book_age_ms: 1200,
             sl_max_external_age_ms: 1500,
@@ -468,7 +467,9 @@ impl StopLossConfig {
                 self.recovery_max_set_cost
             ));
         }
-        if self.recovery_max_extra_frac < Decimal::ZERO || self.recovery_max_extra_frac > Decimal::ONE {
+        if self.recovery_max_extra_frac < Decimal::ZERO
+            || self.recovery_max_extra_frac > Decimal::ONE
+        {
             return Err(format!(
                 "recovery_max_extra_frac must be in [0, 1], got {}",
                 self.recovery_max_extra_frac

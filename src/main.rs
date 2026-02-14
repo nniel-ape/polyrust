@@ -105,8 +105,7 @@ async fn main() -> anyhow::Result<()> {
     // print cleanly above any active indicatif progress bar.
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(default_filter)),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
         )
         .with_writer(PbMakeWriter)
         .init();
@@ -185,10 +184,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create shared base for all crypto arbitrage strategies
-    info!(
-        enabled = arb_config.enabled,
-        "Loaded arbitrage config"
-    );
+    info!(enabled = arb_config.enabled, "Loaded arbitrage config");
     let base = Arc::new(CryptoArbBase::new(
         arb_config.clone(),
         config.polymarket.rpc_urls.clone(),

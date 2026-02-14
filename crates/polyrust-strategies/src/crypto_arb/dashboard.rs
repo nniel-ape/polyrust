@@ -132,7 +132,8 @@ async fn render_positions(base: &CryptoArbBase, html: &mut String) {
             let current = cached_asks.get(&pos.token_id).copied();
             let (current_str, pnl_str, pnl_class) = match current {
                 Some(cp) => {
-                    let pnl = (cp - pos.entry_price) * pos.size - (pos.entry_fee_per_share * pos.size);
+                    let pnl =
+                        (cp - pos.entry_price) * pos.size - (pos.entry_fee_per_share * pos.size);
                     let cls = if pnl >= Decimal::ZERO {
                         "bp-profit"
                     } else {
@@ -265,17 +266,53 @@ impl CryptoArbDashboard {
             html.push_str(r#"<div class="grid grid-cols-2 gap-2" style="font-size:0.95rem">"#);
 
             html.push_str(r#"<div class="bp-text-muted" style="grid-column:1/-1;font-weight:600;margin-top:0.25rem">Entry Timing</div>"#);
-            let _ = write!(html, r#"<div class="bp-config-label">Time window:</div><div class="bp-config-value">&lt; {}s</div>"#, te.time_threshold_secs);
-            let thresh_str: Vec<String> = te.dynamic_thresholds.iter().map(|(s, p)| format!("{}s&rarr;{}", s, p)).collect();
-            let _ = write!(html, r#"<div class="bp-config-label">Dynamic thresholds:</div><div class="bp-config-value">{}</div>"#, thresh_str.join(", "));
-            let _ = write!(html, r#"<div class="bp-config-label">Min ref quality:</div><div class="bp-config-value">{:?}</div>"#, te.min_reference_quality);
+            let _ = write!(
+                html,
+                r#"<div class="bp-config-label">Time window:</div><div class="bp-config-value">&lt; {}s</div>"#,
+                te.time_threshold_secs
+            );
+            let thresh_str: Vec<String> = te
+                .dynamic_thresholds
+                .iter()
+                .map(|(s, p)| format!("{}s&rarr;{}", s, p))
+                .collect();
+            let _ = write!(
+                html,
+                r#"<div class="bp-config-label">Dynamic thresholds:</div><div class="bp-config-value">{}</div>"#,
+                thresh_str.join(", ")
+            );
+            let _ = write!(
+                html,
+                r#"<div class="bp-config-label">Min ref quality:</div><div class="bp-config-value">{:?}</div>"#,
+                te.min_reference_quality
+            );
 
             html.push_str(r#"<div class="bp-text-muted" style="grid-column:1/-1;font-weight:600;margin-top:0.5rem">Market Filters</div>"#);
-            let _ = write!(html, r#"<div class="bp-config-label">Max spread:</div><div class="bp-config-value">{} bps</div>"#, te.max_spread_bps);
-            let _ = write!(html, r#"<div class="bp-config-label">Stale OB:</div><div class="bp-config-value">{}s</div>"#, te.stale_ob_secs);
-            let _ = write!(html, r#"<div class="bp-config-label">Sustained:</div><div class="bp-config-value">{}s / {} ticks</div>"#, te.min_sustained_secs, te.min_sustained_ticks);
-            let _ = write!(html, r#"<div class="bp-config-label">Max volatility:</div><div class="bp-config-value">{}%</div>"#, te.max_recent_volatility * Decimal::from(100));
-            let _ = write!(html, r#"<div class="bp-config-label">Strike distance:</div><div class="bp-config-value">{}%</div>"#, te.min_strike_distance_pct * Decimal::from(100));
+            let _ = write!(
+                html,
+                r#"<div class="bp-config-label">Max spread:</div><div class="bp-config-value">{} bps</div>"#,
+                te.max_spread_bps
+            );
+            let _ = write!(
+                html,
+                r#"<div class="bp-config-label">Stale OB:</div><div class="bp-config-value">{}s</div>"#,
+                te.stale_ob_secs
+            );
+            let _ = write!(
+                html,
+                r#"<div class="bp-config-label">Sustained:</div><div class="bp-config-value">{}s / {} ticks</div>"#,
+                te.min_sustained_secs, te.min_sustained_ticks
+            );
+            let _ = write!(
+                html,
+                r#"<div class="bp-config-label">Max volatility:</div><div class="bp-config-value">{}%</div>"#,
+                te.max_recent_volatility * Decimal::from(100)
+            );
+            let _ = write!(
+                html,
+                r#"<div class="bp-config-label">Strike distance:</div><div class="bp-config-value">{}%</div>"#,
+                te.min_strike_distance_pct * Decimal::from(100)
+            );
 
             html.push_str("</div></details>");
         }
@@ -290,7 +327,11 @@ impl CryptoArbDashboard {
             let fee_rate = self.base.config.fee.taker_fee_rate;
 
             html.push_str(r#"<div class="bp-card mb-4">"#);
-            let _ = write!(html, r#"<h2 class="bp-section-title">Active Markets ({})</h2>"#, active_markets.len());
+            let _ = write!(
+                html,
+                r#"<h2 class="bp-section-title">Active Markets ({})</h2>"#,
+                active_markets.len()
+            );
 
             if active_markets.is_empty() {
                 html.push_str(r#"<p class="bp-text-muted">No active markets</p>"#);
@@ -317,20 +358,30 @@ impl CryptoArbDashboard {
 
                     let up_ask = cached_asks.get(&mwr.market.token_ids.outcome_a).copied();
                     let down_ask = cached_asks.get(&mwr.market.token_ids.outcome_b).copied();
-                    let up_price = up_ask.map(fmt_market_price).unwrap_or_else(|| "-".to_string());
-                    let down_price = down_ask.map(fmt_market_price).unwrap_or_else(|| "-".to_string());
+                    let up_price = up_ask
+                        .map(fmt_market_price)
+                        .unwrap_or_else(|| "-".to_string());
+                    let down_price = down_ask
+                        .map(fmt_market_price)
+                        .unwrap_or_else(|| "-".to_string());
 
                     let (fee_str, net_str) = match (up_ask, down_ask) {
                         (Some(ua), Some(da)) => {
                             let price = ua.min(da);
                             let fee = taker_fee(price, fee_rate);
                             let net = net_profit_margin(price, fee_rate, false);
-                            (format!("{:.3}", fee.round_dp(3)), format!("{:.3}", net.round_dp(3)))
+                            (
+                                format!("{:.3}", fee.round_dp(3)),
+                                format!("{:.3}", net.round_dp(3)),
+                            )
                         }
                         (Some(p), None) | (None, Some(p)) => {
                             let fee = taker_fee(p, fee_rate);
                             let net = net_profit_margin(p, fee_rate, false);
-                            (format!("{:.3}", fee.round_dp(3)), format!("{:.3}", net.round_dp(3)))
+                            (
+                                format!("{:.3}", fee.round_dp(3)),
+                                format!("{:.3}", net.round_dp(3)),
+                            )
                         }
                         _ => ("-".to_string(), "-".to_string()),
                     };
@@ -338,8 +389,12 @@ impl CryptoArbDashboard {
                     let _ = write!(
                         html,
                         r#"<tr><td>{coin} Up/Down</td><td class="text-right">{up}</td><td class="text-right">{down}</td><td class="text-right">{fee}</td><td class="text-right">{net}</td><td class="text-right">{time}</td></tr>"#,
-                        coin = escape_html(&mwr.coin), up = up_price, down = down_price,
-                        fee = fee_str, net = net_str, time = time_str,
+                        coin = escape_html(&mwr.coin),
+                        up = up_price,
+                        down = down_price,
+                        fee = fee_str,
+                        net = net_str,
+                        time = time_str,
                     );
                 }
                 html.push_str("</tbody></table>");
@@ -435,12 +490,7 @@ fn render_skip_stats(base: &CryptoArbBase, html: &mut String) {
         let rows: Vec<_> = group
             .reasons
             .iter()
-            .filter_map(|r| {
-                snapshot
-                    .iter()
-                    .find(|(k, _)| k == r)
-                    .map(|(k, v)| (*k, *v))
-            })
+            .filter_map(|r| snapshot.iter().find(|(k, _)| k == r).map(|(k, v)| (*k, *v)))
             .filter(|(_, v)| *v > 0)
             .collect();
 

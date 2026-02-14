@@ -21,8 +21,8 @@ use crate::crypto_arb::base::{CryptoArbBase, StopLossRejectionKind, taker_fee};
 use crate::crypto_arb::dashboard::try_emit_dashboard_updates;
 use crate::crypto_arb::types::{
     ArbitrageOpportunity, ArbitragePosition, ExitOrderMeta, OpenLimitOrder, PendingOrder,
-    PositionLifecycle, PositionLifecycleState, StopLossTriggerKind,
-    TriggerEvalContext, compute_exit_clip,
+    PositionLifecycle, PositionLifecycleState, StopLossTriggerKind, TriggerEvalContext,
+    compute_exit_clip,
 };
 
 /// TailEnd strategy: trades near expiration with high market prices.
@@ -325,7 +325,8 @@ impl TailEndStrategy {
                             if let Some(lc) = lifecycles.get_mut(&position_token) {
                                 lc.pending_exit_order_id = Some(real_oid.clone());
                                 if let PositionLifecycleState::ExitExecuting {
-                                    ref mut order_id, ..
+                                    ref mut order_id,
+                                    ..
                                 } = lc.state
                                 {
                                     *order_id = real_oid.clone();
@@ -403,7 +404,10 @@ impl TailEndStrategy {
                     let mut lifecycle = self.base.ensure_lifecycle(&position_token).await;
                     lifecycle.pending_exit_order_id = None;
 
-                    if matches!(lifecycle.state, PositionLifecycleState::RecoveryProbe { .. }) {
+                    if matches!(
+                        lifecycle.state,
+                        PositionLifecycleState::RecoveryProbe { .. }
+                    ) {
                         // Recovery order placement failed — resolve position with
                         // loss (RecoveryProbe cannot transition to ResidualRisk).
                         let pos_info = {
@@ -670,11 +674,7 @@ impl TailEndStrategy {
             }
 
             // Atomically check exposure + position limits and reserve the market
-            if !self
-                .base
-                .try_reserve_market(&market_id, 1)
-                .await
-            {
+            if !self.base.try_reserve_market(&market_id, 1).await {
                 debug!(
                     market = %market_id,
                     "TailEnd skip: market reserved, has exposure, or max positions reached"
@@ -937,7 +937,10 @@ impl TailEndStrategy {
             }
 
             // RecoveryProbe: order is in flight, wait for fill/reject events
-            if matches!(lifecycle.state, PositionLifecycleState::RecoveryProbe { .. }) {
+            if matches!(
+                lifecycle.state,
+                PositionLifecycleState::RecoveryProbe { .. }
+            ) {
                 continue;
             }
 
@@ -988,7 +991,11 @@ impl TailEndStrategy {
                 if let Some((composite, cached_at)) = cache.get(&pos.coin) {
                     let age = now.signed_duration_since(*cached_at).num_milliseconds();
                     if age <= sl_config.sl_max_external_age_ms * 2 {
-                        (Some(composite.price), Some(age), Some(composite.sources_used))
+                        (
+                            Some(composite.price),
+                            Some(age),
+                            Some(composite.sources_used),
+                        )
                     } else {
                         drop(cache);
                         // Composite too stale, try single fresh source
@@ -1005,9 +1012,7 @@ impl TailEndStrategy {
                             let age = history
                                 .get(&pos.coin)
                                 .and_then(|h| h.back())
-                                .map(|(ts, _, _)| {
-                                    now.signed_duration_since(*ts).num_milliseconds()
-                                })
+                                .map(|(ts, _, _)| now.signed_duration_since(*ts).num_milliseconds())
                                 .unwrap_or(sl_config.sl_max_external_age_ms * 3);
                             (Some(single), Some(age), None)
                         } else {
@@ -1019,20 +1024,14 @@ impl TailEndStrategy {
                     // No composite cached, try single fresh source
                     if let Some(single) = self
                         .base
-                        .get_sl_single_fresh(
-                            &pos.coin,
-                            sl_config.sl_max_external_age_ms * 2,
-                            now,
-                        )
+                        .get_sl_single_fresh(&pos.coin, sl_config.sl_max_external_age_ms * 2, now)
                         .await
                     {
                         let history = self.base.price_history.read().await;
                         let age = history
                             .get(&pos.coin)
                             .and_then(|h| h.back())
-                            .map(|(ts, _, _)| {
-                                now.signed_duration_since(*ts).num_milliseconds()
-                            })
+                            .map(|(ts, _, _)| now.signed_duration_since(*ts).num_milliseconds())
                             .unwrap_or(sl_config.sl_max_external_age_ms * 3);
                         (Some(single), Some(age), None)
                     } else {
@@ -1057,9 +1056,7 @@ impl TailEndStrategy {
                 now,
             };
 
-            let seconds_since_entry = now
-                .signed_duration_since(pos.entry_time)
-                .num_seconds();
+            let seconds_since_entry = now.signed_duration_since(pos.entry_time).num_seconds();
             let is_sellable = seconds_since_entry >= self.base.config.tailend.min_sell_delay_secs;
 
             // Handle existing DeferredExit state
@@ -1109,11 +1106,8 @@ impl TailEndStrategy {
             }
 
             // Evaluate triggers for Healthy positions
-            let trigger = lifecycle.evaluate_triggers(
-                &trigger_ctx,
-                sl_config,
-                &self.base.config.tailend,
-            );
+            let trigger =
+                lifecycle.evaluate_triggers(&trigger_ctx, sl_config, &self.base.config.tailend);
 
             if let Some(trigger_kind) = trigger {
                 if !is_sellable {
@@ -1183,9 +1177,8 @@ impl TailEndStrategy {
         now: DateTime<Utc>,
     ) -> Option<Action> {
         // Compute depth-capped clip size
-        let bid_depth = snapshot.bid_depth_down_to(
-            current_bid - pos.tick_size * Decimal::from(3u32),
-        );
+        let bid_depth =
+            snapshot.bid_depth_down_to(current_bid - pos.tick_size * Decimal::from(3u32));
         let clip = compute_exit_clip(
             pos.size,
             bid_depth,
@@ -1266,11 +1259,7 @@ impl TailEndStrategy {
     }
 
     /// Write a lifecycle back to the shared store.
-    async fn write_lifecycle(
-        &self,
-        token_id: &str,
-        lifecycle: &PositionLifecycle,
-    ) {
+    async fn write_lifecycle(&self, token_id: &str, lifecycle: &PositionLifecycle) {
         let mut lifecycles = self.base.position_lifecycle.write().await;
         lifecycles.insert(token_id.to_string(), lifecycle.clone());
     }
@@ -1343,7 +1332,9 @@ impl TailEndStrategy {
                     remaining = %remaining_size,
                     "ResidualRisk: max retries exhausted, recovery disabled — resolving with loss"
                 );
-                self.base.record_recovery_exit_cooldown(&pos.market_id).await;
+                self.base
+                    .record_recovery_exit_cooldown(&pos.market_id)
+                    .await;
                 self.base
                     .reduce_or_remove_position_by_token(&pos.token_id, remaining_size)
                     .await;
@@ -1373,7 +1364,9 @@ impl TailEndStrategy {
                 remaining = %remaining_size,
                 "ResidualRisk: max retries exhausted, recovery not viable — resolving with loss"
             );
-            self.base.record_recovery_exit_cooldown(&pos.market_id).await;
+            self.base
+                .record_recovery_exit_cooldown(&pos.market_id)
+                .await;
             self.base
                 .reduce_or_remove_position_by_token(&pos.token_id, remaining_size)
                 .await;
@@ -1414,9 +1407,8 @@ impl TailEndStrategy {
             remaining_size
         };
 
-        let bid_depth = snapshot.bid_depth_down_to(
-            current_bid - pos.tick_size * Decimal::from(3u32),
-        );
+        let bid_depth =
+            snapshot.bid_depth_down_to(current_bid - pos.tick_size * Decimal::from(3u32));
         let clip = compute_exit_clip(
             effective_remaining,
             bid_depth,
@@ -1630,11 +1622,7 @@ impl TailEndStrategy {
         .with_tick_size(pos.tick_size)
         .with_fee_rate_bps(pos.fee_rate_bps);
 
-        let recovery_order_id = format!(
-            "recovery-set-{}-{}",
-            pos.token_id,
-            now.timestamp_millis()
-        );
+        let recovery_order_id = format!("recovery-set-{}-{}", pos.token_id, now.timestamp_millis());
 
         // Transition to RecoveryProbe
         if let Err(e) = lifecycle.transition(
@@ -1786,11 +1774,8 @@ impl TailEndStrategy {
         .with_tick_size(pos.tick_size)
         .with_fee_rate_bps(pos.fee_rate_bps);
 
-        let recovery_order_id = format!(
-            "recovery-alpha-{}-{}",
-            pos.token_id,
-            now.timestamp_millis()
-        );
+        let recovery_order_id =
+            format!("recovery-alpha-{}-{}", pos.token_id, now.timestamp_millis());
 
         if let Err(e) = lifecycle.transition(
             PositionLifecycleState::RecoveryProbe {
@@ -1849,11 +1834,9 @@ impl TailEndStrategy {
         now: DateTime<Utc>,
     ) -> bool {
         if now >= until {
-            if let Err(e) = lifecycle.transition(
-                PositionLifecycleState::Healthy,
-                "cooldown elapsed",
-                now,
-            ) {
+            if let Err(e) =
+                lifecycle.transition(PositionLifecycleState::Healthy, "cooldown elapsed", now)
+            {
                 warn!(token_id = %pos.token_id, error = %e, "Cooldown→Healthy transition failed");
                 return false;
             }
@@ -1969,8 +1952,7 @@ impl TailEndStrategy {
                         // minus fees. We store recovery cost on the position so the
                         // expiry handler's settlement P&L includes it for correct
                         // win/loss classification and recent_pnl tracking.
-                        let recovery_fee =
-                            taker_fee(price, self.base.config.fee.taker_fee_rate);
+                        let recovery_fee = taker_fee(price, self.base.config.fee.taker_fee_rate);
                         let recovery_cost = -(price + recovery_fee) * size;
                         self.base
                             .add_recovery_cost(&meta.token_id, recovery_cost)
@@ -2052,7 +2034,10 @@ impl TailEndStrategy {
                                     remaining,
                                     1,
                                     true, // Switch to GTC for next attempt
-                                    &format!("{} exit partial fill", if is_gtc_exit { "GTC" } else { "FOK" }),
+                                    &format!(
+                                        "{} exit partial fill",
+                                        if is_gtc_exit { "GTC" } else { "FOK" }
+                                    ),
                                     now,
                                 )
                                 .await;
@@ -2295,7 +2280,10 @@ impl Strategy for TailEndStrategy {
                     };
 
                     if let Some(lifecycle) = lifecycle {
-                        if matches!(lifecycle.state, PositionLifecycleState::ExitExecuting { .. }) {
+                        if matches!(
+                            lifecycle.state,
+                            PositionLifecycleState::ExitExecuting { .. }
+                        ) {
                             let now = self.base.event_time().await;
                             let kind = StopLossRejectionKind::classify(reason);
 
@@ -2318,7 +2306,10 @@ impl Strategy for TailEndStrategy {
                                         "Exit order rejected (InvalidSize) — removing dust position"
                                     );
                                     self.base
-                                        .reduce_or_remove_position_by_token(position_token, remaining)
+                                        .reduce_or_remove_position_by_token(
+                                            position_token,
+                                            remaining,
+                                        )
                                         .await;
                                 } else {
                                     // Transition to ResidualRisk with incremented retry count
@@ -2354,7 +2345,10 @@ impl Strategy for TailEndStrategy {
                             return Ok(vec![]);
                         }
 
-                        if matches!(lifecycle.state, PositionLifecycleState::RecoveryProbe { .. }) {
+                        if matches!(
+                            lifecycle.state,
+                            PositionLifecycleState::RecoveryProbe { .. }
+                        ) {
                             // Recovery failed — accept loss, resolve position
                             let pos_info = {
                                 let positions = self.base.positions.read().await;
@@ -2392,7 +2386,6 @@ impl Strategy for TailEndStrategy {
                             return Ok(vec![]);
                         }
                     }
-
                 }
                 vec![]
             }
@@ -2466,8 +2459,7 @@ impl Strategy for TailEndStrategy {
                 };
                 if let Some(meta) = exit_meta {
                     let is_matched = reason.contains("matched");
-                    let is_gone = reason.contains("canceled")
-                        || reason.contains("not found");
+                    let is_gone = reason.contains("canceled") || reason.contains("not found");
 
                     if is_matched {
                         // Order was filled on the CLOB before our cancel arrived.
@@ -2485,12 +2477,9 @@ impl Strategy for TailEndStrategy {
                             let sl_config = &self.base.config.stop_loss;
 
                             if fill_size > Decimal::ZERO {
-                                let recovery_fee = taker_fee(
-                                    fill_price,
-                                    self.base.config.fee.taker_fee_rate,
-                                );
-                                let recovery_cost =
-                                    -(fill_price + recovery_fee) * fill_size;
+                                let recovery_fee =
+                                    taker_fee(fill_price, self.base.config.fee.taker_fee_rate);
+                                let recovery_cost = -(fill_price + recovery_fee) * fill_size;
                                 self.base
                                     .add_recovery_cost(&meta.token_id, recovery_cost)
                                     .await;
@@ -2498,9 +2487,7 @@ impl Strategy for TailEndStrategy {
                                 let mut lifecycle =
                                     self.base.ensure_lifecycle(&meta.token_id).await;
                                 let cooldown_until = now
-                                    + chrono::Duration::seconds(
-                                        sl_config.reentry_cooldown_secs,
-                                    );
+                                    + chrono::Duration::seconds(sl_config.reentry_cooldown_secs);
                                 if let Err(e) = lifecycle.transition(
                                     PositionLifecycleState::Cooldown {
                                         until: cooldown_until,
@@ -2548,19 +2535,13 @@ impl Strategy for TailEndStrategy {
 
                             if let Some((pos, fully_closed)) = self
                                 .base
-                                .reduce_or_remove_position_by_token(
-                                    &meta.token_id,
-                                    size,
-                                )
+                                .reduce_or_remove_position_by_token(&meta.token_id, size)
                                 .await
                             {
                                 let exit_fee = if is_gtc_exit {
                                     Decimal::ZERO
                                 } else {
-                                    taker_fee(
-                                        fill_price,
-                                        self.base.config.fee.taker_fee_rate,
-                                    )
+                                    taker_fee(fill_price, self.base.config.fee.taker_fee_rate)
                                 };
                                 let pnl = (fill_price - pos.entry_price) * size
                                     - (pos.entry_fee_per_share * size)
@@ -2568,9 +2549,7 @@ impl Strategy for TailEndStrategy {
                                 self.base.record_trade_pnl(pnl).await;
 
                                 if fully_closed {
-                                    self.base
-                                        .remove_lifecycle(&meta.token_id)
-                                        .await;
+                                    self.base.remove_lifecycle(&meta.token_id).await;
                                 } else {
                                     // Partial exit matched — transition remaining to ResidualRisk
                                     let remaining = pos.size - size;
@@ -2583,7 +2562,10 @@ impl Strategy for TailEndStrategy {
                                     };
                                     if is_dust {
                                         self.base
-                                            .reduce_or_remove_position_by_token(&meta.token_id, remaining)
+                                            .reduce_or_remove_position_by_token(
+                                                &meta.token_id,
+                                                remaining,
+                                            )
                                             .await;
                                         warn!(
                                             token_id = %meta.token_id,
@@ -2625,8 +2607,7 @@ impl Strategy for TailEndStrategy {
 
                         // Clean up tracking
                         {
-                            let mut exit_orders =
-                                self.base.exit_orders_by_id.write().await;
+                            let mut exit_orders = self.base.exit_orders_by_id.write().await;
                             exit_orders.remove(order_id);
                         }
                     } else if is_gone {
@@ -3061,9 +3042,8 @@ mod tests {
 
         // Formula from FOK stop-loss path:
         // pnl = (exit_price - entry_price) * size - (entry_fee_per_share * size) - (exit_fee * size)
-        let pnl = (exit_price - entry_price) * size
-            - (entry_fee_per_share * size)
-            - (exit_fee * size);
+        let pnl =
+            (exit_price - entry_price) * size - (entry_fee_per_share * size) - (exit_fee * size);
 
         // Expected: (0.85 - 0.92) * 100 - 0 - exit_fee * 100
         let expected_exit_fee = taker_fee(dec!(0.85), fee_rate);
@@ -3110,9 +3090,8 @@ mod tests {
         let entry_fee_per_share = taker_fee(entry_price, fee_rate);
         let exit_fee = taker_fee(exit_price, fee_rate);
 
-        let pnl = (exit_price - entry_price) * size
-            - (entry_fee_per_share * size)
-            - (exit_fee * size);
+        let pnl =
+            (exit_price - entry_price) * size - (entry_fee_per_share * size) - (exit_fee * size);
 
         // Manual: taker_fee(0.94, 0.0315) = 2 * 0.94 * 0.06 * 0.0315 = 0.0035532
         // taker_fee(0.90, 0.0315) = 2 * 0.90 * 0.10 * 0.0315 = 0.00567
@@ -3226,17 +3205,16 @@ mod tests {
         let entry_fee_per_share = Decimal::ZERO; // GTC entry
 
         let exit_fee = taker_fee(fill_price, fee_rate);
-        let pnl = (fill_price - entry_price) * size
-            - (entry_fee_per_share * size)
-            - (exit_fee * size);
+        let pnl =
+            (fill_price - entry_price) * size - (entry_fee_per_share * size) - (exit_fee * size);
 
         // Manual: (0.90 - 0.95) * 50 - 0 - taker_fee(0.90) * 50
         // = -2.50 - (2 * 0.90 * 0.10 * 0.0315) * 50
         // = -2.50 - 0.00567 * 50
         // = -2.50 - 0.2835
         // = -2.7835
-        let expected = (dec!(0.90) - dec!(0.95)) * dec!(50)
-            - taker_fee(dec!(0.90), fee_rate) * dec!(50);
+        let expected =
+            (dec!(0.90) - dec!(0.95)) * dec!(50) - taker_fee(dec!(0.90), fee_rate) * dec!(50);
         assert_eq!(pnl, expected);
         assert!(pnl < Decimal::ZERO);
     }
@@ -3347,7 +3325,6 @@ mod tests {
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
             recovery_cost: Decimal::ZERO,
-
         };
         base.record_position(pos).await;
 
@@ -3421,9 +3398,7 @@ mod tests {
 
         // Lifecycle should be DeferredExit
         let lifecycles = strategy.base.position_lifecycle.read().await;
-        let lc = lifecycles
-            .get("token_up")
-            .expect("lifecycle should exist");
+        let lc = lifecycles.get("token_up").expect("lifecycle should exist");
         assert!(
             matches!(lc.state, PositionLifecycleState::DeferredExit { .. }),
             "Expected DeferredExit during sell delay, got: {:?}",
@@ -3443,7 +3418,10 @@ mod tests {
         {
             let lifecycles = strategy.base.position_lifecycle.read().await;
             let lc = lifecycles.get("token_up").unwrap();
-            assert!(matches!(lc.state, PositionLifecycleState::DeferredExit { .. }));
+            assert!(matches!(
+                lc.state,
+                PositionLifecycleState::DeferredExit { .. }
+            ));
         }
 
         // Simulate time passing: move position entry_time to 20s ago
@@ -3489,7 +3467,10 @@ mod tests {
         {
             let lifecycles = strategy.base.position_lifecycle.read().await;
             let lc = lifecycles.get("token_up").unwrap();
-            assert!(matches!(lc.state, PositionLifecycleState::DeferredExit { .. }));
+            assert!(matches!(
+                lc.state,
+                PositionLifecycleState::DeferredExit { .. }
+            ));
         }
 
         // Simulate time passing (sell delay elapsed)
@@ -3572,7 +3553,10 @@ mod tests {
         {
             let lifecycles = strategy.base.position_lifecycle.read().await;
             let lc = lifecycles.get("token_up").unwrap();
-            assert!(matches!(lc.state, PositionLifecycleState::ExitExecuting { .. }));
+            assert!(matches!(
+                lc.state,
+                PositionLifecycleState::ExitExecuting { .. }
+            ));
         }
 
         strategy
@@ -3591,7 +3575,7 @@ mod tests {
                 "token_up",
                 dec!(10), // remaining
                 1,
-                true,     // use GTC next (liquidity rejection)
+                true, // use GTC next (liquidity rejection)
                 "exit rejected: couldn't be fully filled",
                 now,
             )
@@ -3668,7 +3652,6 @@ mod tests {
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
             recovery_cost: Decimal::ZERO,
-
         };
         base.record_position(pos).await;
 
@@ -3843,7 +3826,6 @@ mod tests {
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
             recovery_cost: Decimal::ZERO,
-
         };
         base.record_position(pos.clone()).await;
 
@@ -3898,12 +3880,10 @@ mod tests {
         let actions = strategy.handle_orderbook_update(&snapshot).await;
 
         // Should produce a PlaceOrder action with reduced clip size
-        let place_action = actions
-            .iter()
-            .find_map(|a| match a {
-                Action::PlaceOrder(order) => Some(order),
-                _ => None,
-            });
+        let place_action = actions.iter().find_map(|a| match a {
+            Action::PlaceOrder(order) => Some(order),
+            _ => None,
+        });
 
         assert!(
             place_action.is_some(),
@@ -3915,8 +3895,16 @@ mod tests {
         // retry 2: 20 * 0.5 = 10.0
         // retry 3: 10.0 * 0.5 = 5.0
         // Then depth-capped: min(5.0, 100 * 1.0) = 5.0
-        assert_eq!(order.size, dec!(5.0), "Clip should be geometrically reduced");
-        assert_eq!(order.order_type, OrderType::Gtc, "Should use GTC after retry");
+        assert_eq!(
+            order.size,
+            dec!(5.0),
+            "Clip should be geometrically reduced"
+        );
+        assert_eq!(
+            order.order_type,
+            OrderType::Gtc,
+            "Should use GTC after retry"
+        );
     }
 
     /// Dust detection: if remaining size is below min_order_size in ResidualRisk,
@@ -3969,7 +3957,6 @@ mod tests {
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
             recovery_cost: Decimal::ZERO,
-
         };
         base.record_position(pos).await;
 
@@ -4028,10 +4015,7 @@ mod tests {
             .values()
             .flat_map(|v| v.iter())
             .any(|p| p.token_id == "token_up");
-        assert!(
-            !has_position,
-            "Dust position should have been removed"
-        );
+        assert!(!has_position, "Dust position should have been removed");
     }
 
     /// Max retries exhausted: position is resolved after max_exit_retries.
@@ -4083,7 +4067,6 @@ mod tests {
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
             recovery_cost: Decimal::ZERO,
-
         };
         base.record_position(pos).await;
 
@@ -4160,9 +4143,7 @@ mod tests {
 
     /// Helper: create a strategy with a position in ExitExecuting state,
     /// with properly tracked exit order metadata for fill routing.
-    async fn make_exit_fill_test_setup(
-        exit_order_type: OrderType,
-    ) -> (TailEndStrategy, String) {
+    async fn make_exit_fill_test_setup(exit_order_type: OrderType) -> (TailEndStrategy, String) {
         let mut config = ArbitrageConfig::default();
         config.use_chainlink = false;
         config.enabled = true;
@@ -4211,11 +4192,18 @@ mod tests {
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
             recovery_cost: Decimal::ZERO,
-
         };
         base.record_position(pos).await;
 
-        let exit_oid = format!("exit-{}-token_up-{}", if exit_order_type == OrderType::Gtc { "gtc" } else { "fok" }, now.timestamp_millis());
+        let exit_oid = format!(
+            "exit-{}-token_up-{}",
+            if exit_order_type == OrderType::Gtc {
+                "gtc"
+            } else {
+                "fok"
+            },
+            now.timestamp_millis()
+        );
 
         // Set lifecycle to ExitExecuting
         {
@@ -4282,7 +4270,10 @@ mod tests {
             .values()
             .flat_map(|v| v.iter())
             .any(|p| p.token_id == "token_up");
-        assert!(!has_position, "Position should be removed after full exit fill");
+        assert!(
+            !has_position,
+            "Position should be removed after full exit fill"
+        );
 
         // Lifecycle should be cleaned up (removed by reduce_or_remove_position_by_token)
         let lifecycles = strategy.base.position_lifecycle.read().await;
@@ -4298,7 +4289,6 @@ mod tests {
             !has_token,
             "exit_orders_by_id should be cleaned up after full fill"
         );
-
     }
 
     /// Full exit fill (GTC) routes correctly: removes position and lifecycle,
@@ -4320,7 +4310,10 @@ mod tests {
             .values()
             .flat_map(|v| v.iter())
             .any(|p| p.token_id == "token_up");
-        assert!(!has_position, "Position should be removed after GTC exit fill");
+        assert!(
+            !has_position,
+            "Position should be removed after GTC exit fill"
+        );
 
         // Lifecycle should be cleaned up
         let lifecycles = strategy.base.position_lifecycle.read().await;
@@ -4328,7 +4321,6 @@ mod tests {
             !lifecycles.contains_key("token_up"),
             "Lifecycle should be removed after GTC full fill"
         );
-
     }
 
     /// Partial exit fill (FOK) with remaining below min_order_size
@@ -4406,7 +4398,6 @@ mod tests {
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
             recovery_cost: Decimal::ZERO,
-
         };
         base.record_position(pos).await;
 
@@ -4456,7 +4447,10 @@ mod tests {
         // Remaining = 20 - 12 = 8 > min_order_size(5) — should be in ResidualRisk
         let lifecycles = strategy.base.position_lifecycle.read().await;
         let lc = lifecycles.get("token_up");
-        assert!(lc.is_some(), "Lifecycle should exist for remaining position");
+        assert!(
+            lc.is_some(),
+            "Lifecycle should exist for remaining position"
+        );
         match &lc.unwrap().state {
             PositionLifecycleState::ResidualRisk {
                 remaining_size,
@@ -4530,7 +4524,6 @@ mod tests {
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
             recovery_cost: Decimal::ZERO,
-
         };
         base.record_position(pos).await;
 
@@ -4604,7 +4597,10 @@ mod tests {
         let actions = strategy
             .on_order_filled(&recovery_oid, "token_down", dec!(0.07), dec!(10))
             .await;
-        assert!(actions.is_empty(), "Recovery fill should not produce further actions");
+        assert!(
+            actions.is_empty(),
+            "Recovery fill should not produce further actions"
+        );
 
         // Lifecycle should transition to Cooldown
         let lifecycles = strategy.base.position_lifecycle.read().await;
@@ -4680,7 +4676,6 @@ mod tests {
             entry_order_type: OrderType::Gtc,
             entry_fee_per_share: Decimal::ZERO,
             recovery_cost: Decimal::ZERO,
-
         };
         base.record_position(pos).await;
 
@@ -4746,9 +4741,16 @@ mod tests {
                 use_gtc_next,
                 ..
             } => {
-                assert_eq!(*remaining_size, dec!(10), "Remaining should be full position size");
+                assert_eq!(
+                    *remaining_size,
+                    dec!(10),
+                    "Remaining should be full position size"
+                );
                 assert_eq!(*retry_count, 1, "Should be first retry");
-                assert!(*use_gtc_next, "Liquidity rejection + gtc_fallback → should use GTC next");
+                assert!(
+                    *use_gtc_next,
+                    "Liquidity rejection + gtc_fallback → should use GTC next"
+                );
             }
             other => panic!("Expected ResidualRisk, got: {other:?}"),
         }
@@ -4760,6 +4762,5 @@ mod tests {
             !has_token,
             "exit_orders_by_id should be cleaned up after rejection"
         );
-
     }
 }

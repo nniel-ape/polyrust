@@ -23,8 +23,7 @@ use polyrust_market::ChainlinkHistoricalClient;
 use crate::crypto_arb::config::{ArbitrageConfig, SizingConfig};
 use crate::crypto_arb::types::{
     ArbitragePosition, BoundarySnapshot, ExitOrderMeta, MarketWithReference, ModeStats,
-    OpenLimitOrder, OrderTelemetry, PendingOrder, PositionLifecycle,
-    ReferenceQuality, SpikeEvent,
+    OpenLimitOrder, OrderTelemetry, PendingOrder, PositionLifecycle, ReferenceQuality, SpikeEvent,
 };
 
 /// Result of a composite fair price calculation from multiple data sources.
@@ -72,7 +71,6 @@ impl StopLossRejectionKind {
             Self::Transient
         }
     }
-
 }
 
 /// Number of price history entries to keep per coin.
@@ -782,8 +780,7 @@ impl CryptoArbBase {
             }
 
             // Propagate to per-position lifecycle entries
-            let snapshot =
-                crate::crypto_arb::types::CompositePriceSnapshot::from_result(result);
+            let snapshot = crate::crypto_arb::types::CompositePriceSnapshot::from_result(result);
             let positions = self.positions.read().await;
             let mut lifecycles = self.position_lifecycle.write().await;
             for positions_vec in positions.values() {
@@ -1330,8 +1327,7 @@ impl CryptoArbBase {
                         - (pos.entry_fee_per_share * pos.size)
                         + pos.recovery_cost
                 } else {
-                    -(pos.entry_price * pos.size)
-                        - (pos.entry_fee_per_share * pos.size)
+                    -(pos.entry_price * pos.size) - (pos.entry_fee_per_share * pos.size)
                         + pos.recovery_cost
                 };
                 self.record_trade_pnl(pnl).await;
