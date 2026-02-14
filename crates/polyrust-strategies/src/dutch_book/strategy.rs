@@ -238,9 +238,17 @@ impl DutchBookStrategy {
         }
 
         if let Some(exec) = self.active_executions.get_mut(&market_id) {
-            // Check if this is an unwind sell order (execution in PartialFill state + SELL side)
-            if exec.state.needs_unwind() && result.side == OrderSide::Sell {
-                exec.state = exec.state.clone().start_unwind(order_id.clone());
+            // Check if this is an unwind sell order:
+            // - Unwinding with empty sell_order_id (pending Placed event) + SELL side
+            let is_pending_unwind = matches!(
+                &exec.state,
+                ExecutionState::Unwinding { sell_order_id } if sell_order_id.is_empty()
+            ) && result.side == OrderSide::Sell;
+
+            if is_pending_unwind {
+                exec.state = ExecutionState::Unwinding {
+                    sell_order_id: order_id.clone(),
+                };
                 self.order_to_market
                     .insert(order_id, market_id.clone());
                 debug!(
@@ -448,6 +456,56 @@ impl DutchBookStrategy {
         }
     }
 
+    /// Handle a batch rejection where order_id is None.
+    /// Uses token_id to locate the active execution and clean it up.
+    async fn handle_batch_rejection(&mut self, token_id: &str) -> Vec<Action> {
+        let market_id = match self.analyzer.market_for_token(token_id) {
+            Some(entry) => entry.market_id.clone(),
+            None => return vec![],
+        };
+
+        let exec = match self.active_executions.get(&market_id) {
+            Some(e) => e,
+            None => return vec![],
+        };
+
+        // If one side already filled, this is a partial fill needing unwind
+        if exec.yes_fill_price.is_some() != exec.no_fill_price.is_some() {
+            let filled_side = if exec.yes_fill_price.is_some() {
+                FilledSide::Yes
+            } else {
+                FilledSide::No
+            };
+            let filled_order_id = if exec.yes_fill_price.is_some() {
+                exec.yes_order_id.clone()
+            } else {
+                exec.no_order_id.clone()
+            };
+
+            let exec = self.active_executions.get_mut(&market_id).unwrap();
+            exec.state = ExecutionState::PartialFill {
+                filled_side,
+                filled_order_id,
+            };
+
+            warn!(
+                %market_id, %token_id,
+                "Batch rejection with partial fill — triggering emergency unwind"
+            );
+            return self.start_emergency_unwind(&market_id);
+        }
+
+        // No fills on either side — clean up the execution entirely
+        warn!(
+            %market_id, %token_id,
+            "Batch rejection with no fills — removing stale execution"
+        );
+        let exec = self.active_executions.remove(&market_id).unwrap();
+        self.order_to_market.remove(&exec.yes_order_id);
+        self.order_to_market.remove(&exec.no_order_id);
+        vec![]
+    }
+
     /// Start emergency unwind for a partially-filled paired order.
     ///
     /// Sells the filled side at a discounted price (buy_price * (1 - unwind_discount))
@@ -495,6 +553,14 @@ impl DutchBookStrategy {
             "Emergency unwind: selling filled side at discounted price"
         );
 
+        // Transition to Unwinding immediately to prevent duplicate unwind orders
+        // from cleanup_stale_executions firing before the Placed event arrives.
+        // The sell_order_id will be updated when handle_order_placed receives the Placed event.
+        let exec = self.active_executions.get_mut(market_id).unwrap();
+        exec.state = ExecutionState::Unwinding {
+            sell_order_id: String::new(),
+        };
+
         // Build GTC SELL order for the filled side
         let sell_order = OrderRequest::new(
             filled_token_id,
@@ -532,9 +598,20 @@ impl DutchBookStrategy {
             self.order_to_market.remove(&exec.no_order_id);
             self.order_to_market.remove(order_id);
 
+            // Loss = buy cost (price + taker fee) - sell proceeds (price * (1 - discount))
+            // The sell is GTC (maker, 0% fee), so sell proceeds = price * (1 - discount) * size
+            let fee_rate = polyrust_core::fees::default_taker_fee_rate();
             let loss = match (&exec.yes_fill_price, &exec.no_fill_price) {
-                (Some(p), None) => p * exec.size * self.config.unwind_discount,
-                (None, Some(p)) => p * exec.size * self.config.unwind_discount,
+                (Some(p), None) => {
+                    let buy_cost = (*p + taker_fee_per_share(*p, fee_rate)) * exec.size;
+                    let sell_proceeds = *p * (Decimal::ONE - self.config.unwind_discount) * exec.size;
+                    buy_cost - sell_proceeds
+                }
+                (None, Some(p)) => {
+                    let buy_cost = (*p + taker_fee_per_share(*p, fee_rate)) * exec.size;
+                    let sell_proceeds = *p * (Decimal::ONE - self.config.unwind_discount) * exec.size;
+                    buy_cost - sell_proceeds
+                }
                 _ => Decimal::ZERO,
             };
 
@@ -576,7 +653,10 @@ impl DutchBookStrategy {
                 "Market expired with open Dutch Book position — requesting redemption"
             );
 
-            // Record realized profit: Dutch Book holds both sides, payout is $1/share
+            // Record expected profit pending redemption.
+            // Note: profit is not truly realized until RedeemPosition succeeds.
+            // The event system does not currently provide a redemption result event,
+            // so we record optimistically here. If redemption fails, this overstates P&L.
             {
                 let mut state = self.shared_state.write().await;
                 state.total_realized_pnl += pos.expected_profit;
@@ -751,10 +831,15 @@ impl Strategy for DutchBookStrategy {
                 self.handle_order_cancelled(order_id).await
             }
 
-            Event::OrderUpdate(OrderEvent::Rejected { order_id, reason, .. }) => {
+            Event::OrderUpdate(OrderEvent::Rejected { order_id, reason, token_id }) => {
                 if let Some(oid) = order_id {
                     debug!(%oid, %reason, "Dutch Book order rejected");
                     self.handle_order_cancelled(oid).await
+                } else if let Some(tid) = token_id {
+                    // Batch failure: order_id is None but token_id is available.
+                    // Use token_id to find the active execution and clean it up.
+                    debug!(%tid, %reason, "Dutch Book batch order rejected (no order_id)");
+                    self.handle_batch_rejection(tid).await
                 } else {
                     vec![]
                 }

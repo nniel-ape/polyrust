@@ -106,7 +106,7 @@ fn render_summary(state: &DutchBookState, html: &mut String) {
     };
     let _ = write!(
         html,
-        r#"<div class="bp-config-label">Realized P&amp;L:</div><div class="bp-config-value {pnl_class}">${:.4}</div>"#,
+        r#"<div class="bp-config-label" title="Includes pending redemptions">Realized P&amp;L:</div><div class="bp-config-value {pnl_class}">${:.4}</div>"#,
         state.total_realized_pnl,
     );
     let _ = write!(
