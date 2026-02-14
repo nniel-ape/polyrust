@@ -443,23 +443,22 @@ impl BacktestEngine {
                 .await?;
 
             // Execute actions and feed fill events back to strategy
-            for action in actions {
-                match action {
-                    Action::PlaceOrder(order_req) => {
-                        self.orders_submitted += 1;
-                        trades.extend(self.execute_and_notify(order_req).await?);
-                    }
-                    Action::PlaceBatchOrder(orders) => {
-                        for order in orders {
-                            self.orders_submitted += 1;
-                            trades.extend(self.execute_and_notify(order).await?);
-                        }
-                    }
-                    other => {
-                        if let Some(trade) = self.execute_action(other).await? {
-                            trades.push(trade);
-                        }
-                    }
+            trades.extend(self.execute_strategy_actions(actions).await?);
+
+            // Emit synthetic OrderbookUpdate so strategy lifecycle logic fires
+            if let Event::MarketData(MarketDataEvent::PriceChange { token_id, .. }) =
+                &historical_event.event
+            {
+                let snapshot = {
+                    let md = self.ctx.market_data.read().await;
+                    md.orderbooks.get(token_id).cloned()
+                };
+                if let Some(snapshot) = snapshot {
+                    let ob_event =
+                        Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot));
+                    let ob_actions =
+                        self.strategy.on_event(&ob_event, &self.ctx).await?;
+                    trades.extend(self.execute_strategy_actions(ob_actions).await?);
                 }
             }
 
@@ -598,23 +597,7 @@ impl BacktestEngine {
 
         // Call strategy.on_stop
         let final_actions = self.strategy.on_stop(&self.ctx).await?;
-        for action in final_actions {
-            match action {
-                Action::PlaceOrder(order_req) => {
-                    trades.extend(self.execute_and_notify(order_req).await?);
-                }
-                Action::PlaceBatchOrder(orders) => {
-                    for order in orders {
-                        trades.extend(self.execute_and_notify(order).await?);
-                    }
-                }
-                other => {
-                    if let Some(trade) = self.execute_action(other).await? {
-                        trades.push(trade);
-                    }
-                }
-            }
-        }
+        trades.extend(self.execute_strategy_actions(final_actions).await?);
 
         info!(
             strategy = self.strategy.name(),
@@ -1062,6 +1045,35 @@ impl BacktestEngine {
         events.sort_by_key(|e| e.timestamp);
 
         Ok(events)
+    }
+
+    /// Execute a list of strategy actions, dispatching orders through `execute_and_notify`
+    /// (with fill-event feedback) and other actions through `execute_action`.
+    async fn execute_strategy_actions(
+        &mut self,
+        actions: Vec<Action>,
+    ) -> Result<Vec<BacktestTrade>> {
+        let mut trades = Vec::new();
+        for action in actions {
+            match action {
+                Action::PlaceOrder(order_req) => {
+                    self.orders_submitted += 1;
+                    trades.extend(self.execute_and_notify(order_req).await?);
+                }
+                Action::PlaceBatchOrder(orders) => {
+                    for order in orders {
+                        self.orders_submitted += 1;
+                        trades.extend(self.execute_and_notify(order).await?);
+                    }
+                }
+                other => {
+                    if let Some(trade) = self.execute_action(other).await? {
+                        trades.push(trade);
+                    }
+                }
+            }
+        }
+        Ok(trades)
     }
 
     /// Execute a single action from the strategy.
