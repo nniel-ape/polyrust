@@ -19,7 +19,7 @@ pub struct DutchBookConfig {
     /// profit_pct = (1.0 - combined_cost) / combined_cost
     pub min_profit_threshold: Decimal,
 
-    /// Maximum USDC size per side of a paired order (default: 100)
+    /// Maximum shares per side of a paired order (default: 100)
     pub max_position_size: Decimal,
 
     /// Minimum market liquidity in USD to consider (default: 10000)

@@ -105,16 +105,27 @@ impl ArbitrageAnalyzer {
         let ask_b = book_b.best_ask()?;
         let size_b = book_b.best_ask_depth()?;
 
-        // Calculate combined cost
+        // Calculate combined cost (gross, before fees)
         let combined_cost = ask_a + ask_b;
 
-        // Reject if combined cost is too high (no profit after fees)
+        // Reject if combined cost is too high (no profit possible)
         if combined_cost >= config.max_combined_cost {
             return None;
         }
 
-        // Calculate profit percentage: (1.0 - combined_cost) / combined_cost
-        let profit_pct = (Decimal::ONE - combined_cost) / combined_cost;
+        // Compute taker fees for both FOK orders: 2 * p * (1-p) * rate per share
+        let fee_rate = polyrust_core::fees::default_taker_fee_rate();
+        let fee_a = taker_fee_per_share(ask_a, fee_rate);
+        let fee_b = taker_fee_per_share(ask_b, fee_rate);
+        let net_combined_cost = combined_cost + fee_a + fee_b;
+
+        // Reject if net cost (including fees) exceeds payout
+        if net_combined_cost >= Decimal::ONE {
+            return None;
+        }
+
+        // Calculate net profit percentage after fees
+        let profit_pct = (Decimal::ONE - net_combined_cost) / net_combined_cost;
 
         // Reject if profit below threshold
         if profit_pct < config.min_profit_threshold {

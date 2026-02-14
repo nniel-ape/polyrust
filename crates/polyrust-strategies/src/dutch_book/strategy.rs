@@ -132,14 +132,17 @@ impl DutchBookStrategy {
         };
         drop(md);
 
-        // Check balance before placing orders
-        let required_usdc = opportunity.combined_cost * opportunity.max_size;
+        // Check balance before placing orders (include estimated taker fees)
+        let fee_rate = polyrust_core::fees::default_taker_fee_rate();
+        let fee_yes = taker_fee_per_share(opportunity.yes_ask, fee_rate) * opportunity.max_size;
+        let fee_no = taker_fee_per_share(opportunity.no_ask, fee_rate) * opportunity.max_size;
+        let required_usdc = opportunity.combined_cost * opportunity.max_size + fee_yes + fee_no;
         let available = ctx.balance.read().await.available_usdc;
         if available < required_usdc {
             debug!(
                 market_id = %opportunity.market_id,
                 %required_usdc, %available,
-                "Insufficient balance for Dutch Book trade"
+                "Insufficient balance for Dutch Book trade (including fees)"
             );
             return vec![];
         }
@@ -335,7 +338,11 @@ impl DutchBookStrategy {
 
         let yes_price = exec.yes_fill_price.unwrap_or(Decimal::ZERO);
         let no_price = exec.no_fill_price.unwrap_or(Decimal::ZERO);
-        let combined_cost = (yes_price + no_price) * exec.size;
+        let fee_rate = polyrust_core::fees::default_taker_fee_rate();
+        let total_fees = (taker_fee_per_share(yes_price, fee_rate)
+            + taker_fee_per_share(no_price, fee_rate))
+            * exec.size;
+        let combined_cost = (yes_price + no_price) * exec.size + total_fees;
         let expected_profit = exec.size - combined_cost;
 
         info!(
@@ -595,7 +602,8 @@ impl DutchBookStrategy {
     }
 
     /// Clean up stale executions that have exceeded the timeout.
-    /// Returns actions for any unwinds triggered by timed-out partial fills.
+    /// For partial fills, triggers emergency unwind to sell the filled side.
+    /// For executions with no fills, removes them cleanly.
     fn cleanup_stale_executions(&mut self) -> Vec<Action> {
         let now = Utc::now();
         let timeout = Duration::seconds(EXECUTION_TIMEOUT_SECS);
@@ -608,25 +616,48 @@ impl DutchBookStrategy {
 
         let mut actions = vec![];
         for market_id in stale_ids {
-            let exec = self.active_executions.remove(&market_id).unwrap();
-            self.order_to_market.remove(&exec.yes_order_id);
-            self.order_to_market.remove(&exec.no_order_id);
+            let exec = self.active_executions.get(&market_id).unwrap();
+            let has_yes_fill = exec.yes_fill_price.is_some();
+            let has_no_fill = exec.no_fill_price.is_some();
 
             warn!(
                 %market_id,
                 state = ?exec.state,
                 age_secs = (now - exec.submitted_at).num_seconds(),
-                "Removing stale Dutch Book execution (timed out)"
+                has_yes_fill, has_no_fill,
+                "Stale Dutch Book execution timed out"
             );
 
-            // If one side was filled, we have an unhedged position — log for manual review
-            if exec.yes_fill_price.is_some() || exec.no_fill_price.is_some() {
-                actions.push(Action::Log {
-                    level: LogLevel::Warn,
-                    message: format!(
-                        "Dutch Book: stale execution for {market_id} had partial fills — manual review required"
-                    ),
-                });
+            if has_yes_fill != has_no_fill {
+                // One side filled, one side not — force into PartialFill and unwind
+                let filled_side = if has_yes_fill {
+                    FilledSide::Yes
+                } else {
+                    FilledSide::No
+                };
+                let filled_order_id = if has_yes_fill {
+                    exec.yes_order_id.clone()
+                } else {
+                    exec.no_order_id.clone()
+                };
+
+                // Update the execution state to PartialFill so start_emergency_unwind works
+                let exec = self.active_executions.get_mut(&market_id).unwrap();
+                exec.state = ExecutionState::PartialFill {
+                    filled_side,
+                    filled_order_id,
+                };
+
+                warn!(
+                    %market_id,
+                    "Triggering emergency unwind for timed-out partial fill"
+                );
+                actions.extend(self.start_emergency_unwind(&market_id));
+            } else {
+                // No fills or both fills (BothFilled shouldn't timeout, but handle gracefully)
+                let exec = self.active_executions.remove(&market_id).unwrap();
+                self.order_to_market.remove(&exec.yes_order_id);
+                self.order_to_market.remove(&exec.no_order_id);
             }
         }
         actions
