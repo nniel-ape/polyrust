@@ -25,3 +25,5 @@ sweep_results*
 .tunnel-key.deploy
 tunnel-key
 tunnel-key.pub
+.cargo-home/
+.rustup/
