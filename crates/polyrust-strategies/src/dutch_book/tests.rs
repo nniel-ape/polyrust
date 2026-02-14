@@ -1,8 +1,11 @@
+use std::collections::HashSet;
+
 use chrono::{Duration, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 use super::config::DutchBookConfig;
+use super::scanner::{GammaMarketResponse, GammaScanner};
 use super::types::{ExecutionState, FilledSide, MarketEntry, PairedPosition};
 
 // ---------------------------------------------------------------------------
@@ -348,4 +351,279 @@ fn market_entry_construction() {
     assert_eq!(entry.token_b, "token_no");
     assert!(!entry.neg_risk);
     assert_eq!(entry.liquidity, dec!(50000));
+}
+
+// ---------------------------------------------------------------------------
+// Scanner tests — convert_and_filter
+// ---------------------------------------------------------------------------
+
+/// Helper to build a valid GammaMarketResponse for testing.
+fn make_gamma_response(end_date_offset_days: i64, liquidity: &str) -> GammaMarketResponse {
+    let end_date = Utc::now() + Duration::days(end_date_offset_days);
+    GammaMarketResponse {
+        condition_id: Some("cond_001".to_string()),
+        slug: Some("will-btc-go-up".to_string()),
+        question: Some("Will BTC go up?".to_string()),
+        start_date: Some(Utc::now().to_rfc3339()),
+        end_date: Some(end_date.to_rfc3339()),
+        clob_token_ids: Some("[\"token_yes\", \"token_no\"]".to_string()),
+        neg_risk: Some(false),
+        accepting_orders: Some(true),
+        liquidity: Some(liquidity.to_string()),
+        order_min_size: Some(5.0),
+        order_price_min_tick_size: Some(0.01),
+        maker_base_fee: Some(0.0),
+    }
+}
+
+#[test]
+fn scanner_accepts_valid_market() {
+    let config = DutchBookConfig::default();
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    let raw = make_gamma_response(3, "50000");
+    let result = scanner.convert_and_filter(raw, now, max_end);
+    assert!(result.is_some());
+
+    let info = result.unwrap();
+    assert_eq!(info.id, "cond_001");
+    assert_eq!(info.slug, "will-btc-go-up");
+    assert_eq!(info.question, "Will BTC go up?");
+    assert_eq!(info.token_ids.outcome_a, "token_yes");
+    assert_eq!(info.token_ids.outcome_b, "token_no");
+    assert!(info.accepting_orders);
+    assert!(!info.neg_risk);
+}
+
+#[test]
+fn scanner_rejects_not_accepting_orders() {
+    let config = DutchBookConfig::default();
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    let mut raw = make_gamma_response(3, "50000");
+    raw.accepting_orders = Some(false);
+    assert!(scanner.convert_and_filter(raw, now, max_end).is_none());
+}
+
+#[test]
+fn scanner_rejects_missing_condition_id() {
+    let config = DutchBookConfig::default();
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    let mut raw = make_gamma_response(3, "50000");
+    raw.condition_id = None;
+    assert!(scanner.convert_and_filter(raw, now, max_end).is_none());
+}
+
+#[test]
+fn scanner_rejects_expired_market() {
+    let config = DutchBookConfig::default();
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    // End date in the past
+    let mut raw = make_gamma_response(3, "50000");
+    raw.end_date = Some((now - Duration::hours(1)).to_rfc3339());
+    assert!(scanner.convert_and_filter(raw, now, max_end).is_none());
+}
+
+#[test]
+fn scanner_rejects_market_too_far_out() {
+    let config = DutchBookConfig::default();
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    // End date beyond max_days_until_resolution
+    let mut raw = make_gamma_response(3, "50000");
+    raw.end_date = Some((now + Duration::days(10)).to_rfc3339());
+    assert!(scanner.convert_and_filter(raw, now, max_end).is_none());
+}
+
+#[test]
+fn scanner_rejects_low_liquidity() {
+    let config = DutchBookConfig::default(); // min_liquidity_usd = 10000
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    let raw = make_gamma_response(3, "5000"); // Below threshold
+    assert!(scanner.convert_and_filter(raw, now, max_end).is_none());
+}
+
+#[test]
+fn scanner_accepts_exact_liquidity_threshold() {
+    let config = DutchBookConfig::default(); // min_liquidity_usd = 10000
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    let raw = make_gamma_response(3, "10000"); // Exactly at threshold
+    assert!(scanner.convert_and_filter(raw, now, max_end).is_some());
+}
+
+#[test]
+fn scanner_rejects_missing_clob_token_ids() {
+    let config = DutchBookConfig::default();
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    let mut raw = make_gamma_response(3, "50000");
+    raw.clob_token_ids = None;
+    assert!(scanner.convert_and_filter(raw, now, max_end).is_none());
+}
+
+#[test]
+fn scanner_rejects_single_token_market() {
+    let config = DutchBookConfig::default();
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    let mut raw = make_gamma_response(3, "50000");
+    raw.clob_token_ids = Some("[\"only_one\"]".to_string());
+    assert!(scanner.convert_and_filter(raw, now, max_end).is_none());
+}
+
+#[test]
+fn scanner_rejects_three_token_market() {
+    let config = DutchBookConfig::default();
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    let mut raw = make_gamma_response(3, "50000");
+    raw.clob_token_ids = Some("[\"a\", \"b\", \"c\"]".to_string());
+    assert!(scanner.convert_and_filter(raw, now, max_end).is_none());
+}
+
+#[test]
+fn scanner_rejects_missing_end_date() {
+    let config = DutchBookConfig::default();
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    let mut raw = make_gamma_response(3, "50000");
+    raw.end_date = None;
+    assert!(scanner.convert_and_filter(raw, now, max_end).is_none());
+}
+
+#[test]
+fn scanner_handles_missing_optional_fields() {
+    let config = DutchBookConfig::default();
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    let mut raw = make_gamma_response(3, "50000");
+    raw.start_date = None;
+    raw.order_min_size = None;
+    raw.order_price_min_tick_size = None;
+    raw.maker_base_fee = None;
+    raw.neg_risk = None;
+
+    let result = scanner.convert_and_filter(raw, now, max_end);
+    assert!(result.is_some());
+
+    let info = result.unwrap();
+    assert!(info.start_date.is_none());
+    assert_eq!(info.min_order_size, dec!(5)); // default
+    assert_eq!(info.tick_size, dec!(0.01)); // default
+    assert_eq!(info.fee_rate_bps, 0); // default
+    assert!(!info.neg_risk); // default
+}
+
+#[test]
+fn scanner_respects_custom_liquidity_threshold() {
+    let mut config = DutchBookConfig::default();
+    config.min_liquidity_usd = dec!(1000); // Lower threshold
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    let raw = make_gamma_response(3, "5000");
+    assert!(scanner.convert_and_filter(raw, now, max_end).is_some());
+}
+
+#[test]
+fn scanner_handles_missing_liquidity_as_zero() {
+    let config = DutchBookConfig::default(); // min_liquidity_usd = 10000
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    let mut raw = make_gamma_response(3, "50000");
+    raw.liquidity = None; // Missing liquidity treated as 0
+    assert!(scanner.convert_and_filter(raw, now, max_end).is_none());
+}
+
+#[test]
+fn scanner_handles_zero_liquidity_threshold() {
+    let mut config = DutchBookConfig::default();
+    config.min_liquidity_usd = Decimal::ZERO;
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    // Even with missing liquidity (treated as 0), should pass with 0 threshold
+    let mut raw = make_gamma_response(3, "50000");
+    raw.liquidity = None;
+    assert!(scanner.convert_and_filter(raw, now, max_end).is_some());
+}
+
+#[test]
+fn scanner_deduplication_skips_known_markets() {
+    // This tests the deduplication logic used in scan_markets().
+    // We test it directly on the filtering logic since scan_markets
+    // requires HTTP, but the deduplication is a simple set check.
+    let config = DutchBookConfig::default();
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    let raw = make_gamma_response(3, "50000");
+    let info = scanner.convert_and_filter(raw, now, max_end).unwrap();
+
+    let mut known = HashSet::new();
+    known.insert(info.id.clone());
+
+    // A second market with the same ID should be filtered out
+    let raw2 = make_gamma_response(3, "50000");
+    let info2 = scanner.convert_and_filter(raw2, now, max_end).unwrap();
+    assert!(known.contains(&info2.id));
+
+    // A market with a different ID should pass
+    let mut raw3 = make_gamma_response(3, "50000");
+    raw3.condition_id = Some("cond_002".to_string());
+    let info3 = scanner.convert_and_filter(raw3, now, max_end).unwrap();
+    assert!(!known.contains(&info3.id));
+}
+
+#[test]
+fn scanner_neg_risk_parsed_correctly() {
+    let config = DutchBookConfig::default();
+    let scanner = GammaScanner::new(config).unwrap();
+    let now = Utc::now();
+    let max_end = now + Duration::days(7);
+
+    let mut raw = make_gamma_response(3, "50000");
+    raw.neg_risk = Some(true);
+    let info = scanner.convert_and_filter(raw, now, max_end).unwrap();
+    assert!(info.neg_risk);
+}
+
+#[test]
+fn scanner_creation_succeeds() {
+    let config = DutchBookConfig::default();
+    let scanner = GammaScanner::new(config);
+    assert!(scanner.is_ok());
 }

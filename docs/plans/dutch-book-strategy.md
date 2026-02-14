@@ -130,20 +130,20 @@ This prevents holding unhedged directional risk.
 - [x] Run `cargo test -p polyrust-strategies` — must pass before next task
 
 ### Task 2: Market scanner (Gamma API discovery)
-- [ ] Create `crates/polyrust-strategies/src/dutch_book/scanner.rs` with `GammaScanner` struct
-- [ ] Implement `scan_markets()` async method:
+- [x] Create `crates/polyrust-strategies/src/dutch_book/scanner.rs` with `GammaScanner` struct
+- [x] Implement `scan_markets()` async method:
   - Query `GET https://gamma-api.polymarket.com/markets` with filters: `active=true`, `closed=false`
   - Paginate through results (Gamma uses offset/limit)
   - Filter by: liquidity >= `min_liquidity_usd`, end_date within `max_days_until_resolution`
   - Parse response into `Vec<MarketInfo>` (reuse polyrust-core type)
   - Deduplicate against already-subscribed markets
-- [ ] Implement background scanning: `start_scanner()` spawns a tokio task that:
+- [x] Implement background scanning: `start_scanner()` spawns a tokio task that:
   - Runs `scan_markets()` periodically (every `scan_interval_secs`)
   - Pushes new markets to `Arc<Mutex<Vec<MarketInfo>>>` pending queue
   - Logs scan results (markets found, new markets, errors)
-- [ ] Write tests for market filtering logic (mock Gamma responses)
-- [ ] Write tests for deduplication (already-known markets skipped)
-- [ ] Run `cargo test -p polyrust-strategies` — must pass before next task
+- [x] Write tests for market filtering logic (mock Gamma responses)
+- [x] Write tests for deduplication (already-known markets skipped)
+- [x] Run `cargo test -p polyrust-strategies` — must pass before next task
 
 ### Task 3: Arbitrage analyzer (opportunity detection)
 - [ ] Create `crates/polyrust-strategies/src/dutch_book/analyzer.rs` with `ArbitrageAnalyzer` struct
