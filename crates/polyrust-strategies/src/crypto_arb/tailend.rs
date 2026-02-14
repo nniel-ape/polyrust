@@ -2297,13 +2297,15 @@ impl Strategy for TailEndStrategy {
                                         .reduce_or_remove_position_by_token(position_token, remaining)
                                         .await;
                                 } else {
-                                    // Transition to ResidualRisk
+                                    // Transition to ResidualRisk with incremented retry count
+                                    let prior_retry =
+                                        exit_meta.as_ref().map(|m| m.retry_count).unwrap_or(0);
                                     let use_gtc = kind == StopLossRejectionKind::Liquidity
                                         && self.base.config.stop_loss.gtc_fallback;
                                     self.transition_to_residual_risk(
                                         position_token,
                                         remaining,
-                                        1, // First retry
+                                        prior_retry + 1,
                                         use_gtc,
                                         &format!("exit rejected: {reason}"),
                                         now,

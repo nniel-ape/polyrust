@@ -3769,6 +3769,8 @@ fn evaluate_triggers_dual_trigger_requires_consecutive_ticks() {
 
     // Both conditions met: crypto reversed 0.5% and market dropped 0.05
     // Use a small bid drop that doesn't reach hard_drop_abs (0.08)
+    // seconds_since_entry=25 to be beyond post_entry_window_secs (20) so Level 4
+    // doesn't fire first.
     let ctx = make_trigger_ctx(
         dec!(0.95),  // entry
         dec!(0.95),  // peak
@@ -3776,7 +3778,7 @@ fn evaluate_triggers_dual_trigger_requires_consecutive_ticks() {
         dec!(90000), // reference
         Some(dec!(89700)), // reversal = 300/90000 = 0.333% >= reversal_pct (0.003)
         300,
-        15,
+        25,
     );
 
     // First tick: counter goes to 1, not yet at threshold (2)
@@ -3803,6 +3805,8 @@ fn evaluate_triggers_dual_trigger_resets_on_clear() {
     let mut lifecycle = PositionLifecycle::new();
 
     // Tick 1: both conditions met
+    // seconds_since_entry=25 to be beyond post_entry_window_secs (20) so Level 4
+    // doesn't fire first.
     let ctx1 = make_trigger_ctx(
         dec!(0.95),
         dec!(0.95),
@@ -3810,7 +3814,7 @@ fn evaluate_triggers_dual_trigger_resets_on_clear() {
         dec!(90000),
         Some(dec!(89700)), // crypto reversed
         300,
-        15,
+        25,
     );
     lifecycle.evaluate_triggers(&ctx1, &sl, &te);
     assert_eq!(lifecycle.dual_trigger_ticks, 1);
@@ -3823,7 +3827,7 @@ fn evaluate_triggers_dual_trigger_resets_on_clear() {
         dec!(90000),
         Some(dec!(89700)), // crypto still reversed
         300,
-        16,
+        26,
     );
     lifecycle.evaluate_triggers(&ctx2, &sl, &te);
     assert_eq!(lifecycle.dual_trigger_ticks, 0, "Counter should reset when market condition clears");

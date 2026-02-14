@@ -854,20 +854,18 @@ impl PositionLifecycle {
             }
         }
 
-        // ── Level 4: Post-Entry Deferred ─────────────────────────────────
-        // Fires when within sell delay window and adverse move detected.
+        // ── Level 4: Post-Entry Exit ────────────────────────────────────
+        // Fires within post_entry_window_secs of entry when adverse move detected.
+        // During sell delay: caller defers to DeferredExit state.
+        // After sell delay but within window: caller executes exit immediately.
         let seconds_since_entry = ctx
             .now
             .signed_duration_since(ctx.entry_time)
             .num_seconds();
-        let within_sell_delay =
-            seconds_since_entry < tailend_config.min_sell_delay_secs;
-        // Note: within_post_entry_window is always true when within_sell_delay
-        // is true (config validates post_entry_window_secs > min_sell_delay_secs).
-        // The DeferredExit path in handle_orderbook_update re-evaluates triggers
-        // after sell delay expires, using Levels 1-3.
+        let within_post_entry_window =
+            seconds_since_entry < tailend_config.post_entry_window_secs;
 
-        if within_sell_delay && book_fresh {
+        if within_post_entry_window && book_fresh {
             let bid_drop = ctx.entry_price - ctx.current_bid;
             if bid_drop >= tailend_config.post_entry_exit_drop {
                 return Some(StopLossTriggerKind::PostEntryExit { bid_drop });
