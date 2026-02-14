@@ -235,7 +235,7 @@ Strategy-specific dashboard available at `http://127.0.0.1:3000/strategy/crypto-
 - Open limit orders (GTC maker orders)
 - Active markets with reference prices and spreads
 - Recent spike events for cross-correlation
-- Per-mode performance statistics (win rate, total P&L, recent trades)
+- Performance statistics (win rate, total P&L, recent trades)
 
 ## Backtesting
 
