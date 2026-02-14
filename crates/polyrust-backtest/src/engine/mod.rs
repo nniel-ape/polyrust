@@ -334,9 +334,14 @@ impl BacktestEngine {
             trades.extend(self.execute_strategy_actions(actions).await?);
 
             // Emit synthetic ExternalPrice + OrderbookUpdate so stop-loss
-            // freshness gates pass (composite cache refreshed before triggers fire)
+            // freshness gates pass (composite cache refreshed before triggers fire).
+            // Gate on position existence: synthetic events only matter for tokens with
+            // open positions (stop-loss cache + lifecycle triggers are no-ops otherwise).
+            // Entry BUYs come from real ExternalPrice events (Phase 6 klines), so
+            // position_entries is already populated before the next PriceChange arrives.
             if let Event::MarketData(MarketDataEvent::PriceChange { token_id, .. }) =
                 &historical_event.event
+                && self.position_entries.contains_key(token_id)
             {
                 // 1. Co-located ExternalPrice events refresh composite cache
                 if let Some(market_id) = self.token_to_market.get(token_id)
@@ -433,9 +438,16 @@ impl BacktestEngine {
                 }
             }
 
-            // Update progress bar (if present)
+            // Update progress bar (if present), or log periodically in sweep mode
             if let Some(ref pb) = self.progress_bar {
                 pb.set_position((i + 1) as u64);
+            } else if (i + 1) % 500_000 == 0 {
+                info!(
+                    events_processed = i + 1,
+                    total_events,
+                    pct = format!("{:.1}%", (i + 1) as f64 / total_events as f64 * 100.0),
+                    "Sweep run progress"
+                );
             }
         }
 
