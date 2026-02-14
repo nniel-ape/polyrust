@@ -252,9 +252,9 @@ This prevents holding unhedged directional risk.
 - [x] Verify `cargo build --release` succeeds
 
 ### Task 9: [Final] Update documentation
-- [ ] Update `config.example.toml` with complete `[dutch_book]` documentation
-- [ ] Update `CLAUDE.md` with Dutch Book strategy section (brief, like existing crypto-arb section)
-- [ ] Verify backtest compatibility: strategy works with `cargo run -- --backtest` (if test data available)
+- [x] Update `config.example.toml` with complete `[dutch_book]` documentation
+- [x] Update `CLAUDE.md` with Dutch Book strategy section (brief, like existing crypto-arb section)
+- [x] Verify backtest compatibility: strategy works with `cargo run -- --backtest` (if test data available)
 
 ## Technical Details
 
