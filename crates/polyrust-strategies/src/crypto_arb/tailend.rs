@@ -334,47 +334,77 @@ impl TailEndStrategy {
                         );
                     }
                 } else {
-                    // Placement failed — transition to ResidualRisk so the system
-                    // retries on the next orderbook update instead of staying stuck
-                    // in ExitExecuting.
-                    {
+                    // Placement failed — read meta before removing, then handle
+                    // based on lifecycle state.
+                    let meta = {
                         let mut exit_orders = self.base.exit_orders_by_id.write().await;
-                        exit_orders.remove(&syn_key);
-                    }
+                        exit_orders.remove(&syn_key)
+                    };
+                    let prior_retry = meta.as_ref().map(|m| m.retry_count).unwrap_or(0);
                     let now = self.base.event_time().await;
                     let mut lifecycle = self.base.ensure_lifecycle(&result.token_id).await;
-                    // Get remaining size from position
-                    let remaining = {
-                        let positions = self.base.positions.read().await;
-                        positions
-                            .values()
-                            .flat_map(|v| v.iter())
-                            .find(|p| p.token_id == result.token_id)
-                            .map(|p| p.size)
-                            .unwrap_or(Decimal::ZERO)
-                    };
-                    if let Err(e) = lifecycle.transition(
-                        PositionLifecycleState::ResidualRisk {
-                            remaining_size: remaining,
-                            retry_count: 1,
-                            last_attempt: now,
-                            use_gtc_next: false,
-                        },
-                        "exit order placement failed",
-                        now,
-                    ) {
+                    lifecycle.pending_exit_order_id = None;
+
+                    if matches!(lifecycle.state, PositionLifecycleState::RecoveryProbe { .. }) {
+                        // Recovery order placement failed — resolve position with
+                        // loss (RecoveryProbe cannot transition to ResidualRisk).
+                        let pos_info = {
+                            let positions = self.base.positions.read().await;
+                            positions
+                                .values()
+                                .flat_map(|v| v.iter())
+                                .find(|p| p.token_id == result.token_id)
+                                .map(|p| (p.size, p.market_id.clone()))
+                        };
                         warn!(
                             token_id = %result.token_id,
-                            error = %e,
-                            "Failed to transition to ResidualRisk after placement failure"
+                            message = %result.message,
+                            remaining = ?pos_info.as_ref().map(|(s, _)| s),
+                            "Recovery order placement failed — resolving position with loss"
+                        );
+                        if let Some((remaining, market_id)) = pos_info {
+                            self.base.record_recovery_exit_cooldown(&market_id).await;
+                            self.base
+                                .reduce_or_remove_position_by_token(&result.token_id, remaining)
+                                .await;
+                        }
+                        self.base.remove_lifecycle(&result.token_id).await;
+                    } else {
+                        // ExitExecuting placement failed — transition to ResidualRisk
+                        // so the system retries on the next orderbook update.
+                        let remaining = {
+                            let positions = self.base.positions.read().await;
+                            positions
+                                .values()
+                                .flat_map(|v| v.iter())
+                                .find(|p| p.token_id == result.token_id)
+                                .map(|p| p.size)
+                                .unwrap_or(Decimal::ZERO)
+                        };
+                        if let Err(e) = lifecycle.transition(
+                            PositionLifecycleState::ResidualRisk {
+                                remaining_size: remaining,
+                                retry_count: prior_retry + 1,
+                                last_attempt: now,
+                                use_gtc_next: false,
+                            },
+                            "exit order placement failed",
+                            now,
+                        ) {
+                            warn!(
+                                token_id = %result.token_id,
+                                error = %e,
+                                "Failed to transition to ResidualRisk after placement failure"
+                            );
+                        }
+                        self.write_lifecycle(&result.token_id, &lifecycle).await;
+                        warn!(
+                            token_id = %result.token_id,
+                            message = %result.message,
+                            retry_count = prior_retry + 1,
+                            "Exit order placement failed, transitioned to ResidualRisk"
                         );
                     }
-                    self.write_lifecycle(&result.token_id, &lifecycle).await;
-                    warn!(
-                        token_id = %result.token_id,
-                        message = %result.message,
-                        "TailEnd exit order placement failed, transitioned to ResidualRisk"
-                    );
                 }
                 return vec![];
             }
