@@ -499,8 +499,8 @@ impl fmt::Display for StopLossTriggerKind {
 /// - ExitExecuting -> (resolved) (fully filled — position removed)
 /// - ResidualRisk -> ExitExecuting (retry)
 /// - ResidualRisk -> RecoveryProbe (max retries or risk under budget)
-/// - RecoveryProbe -> ExitExecuting (recovery order fails, retry exit)
 /// - RecoveryProbe -> Cooldown (recovery neutralized position)
+/// - RecoveryProbe -> (resolved) (recovery fails — position resolved with loss)
 /// - Cooldown -> Healthy (cooldown elapsed)
 #[derive(Debug, Clone, PartialEq)]
 pub enum PositionLifecycleState {
@@ -612,7 +612,7 @@ pub struct PositionLifecycle {
     /// Order ID of the pending exit order (for routing fills/rejects).
     pub pending_exit_order_id: Option<OrderId>,
     /// Append-only log of state transitions (capped at TRANSITION_LOG_CAP).
-    pub transition_log: Vec<(DateTime<Utc>, String)>,
+    pub transition_log: VecDeque<(DateTime<Utc>, String)>,
 }
 
 /// Snapshot of composite price data for stop-loss decisions.
@@ -653,7 +653,7 @@ impl PositionLifecycle {
             last_composite: None,
             last_composite_at: None,
             pending_exit_order_id: None,
-            transition_log: Vec::new(),
+            transition_log: VecDeque::new(),
         }
     }
 
@@ -677,11 +677,10 @@ impl PositionLifecycle {
         }
         let entry = format!("{} -> {}: {}", self.state.name(), new_state.name(), reason);
         self.state = new_state;
-        self.transition_log.push((now, entry));
+        self.transition_log.push_back((now, entry));
         // Cap the log to prevent unbounded growth
-        if self.transition_log.len() > TRANSITION_LOG_CAP {
-            let excess = self.transition_log.len() - TRANSITION_LOG_CAP;
-            self.transition_log.drain(..excess);
+        while self.transition_log.len() > TRANSITION_LOG_CAP {
+            self.transition_log.pop_front();
         }
         Ok(())
     }
@@ -746,10 +745,9 @@ impl PositionLifecycle {
         let external_fresh = ctx
             .external_age_ms
             .is_some_and(|age| age <= sl_config.sl_max_external_age_ms);
-        let has_relaxed_fresh_source = external_fresh
-            || ctx
-                .external_age_ms
-                .is_some_and(|age| age <= sl_config.sl_max_external_age_ms * 2);
+        let has_relaxed_fresh_source = ctx
+            .external_age_ms
+            .is_some_and(|age| age <= sl_config.sl_max_external_age_ms * 2);
 
         // ── Level 1: Hard Crash ──────────────────────────────────────────
         // Requires only 1 fresh external source + fresh book.
