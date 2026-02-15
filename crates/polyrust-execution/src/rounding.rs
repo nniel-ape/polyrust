@@ -118,8 +118,8 @@ pub fn calculate_order_amounts(
 
     // Order-type-aware USDC precision (mirrors build_signable_order)
     let (raw_maker, raw_taker) = match (order_type, side) {
-        (OrderType::Fok, OrderSide::Buy) => {
-            // Raw price: FOK matches immediately, tick alignment irrelevant.
+        (OrderType::Fok | OrderType::Fak, OrderSide::Buy) => {
+            // Raw price: FOK/FAK match immediately, tick alignment irrelevant.
             // round_down(price) can drop effective bid below the ask.
             let fok_usdc = rounded_size * price;
             let mut usdc = round_up(fok_usdc, config.price_decimals);
@@ -131,7 +131,7 @@ pub fn calculate_order_amounts(
             }
             (usdc, rounded_size)
         }
-        (OrderType::Fok, OrderSide::Sell) => {
+        (OrderType::Fok | OrderType::Fak, OrderSide::Sell) => {
             let fok_usdc = rounded_size * price;
             (rounded_size, round_down(fok_usdc, config.price_decimals))
         }
@@ -197,8 +197,8 @@ pub fn build_signable_order(
     // GTC/GTD (limit) orders use TICK-ROUNDED price: they rest in the book and must
     // align to tick boundaries. API allows `price_decimals + size_decimals` decimals.
     let (maker_amount, taker_amount) = match (order_type, side) {
-        (OrderType::Fok, OrderSide::Buy) => {
-            // Raw price: FOK matches immediately, tick alignment irrelevant.
+        (OrderType::Fok | OrderType::Fak, OrderSide::Buy) => {
+            // Raw price: FOK/FAK match immediately, tick alignment irrelevant.
             // round_down(price) can drop effective bid below the ask.
             let fok_usdc = rounded_size * price;
             let mut usdc = round_up(fok_usdc, config.price_decimals);
@@ -210,7 +210,7 @@ pub fn build_signable_order(
             }
             (usdc, rounded_size)
         }
-        (OrderType::Fok, OrderSide::Sell) => {
+        (OrderType::Fok | OrderType::Fak, OrderSide::Sell) => {
             let fok_usdc = rounded_size * price;
             (rounded_size, round_down(fok_usdc, config.price_decimals))
         }
@@ -252,6 +252,7 @@ pub fn build_signable_order(
         OrderType::Gtc => SdkOrderType::GTC,
         OrderType::Gtd => SdkOrderType::GTD,
         OrderType::Fok => SdkOrderType::FOK,
+        OrderType::Fak => SdkOrderType::FAK,
     };
 
     SignableOrder::builder()
@@ -911,5 +912,168 @@ mod tests {
             round_size_with_tick(dec!(10.999), dec!(0.0001)),
             dec!(10.99)
         );
+    }
+
+    // --- FAK order type tests ---
+
+    /// FAK and FOK produce identical amounts for calculate_order_amounts (BUY).
+    #[test]
+    fn test_fak_amounts_match_fok_buy() {
+        let test_cases = vec![
+            (dec!(0.65), dec!(100), dec!(0.01)),
+            (dec!(0.998), dec!(5.01), dec!(0.01)),
+            (dec!(0.997), dec!(5.01), dec!(0.01)),
+            (dec!(0.999), dec!(5.00), dec!(0.001)),
+            (dec!(0.50), dec!(10), dec!(0.1)),
+        ];
+        for (price, size, tick) in test_cases {
+            let fok = calculate_order_amounts(price, size, OrderSide::Buy, OrderType::Fok, tick);
+            let fak = calculate_order_amounts(price, size, OrderSide::Buy, OrderType::Fak, tick);
+            assert_eq!(
+                fok, fak,
+                "FAK BUY amounts differ from FOK at price={price}, size={size}, tick={tick}"
+            );
+        }
+    }
+
+    /// FAK and FOK produce identical amounts for calculate_order_amounts (SELL).
+    #[test]
+    fn test_fak_amounts_match_fok_sell() {
+        let test_cases = vec![
+            (dec!(0.65), dec!(100), dec!(0.01)),
+            (dec!(0.998), dec!(5.01), dec!(0.01)),
+            (dec!(0.94), dec!(5.31), dec!(0.01)),
+            (dec!(0.999), dec!(5.00), dec!(0.001)),
+        ];
+        for (price, size, tick) in test_cases {
+            let fok = calculate_order_amounts(price, size, OrderSide::Sell, OrderType::Fok, tick);
+            let fak = calculate_order_amounts(price, size, OrderSide::Sell, OrderType::Fak, tick);
+            assert_eq!(
+                fok, fak,
+                "FAK SELL amounts differ from FOK at price={price}, size={size}, tick={tick}"
+            );
+        }
+    }
+
+    /// FAK build_signable_order produces identical maker/taker amounts as FOK.
+    #[test]
+    fn test_build_signable_order_fak_matches_fok() {
+        let token_id = SdkU256::from(12345u64);
+        let test_cases = vec![
+            (dec!(0.95), dec!(10), OrderSide::Buy, dec!(0.01)),
+            (dec!(0.998), dec!(5.01), OrderSide::Buy, dec!(0.01)),
+            (dec!(0.95), dec!(10), OrderSide::Sell, dec!(0.01)),
+            (dec!(0.997), dec!(5.01), OrderSide::Sell, dec!(0.001)),
+        ];
+
+        for (price, size, side, tick) in test_cases {
+            let fok = build_signable_order(
+                token_id,
+                price,
+                size,
+                side,
+                OrderType::Fok,
+                tick,
+                0,
+                false,
+                SdkAddress::ZERO,
+                None,
+                SignatureType::Eoa,
+            );
+            let fak = build_signable_order(
+                token_id,
+                price,
+                size,
+                side,
+                OrderType::Fak,
+                tick,
+                0,
+                false,
+                SdkAddress::ZERO,
+                None,
+                SignatureType::Eoa,
+            );
+
+            assert_eq!(
+                fok.order.makerAmount, fak.order.makerAmount,
+                "FAK makerAmount differs from FOK at price={price}, size={size}, side={side:?}"
+            );
+            assert_eq!(
+                fok.order.takerAmount, fak.order.takerAmount,
+                "FAK takerAmount differs from FOK at price={price}, size={size}, side={side:?}"
+            );
+        }
+    }
+
+    /// FAK maps to SDK FAK order type, not FOK.
+    #[test]
+    fn test_build_signable_order_fak_sdk_type() {
+        let signable = build_signable_order(
+            SdkU256::from(1u64),
+            dec!(0.95),
+            dec!(10),
+            OrderSide::Buy,
+            OrderType::Fak,
+            dec!(0.01),
+            0,
+            false,
+            SdkAddress::ZERO,
+            None,
+            SignatureType::Eoa,
+        );
+        assert_eq!(signable.order_type, SdkOrderType::FAK);
+    }
+
+    /// FOK still maps to SDK FOK (regression check after adding FAK).
+    #[test]
+    fn test_build_signable_order_fok_sdk_type_unchanged() {
+        let signable = build_signable_order(
+            SdkU256::from(1u64),
+            dec!(0.95),
+            dec!(10),
+            OrderSide::Buy,
+            OrderType::Fok,
+            dec!(0.01),
+            0,
+            false,
+            SdkAddress::ZERO,
+            None,
+            SignatureType::Eoa,
+        );
+        assert_eq!(signable.order_type, SdkOrderType::FOK);
+    }
+
+    /// GTC and GTD still map correctly after adding FAK.
+    #[test]
+    fn test_build_signable_order_gtc_gtd_unchanged() {
+        let gtc = build_signable_order(
+            SdkU256::from(1u64),
+            dec!(0.95),
+            dec!(10),
+            OrderSide::Buy,
+            OrderType::Gtc,
+            dec!(0.01),
+            0,
+            false,
+            SdkAddress::ZERO,
+            None,
+            SignatureType::Eoa,
+        );
+        assert_eq!(gtc.order_type, SdkOrderType::GTC);
+
+        let gtd = build_signable_order(
+            SdkU256::from(1u64),
+            dec!(0.95),
+            dec!(10),
+            OrderSide::Buy,
+            OrderType::Gtd,
+            dec!(0.01),
+            0,
+            false,
+            SdkAddress::ZERO,
+            None,
+            SignatureType::Eoa,
+        );
+        assert_eq!(gtd.order_type, SdkOrderType::GTD);
     }
 }

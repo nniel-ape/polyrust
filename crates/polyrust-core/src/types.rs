@@ -40,6 +40,8 @@ pub enum OrderType {
     Gtd,
     /// Fill or Kill
     Fok,
+    /// Fill and Kill (partial fills allowed, remainder cancelled)
+    Fak,
 }
 
 /// A request to place an order (strategy -> execution backend)

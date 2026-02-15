@@ -518,8 +518,11 @@ pub async fn execute_action(
                             if let Some(market_id) =
                                 find_market_id_for_token(context, &result.token_id).await
                             {
-                                // FOK orders are always taker; GTC/GTD may be maker (unknown at publish time)
-                                let fee = if req.order_type == crate::types::OrderType::Fok {
+                                // FOK/FAK orders are always taker; GTC/GTD may be maker (unknown at publish time)
+                                let fee = if matches!(
+                                    req.order_type,
+                                    crate::types::OrderType::Fok | crate::types::OrderType::Fak
+                                ) {
                                     Some(crate::fees::taker_fee(
                                         result.price,
                                         result.size,
@@ -618,16 +621,19 @@ pub async fn execute_action(
                                 {
                                     // Compute fee based on the original request's order type
                                     let req_order_type = requests.get(idx).map(|r| r.order_type);
-                                    let fee =
-                                        if req_order_type == Some(crate::types::OrderType::Fok) {
-                                            Some(crate::fees::taker_fee(
-                                                result.price,
-                                                result.size,
-                                                crate::fees::default_taker_fee_rate(),
-                                            ))
-                                        } else {
-                                            None
-                                        };
+                                    let fee = if matches!(
+                                        req_order_type,
+                                        Some(crate::types::OrderType::Fok)
+                                            | Some(crate::types::OrderType::Fak)
+                                    ) {
+                                        Some(crate::fees::taker_fee(
+                                            result.price,
+                                            result.size,
+                                            crate::fees::default_taker_fee_rate(),
+                                        ))
+                                    } else {
+                                        None
+                                    };
                                     let orderbook_snapshot = if result.side
                                         == crate::types::OrderSide::Buy
                                     {

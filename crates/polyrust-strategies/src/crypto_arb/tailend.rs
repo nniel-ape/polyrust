@@ -524,9 +524,9 @@ impl TailEndStrategy {
             return vec![];
         }
 
-        // FOK fallback path (stop-loss sells still use FOK)
+        // FOK/FAK fallback path (stop-loss sells still use FOK/FAK)
         let now = self.base.event_time().await;
-        let entry_fee_per_share = if pending.order_type == OrderType::Fok {
+        let entry_fee_per_share = if matches!(pending.order_type, OrderType::Fok | OrderType::Fak) {
             taker_fee(pending.price, self.base.config.fee.taker_fee_rate)
         } else {
             Decimal::ZERO

@@ -1146,12 +1146,12 @@ impl BacktestEngine {
 
     /// Determine whether an order should be charged taker fee.
     ///
-    /// FOK orders are always taker. GTC/GTD orders are taker when
+    /// FOK/FAK orders are always taker. GTC/GTD orders are taker when
     /// `gtc_taker_fee_heuristic` is enabled and the order would match immediately
     /// (BUY price >= best_ask, SELL price <= best_bid).
     fn is_taker_fill(&self, order: &OrderRequest) -> bool {
         match order.order_type {
-            OrderType::Fok => true,
+            OrderType::Fok | OrderType::Fak => true,
             _ => {
                 if !self.config.realism.gtc_taker_fee_heuristic {
                     return false;
