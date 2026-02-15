@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use polyrust_core::types::OrderSide;
@@ -35,6 +35,18 @@ pub struct BacktestReport {
     pub force_closed_wins: usize,
     pub force_closed_worthless: usize,
     pub markets_traded: usize,
+    // --- Prediction accuracy ---
+    pub prediction_correct: usize,
+    pub prediction_wrong: usize,
+    pub prediction_unknown: usize,
+    pub prediction_accuracy: Decimal,
+    // --- Stop-loss analysis (strategy exits only) ---
+    pub premature_exits: usize,
+    pub correct_stops: usize,
+    pub premature_exit_cost: Decimal,
+    pub correct_stop_savings: Decimal,
+    // --- Re-entry tracking ---
+    pub reentry_count: usize,
     pub start_balance: Decimal,
     pub end_balance: Decimal,
     pub duration: Duration,
@@ -44,17 +56,35 @@ pub struct BacktestReport {
 
 pub use crate::engine::CloseReason;
 
+/// Intermediate struct for prediction accuracy computation.
+struct PredictionMetrics {
+    correct: usize,
+    wrong: usize,
+    unknown: usize,
+    accuracy: Decimal,
+    premature_exits: usize,
+    correct_stops: usize,
+    premature_exit_cost: Decimal,
+    correct_stop_savings: Decimal,
+}
+
 /// A trade record from the backtest with P&L information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BacktestTrade {
     pub timestamp: DateTime<Utc>,
     pub token_id: String,
+    pub market_id: String,
     pub side: OrderSide,
     pub price: Decimal,
     pub size: Decimal,
     pub realized_pnl: Option<Decimal>,
     /// None for buys, Some(reason) for sells
     pub close_reason: Option<CloseReason>,
+    /// Entry price at time of sell (for counterfactual analysis)
+    pub entry_price: Option<Decimal>,
+    /// What the market settled at ($0 or $1), for counterfactual analysis.
+    /// Some for strategy exits (filled from settlement_outcomes), None for buys.
+    pub counterfactual_settlement: Option<Decimal>,
 }
 
 impl BacktestReport {
@@ -65,6 +95,7 @@ impl BacktestReport {
     pub async fn from_engine_results(
         store: Arc<Store>,
         engine_trades: Vec<crate::engine::BacktestTrade>,
+        settlement_outcomes: &HashMap<String, Decimal>,
         start_balance: Decimal,
         start_time: DateTime<Utc>,
         end_time: DateTime<Utc>,
@@ -75,15 +106,24 @@ impl BacktestReport {
             .await
             .map_err(|e| crate::error::BacktestError::Database(e.to_string()))?;
 
-        // Build a lookup for close_reason from engine trades
+        // Build a lookup for close_reason + extra fields from engine trades
         // Key: "token_id|side|timestamp" to avoid Hash requirement on OrderSide
-        use std::collections::HashMap;
-        let mut reason_lookup: HashMap<String, CloseReason> = HashMap::new();
+        struct EngineMeta {
+            close_reason: Option<CloseReason>,
+            market_id: String,
+            entry_price: Option<Decimal>,
+        }
+        let mut meta_lookup: HashMap<String, EngineMeta> = HashMap::new();
         for et in &engine_trades {
-            if let Some(reason) = et.close_reason {
-                let key = format!("{}|{:?}|{}", et.token_id, et.side, et.timestamp.timestamp());
-                reason_lookup.insert(key, reason);
-            }
+            let key = format!("{}|{:?}|{}", et.token_id, et.side, et.timestamp.timestamp());
+            meta_lookup.insert(
+                key,
+                EngineMeta {
+                    close_reason: et.close_reason,
+                    market_id: et.market_id.clone(),
+                    entry_price: et.entry_price,
+                },
+            );
         }
 
         // Convert to BacktestTrade format
@@ -91,15 +131,31 @@ impl BacktestReport {
             .iter()
             .map(|t| {
                 let key = format!("{}|{:?}|{}", t.token_id, t.side, t.timestamp.timestamp());
-                let close_reason = reason_lookup.get(&key).copied();
+                let meta = meta_lookup.get(&key);
+                let close_reason = meta.and_then(|m| m.close_reason);
+                let market_id = meta.map(|m| m.market_id.clone()).unwrap_or_default();
+                let entry_price = meta.and_then(|m| m.entry_price);
+
+                // Counterfactual settlement: for strategy exits, look up what market settled at
+                let counterfactual_settlement = match close_reason {
+                    Some(CloseReason::Strategy) => settlement_outcomes.get(&t.token_id).copied(),
+                    Some(CloseReason::Settlement | CloseReason::ForceClose) => {
+                        Some(t.price) // Already the settlement price
+                    }
+                    _ => None,
+                };
+
                 BacktestTrade {
                     timestamp: t.timestamp,
                     token_id: t.token_id.clone(),
+                    market_id,
                     side: t.side,
                     price: t.price,
                     size: t.size,
                     realized_pnl: t.realized_pnl,
                     close_reason,
+                    entry_price,
+                    counterfactual_settlement,
                 }
             })
             .collect();
@@ -179,6 +235,9 @@ impl BacktestReport {
             Decimal::ZERO
         };
 
+        // Compute prediction + stop-loss metrics
+        let prediction = Self::compute_prediction_metrics(&closing_trades_list);
+
         // Compute max drawdown
         let max_drawdown = Self::compute_max_drawdown(&trades, start_balance);
 
@@ -187,6 +246,9 @@ impl BacktestReport {
 
         // Compute end balance
         let end_balance = start_balance + total_pnl;
+
+        // Re-entry count
+        let reentry_count = Self::compute_reentry_count(&trades);
 
         let duration = end_time - start_time;
 
@@ -214,6 +276,15 @@ impl BacktestReport {
             force_closed_wins,
             force_closed_worthless,
             markets_traded,
+            prediction_correct: prediction.correct,
+            prediction_wrong: prediction.wrong,
+            prediction_unknown: prediction.unknown,
+            prediction_accuracy: prediction.accuracy,
+            premature_exits: prediction.premature_exits,
+            correct_stops: prediction.correct_stops,
+            premature_exit_cost: prediction.premature_exit_cost,
+            correct_stop_savings: prediction.correct_stop_savings,
+            reentry_count,
             start_balance,
             end_balance,
             duration,
@@ -228,6 +299,7 @@ impl BacktestReport {
     /// returned `Vec<BacktestTrade>` already carries close_reason and realized_pnl.
     pub fn from_trades(
         engine_trades: Vec<crate::engine::BacktestTrade>,
+        settlement_outcomes: &HashMap<String, Decimal>,
         start_balance: Decimal,
         start_time: DateTime<Utc>,
         end_time: DateTime<Utc>,
@@ -235,14 +307,26 @@ impl BacktestReport {
         // Convert engine trades to report trades
         let trades: Vec<BacktestTrade> = engine_trades
             .into_iter()
-            .map(|t| BacktestTrade {
-                timestamp: t.timestamp,
-                token_id: t.token_id,
-                side: t.side,
-                price: t.price,
-                size: t.size,
-                realized_pnl: t.realized_pnl,
-                close_reason: t.close_reason,
+            .map(|t| {
+                let counterfactual_settlement = match t.close_reason {
+                    Some(CloseReason::Strategy) => settlement_outcomes.get(&t.token_id).copied(),
+                    Some(CloseReason::Settlement | CloseReason::ForceClose) => {
+                        Some(t.price) // Already the settlement price
+                    }
+                    _ => None,
+                };
+                BacktestTrade {
+                    timestamp: t.timestamp,
+                    token_id: t.token_id,
+                    market_id: t.market_id,
+                    side: t.side,
+                    price: t.price,
+                    size: t.size,
+                    realized_pnl: t.realized_pnl,
+                    close_reason: t.close_reason,
+                    entry_price: t.entry_price,
+                    counterfactual_settlement,
+                }
             })
             .collect();
 
@@ -316,9 +400,13 @@ impl BacktestReport {
             Decimal::ZERO
         };
 
+        // Compute prediction + stop-loss metrics
+        let prediction = Self::compute_prediction_metrics(&closing_trades_list);
+
         let max_drawdown = Self::compute_max_drawdown(&trades, start_balance);
         let sharpe_ratio = Self::compute_sharpe_ratio(&trades);
         let end_balance = start_balance + total_pnl;
+        let reentry_count = Self::compute_reentry_count(&trades);
         let duration = end_time - start_time;
 
         BacktestReport {
@@ -345,12 +433,97 @@ impl BacktestReport {
             force_closed_wins,
             force_closed_worthless,
             markets_traded,
+            prediction_correct: prediction.correct,
+            prediction_wrong: prediction.wrong,
+            prediction_unknown: prediction.unknown,
+            prediction_accuracy: prediction.accuracy,
+            premature_exits: prediction.premature_exits,
+            correct_stops: prediction.correct_stops,
+            premature_exit_cost: prediction.premature_exit_cost,
+            correct_stop_savings: prediction.correct_stop_savings,
+            reentry_count,
             start_balance,
             end_balance,
             duration,
             start_time,
             end_time,
         }
+    }
+
+    /// Compute prediction accuracy and stop-loss analysis from closing trades.
+    fn compute_prediction_metrics(closing_trades: &[&BacktestTrade]) -> PredictionMetrics {
+        let mut correct = 0usize;
+        let mut wrong = 0usize;
+        let mut unknown = 0usize;
+        let mut premature_exits = 0usize;
+        let mut correct_stops = 0usize;
+        let mut premature_exit_cost = Decimal::ZERO;
+        let mut correct_stop_savings = Decimal::ZERO;
+
+        for t in closing_trades {
+            match t.counterfactual_settlement {
+                Some(sp) if sp == Decimal::ONE => {
+                    correct += 1;
+                    // If strategy exited early on a correct prediction → premature exit
+                    if t.close_reason == Some(CloseReason::Strategy) {
+                        premature_exits += 1;
+                        // Opportunity cost: what we would have earned at $1 minus what we actually earned
+                        // Counterfactual profit = (1 - entry_price) * size
+                        // Actual profit = realized_pnl
+                        if let (Some(entry), Some(pnl)) = (t.entry_price, t.realized_pnl) {
+                            let counterfactual_profit = (Decimal::ONE - entry) * t.size;
+                            premature_exit_cost += counterfactual_profit - pnl;
+                        }
+                    }
+                }
+                Some(sp) if sp == Decimal::ZERO => {
+                    wrong += 1;
+                    // If strategy exited early on a wrong prediction → correct stop
+                    if t.close_reason == Some(CloseReason::Strategy) {
+                        correct_stops += 1;
+                        // Savings: loss we would have had at $0 minus actual loss
+                        // Counterfactual loss = entry_price * size (total wipeout)
+                        // Actual loss = |realized_pnl|
+                        if let (Some(entry), Some(pnl)) = (t.entry_price, t.realized_pnl) {
+                            let counterfactual_loss = entry * t.size;
+                            correct_stop_savings += counterfactual_loss - pnl.abs();
+                        }
+                    }
+                }
+                _ => {
+                    unknown += 1;
+                }
+            }
+        }
+
+        let total_known = correct + wrong;
+        let accuracy = if total_known > 0 {
+            Decimal::from(correct as u64) / Decimal::from(total_known as u64)
+        } else {
+            Decimal::ZERO
+        };
+
+        PredictionMetrics {
+            correct,
+            wrong,
+            unknown,
+            accuracy,
+            premature_exits,
+            correct_stops,
+            premature_exit_cost,
+            correct_stop_savings,
+        }
+    }
+
+    /// Count tokens that were entered more than once (re-entries after stop-loss).
+    fn compute_reentry_count(trades: &[BacktestTrade]) -> usize {
+        let mut buy_counts: HashMap<&str, usize> = HashMap::new();
+        for t in trades {
+            if t.side == OrderSide::Buy {
+                *buy_counts.entry(&t.token_id).or_default() += 1;
+            }
+        }
+        buy_counts.values().filter(|&&count| count > 1).count()
     }
 
     /// Compute maximum drawdown from peak equity.
@@ -489,6 +662,58 @@ impl BacktestReport {
         s.push_str(&format!("Markets traded:   {}\n", self.markets_traded));
         s.push('\n');
 
+        s.push_str("--- Prediction Accuracy ---\n");
+        let total_known = self.prediction_correct + self.prediction_wrong;
+        if total_known > 0 {
+            s.push_str(&format!(
+                "Prediction correct:  {}/{} ({:.2}%)\n",
+                self.prediction_correct,
+                total_known,
+                self.prediction_accuracy * Decimal::from(100)
+            ));
+            s.push_str(&format!(
+                "Prediction wrong:    {}/{} ({:.2}%)\n",
+                self.prediction_wrong,
+                total_known,
+                (Decimal::ONE - self.prediction_accuracy) * Decimal::from(100)
+            ));
+        }
+        if self.prediction_unknown > 0 {
+            s.push_str(&format!(
+                "Prediction unknown:  {} (no settlement data)\n",
+                self.prediction_unknown
+            ));
+        }
+        s.push('\n');
+
+        s.push_str("--- Stop-Loss Analysis ---\n");
+        let total_sl = self.premature_exits + self.correct_stops;
+        if total_sl > 0 {
+            s.push_str(&format!(
+                "Strategy exits:      {}  ({} premature, {} correct stops)\n",
+                total_sl, self.premature_exits, self.correct_stops
+            ));
+            s.push_str(&format!(
+                "Premature exit cost: ${:.2}  (correct prediction, exited early)\n",
+                self.premature_exit_cost
+            ));
+            s.push_str(&format!(
+                "Correct stop savings: ${:.2}  (wrong prediction, saved by stop)\n",
+                self.correct_stop_savings
+            ));
+            let net_value = self.correct_stop_savings - self.premature_exit_cost;
+            s.push_str(&format!("Net stop-loss value: ${:.2}\n", net_value));
+        } else {
+            s.push_str("No strategy exits with settlement data.\n");
+        }
+        s.push('\n');
+
+        if self.reentry_count > 0 {
+            s.push_str("--- Re-Entry ---\n");
+            s.push_str(&format!("Tokens re-entered:   {}\n", self.reentry_count));
+            s.push('\n');
+        }
+
         s.push_str("--- Risk Metrics ---\n");
         s.push_str(&format!(
             "Max drawdown:   {:.2}%\n",
@@ -550,6 +775,9 @@ mod tests {
                 size: dec!(10),
                 realized_pnl: Some(dec!(10)), // Balance: 1000 + 10 = 1010 (peak)
                 close_reason: None,
+                market_id: String::new(),
+                entry_price: None,
+                counterfactual_settlement: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(2000, 0).unwrap(),
@@ -559,6 +787,9 @@ mod tests {
                 size: dec!(10),
                 realized_pnl: Some(dec!(-30)), // Balance: 1010 - 30 = 980 (trough)
                 close_reason: None,
+                market_id: String::new(),
+                entry_price: None,
+                counterfactual_settlement: None,
             },
         ];
 
@@ -579,6 +810,9 @@ mod tests {
                 size: dec!(10),
                 realized_pnl: Some(dec!(10)),
                 close_reason: None,
+                market_id: String::new(),
+                entry_price: None,
+                counterfactual_settlement: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(2000, 0).unwrap(),
@@ -588,6 +822,9 @@ mod tests {
                 size: dec!(10),
                 realized_pnl: Some(dec!(15)),
                 close_reason: None,
+                market_id: String::new(),
+                entry_price: None,
+                counterfactual_settlement: None,
             },
         ];
 
@@ -606,6 +843,9 @@ mod tests {
                 size: dec!(10),
                 realized_pnl: Some(dec!(10)),
                 close_reason: None,
+                market_id: String::new(),
+                entry_price: None,
+                counterfactual_settlement: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(2000, 0).unwrap(),
@@ -615,6 +855,9 @@ mod tests {
                 size: dec!(10),
                 realized_pnl: Some(dec!(15)),
                 close_reason: None,
+                market_id: String::new(),
+                entry_price: None,
+                counterfactual_settlement: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(3000, 0).unwrap(),
@@ -624,6 +867,9 @@ mod tests {
                 size: dec!(10),
                 realized_pnl: Some(dec!(12)),
                 close_reason: None,
+                market_id: String::new(),
+                entry_price: None,
+                counterfactual_settlement: None,
             },
         ];
 
@@ -645,6 +891,9 @@ mod tests {
             size: dec!(10),
             realized_pnl: Some(dec!(10)),
             close_reason: None,
+            market_id: String::new(),
+            entry_price: None,
+            counterfactual_settlement: None,
         }];
 
         let sharpe = BacktestReport::compute_sharpe_ratio(&trades);
@@ -662,6 +911,9 @@ mod tests {
                 size: dec!(10),
                 realized_pnl: Some(dec!(10)),
                 close_reason: None,
+                market_id: String::new(),
+                entry_price: None,
+                counterfactual_settlement: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(2000, 0).unwrap(),
@@ -671,6 +923,9 @@ mod tests {
                 size: dec!(10),
                 realized_pnl: Some(dec!(10)),
                 close_reason: None,
+                market_id: String::new(),
+                entry_price: None,
+                counterfactual_settlement: None,
             },
         ];
 
@@ -720,10 +975,16 @@ mod tests {
         };
         store.insert_trade(&trade).await.unwrap();
 
-        let report =
-            BacktestReport::from_engine_results(store, vec![], dec!(1000), start_time, end_time)
-                .await
-                .unwrap();
+        let report = BacktestReport::from_engine_results(
+            store,
+            vec![],
+            &HashMap::new(),
+            dec!(1000),
+            start_time,
+            end_time,
+        )
+        .await
+        .unwrap();
 
         let summary = report.summary();
 
@@ -744,10 +1005,16 @@ mod tests {
         let start_time = DateTime::from_timestamp(1000, 0).unwrap();
         let end_time = DateTime::from_timestamp(5000, 0).unwrap();
 
-        let report =
-            BacktestReport::from_engine_results(store, vec![], dec!(1000), start_time, end_time)
-                .await
-                .unwrap();
+        let report = BacktestReport::from_engine_results(
+            store,
+            vec![],
+            &HashMap::new(),
+            dec!(1000),
+            start_time,
+            end_time,
+        )
+        .await
+        .unwrap();
 
         let json = report.to_json();
 

@@ -42,12 +42,15 @@ pub enum CloseReason {
 pub struct BacktestTrade {
     pub timestamp: DateTime<Utc>,
     pub token_id: String,
+    pub market_id: String,
     pub side: OrderSide,
     pub price: Decimal,
     pub size: Decimal,
     pub realized_pnl: Option<Decimal>,
     /// None for buys, Some(reason) for sells
     pub close_reason: Option<CloseReason>,
+    /// Entry price at time of sell (for counterfactual analysis)
+    pub entry_price: Option<Decimal>,
 }
 
 /// Pre-built maps from load_events() for sharing across sweep engines.
@@ -94,6 +97,9 @@ pub struct BacktestEngine {
     token_best_prices: HashMap<String, (Decimal, Decimal)>,
     /// Market slug cache: market_id -> slug (for deriving coin symbol)
     market_slugs: HashMap<String, String>,
+    /// Settlement outcomes: token_id -> settlement_price ($0 or $1)
+    /// Recorded for ALL traded tokens (including strategy-exited ones) at MarketExpired/ForceClose.
+    settlement_outcomes: HashMap<String, Decimal>,
     /// Optional progress bar for event replay (None in sweep mode).
     progress_bar: Option<ProgressBar>,
     // --- Funnel instrumentation counters ---
@@ -166,6 +172,7 @@ impl BacktestEngine {
             market_durations: HashMap::new(),
             token_best_prices: HashMap::new(),
             market_slugs: HashMap::new(),
+            settlement_outcomes: HashMap::new(),
             progress_bar: None,
             markets_discovered: 0,
             orders_submitted: 0,
@@ -390,6 +397,17 @@ impl BacktestEngine {
                 &historical_event.event
                 && let Some((token_a, token_b)) = self.market_tokens.get(market_id).cloned()
             {
+                // Record settlement outcome for BOTH tokens (even if strategy already exited)
+                for tid in [&token_a, &token_b] {
+                    let last_price = self.token_prices.get(tid).copied().unwrap_or(Decimal::ZERO);
+                    let sp = if last_price > Decimal::new(5, 1) {
+                        Decimal::ONE
+                    } else {
+                        Decimal::ZERO
+                    };
+                    self.settlement_outcomes.insert(tid.clone(), sp);
+                }
+
                 for token_id in [token_a, token_b] {
                     if let Some((size, _entry)) = self.position_entries.get(&token_id).cloned()
                         && size > Decimal::ZERO
@@ -499,6 +517,10 @@ impl BacktestEngine {
                 Decimal::ZERO
             };
 
+            // Record settlement outcome for force-closed tokens
+            self.settlement_outcomes
+                .insert(token_id.clone(), settlement_price);
+
             debug!(
                 token_id = %token_id,
                 size = %size,
@@ -561,6 +583,11 @@ impl BacktestEngine {
         self.market_end_dates = maps.market_end_dates;
         self.market_durations = maps.market_durations;
         self.market_slugs = maps.market_slugs;
+    }
+
+    /// Settlement outcomes recorded during the backtest (token_id -> $0 or $1).
+    pub fn settlement_outcomes(&self) -> &HashMap<String, Decimal> {
+        &self.settlement_outcomes
     }
 
     /// Compute effective orderbook depth for a token, applying expiry decay if configured.
@@ -1328,14 +1355,21 @@ impl BacktestEngine {
                     "BUY order filled"
                 );
 
+                let market_id = self
+                    .token_to_market
+                    .get(&order.token_id)
+                    .cloned()
+                    .unwrap_or_default();
                 Ok(Some(BacktestTrade {
                     timestamp: self.current_time,
                     token_id: order.token_id,
+                    market_id,
                     side: OrderSide::Buy,
                     price: fill_price,
                     size: order.size,
                     realized_pnl: None,
                     close_reason: None,
+                    entry_price: None,
                 }))
             }
             OrderSide::Sell => {
@@ -1440,14 +1474,21 @@ impl BacktestEngine {
                     "SELL order filled"
                 );
 
+                let sell_market_id = self
+                    .token_to_market
+                    .get(&order.token_id)
+                    .cloned()
+                    .unwrap_or_default();
                 Ok(Some(BacktestTrade {
                     timestamp: self.current_time,
                     token_id: order.token_id,
+                    market_id: sell_market_id,
                     side: OrderSide::Sell,
                     price: fill_price,
                     size: order.size,
                     realized_pnl: Some(realized_pnl),
                     close_reason: Some(CloseReason::Strategy),
+                    entry_price: Some(entry_price),
                 }))
             }
         }

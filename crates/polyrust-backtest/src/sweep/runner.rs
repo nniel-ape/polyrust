@@ -268,8 +268,17 @@ async fn run_single(
         .await
         .map_err(|e| BacktestError::Engine(e.to_string()))?;
 
+    // Extract settlement outcomes before engine is dropped
+    let settlement_outcomes = engine.settlement_outcomes().clone();
+
     // Compute report directly from trades (no SQLite)
-    let report = BacktestReport::from_trades(trades, start_balance, start_time, end_time);
+    let report = BacktestReport::from_trades(
+        trades,
+        &settlement_outcomes,
+        start_balance,
+        start_time,
+        end_time,
+    );
 
     let duration_secs = run_start.elapsed().as_secs_f64();
 
@@ -283,6 +292,19 @@ async fn run_single(
         total_trades: report.total_trades,
         closing_trades: report.closing_trades,
         end_balance: report.end_balance,
+        winning_trades: report.winning_trades,
+        losing_trades: report.losing_trades,
+        strategy_exits: report.strategy_exits,
+        strategy_losses: report.strategy_losses,
+        settled_worthless: report.settled_worthless,
+        prediction_correct: report.prediction_correct,
+        prediction_wrong: report.prediction_wrong,
+        prediction_accuracy: report.prediction_accuracy,
+        premature_exits: report.premature_exits,
+        correct_stops: report.correct_stops,
+        premature_exit_cost: report.premature_exit_cost,
+        correct_stop_savings: report.correct_stop_savings,
+        reentry_count: report.reentry_count,
         duration_secs,
     })
 }

@@ -128,11 +128,13 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Running backtest simulation");
     let trades = engine.run().await?;
+    let settlement_outcomes = engine.settlement_outcomes().clone();
 
     // Generate report from results
     let report = BacktestReport::from_engine_results(
         results_store,
         trades,
+        &settlement_outcomes,
         initial_balance,
         start_time,
         end_time,

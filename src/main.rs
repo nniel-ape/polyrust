@@ -745,11 +745,15 @@ async fn run_backtest() -> anyhow::Result<()> {
     info!("Running backtest simulation");
     let trades = engine.run().await?;
 
+    // Extract settlement outcomes before engine is dropped
+    let settlement_outcomes = engine.settlement_outcomes().clone();
+
     // Generate report from stored results
     use polyrust_backtest::BacktestReport;
     let report = BacktestReport::from_engine_results(
         results_store,
         trades,
+        &settlement_outcomes,
         initial_balance,
         start_time,
         end_time,
@@ -758,6 +762,15 @@ async fn run_backtest() -> anyhow::Result<()> {
 
     // Print report summary
     println!("\n{}", report.summary());
+
+    // Export trade-level data for external analysis
+    let trades_json = serde_json::to_string_pretty(&report.trades)?;
+    std::fs::write("backtest_trades.json", &trades_json)?;
+    info!(
+        path = "backtest_trades.json",
+        trades = report.trades.len(),
+        "Exported trade-level data"
+    );
 
     info!("Backtest complete");
     Ok(())

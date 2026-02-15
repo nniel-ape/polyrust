@@ -202,12 +202,14 @@ async fn test_full_backtest_pipeline() {
     .await;
 
     let trades = engine.run().await.expect("Backtest failed");
+    let settlement_outcomes = engine.settlement_outcomes().clone();
 
     // Generate report
     use polyrust_backtest::BacktestReport;
     let report = BacktestReport::from_engine_results(
         Arc::clone(&results_store),
         trades,
+        &settlement_outcomes,
         initial_balance,
         start_time,
         end_time,
