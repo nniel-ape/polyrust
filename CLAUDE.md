@@ -211,9 +211,11 @@ Strategy is disabled by default; set `enabled = true` in `[arbitrage]` to activa
 - **Hybrid order execution**: GTC maker orders (0% fee) for most trades, FOK taker orders only for tail-end urgency. FOK has stricter USDC precision (see `rounding.rs`)
 - **Kelly criterion sizing**: Position size scales with confidence and edge, clamped to [min_size, max_size]
 - **Spike detection**: Pre-filters small moves, triggers evaluation only on significant price changes or when delta exceeds fee+margin threshold
-- **Position lifecycle state machine**: Per-position 6-state lifecycle (Healthy → DeferredExit → ExitExecuting → ResidualRisk → RecoveryProbe → Cooldown) replacing scattered HashMap-based stop-loss tracking. Driven by explicit state transitions with 4-level trigger hierarchy: hard crash → dual-trigger + hysteresis → trailing stop (with headroom fix) → post-entry deferred exit
-- **Composite price stop-loss**: All stop-loss decisions use freshness-gated composite price from multiple sources, preventing stale single-source exits
-- **Execution ladder**: Depth-capped FOK exit clips with geometric reduction, 2-second GTC refresh cycle for residual risk, and recovery logic (opposite-side set completion + alpha re-entry)
+- **Position lifecycle state machine**: Per-position 3-state lifecycle (Healthy → ExitExecuting → Hedged) with 4-level trigger hierarchy: hard crash → dual-trigger + hysteresis → trailing stop → post-entry exit. Hard crashes bypass sell delay for immediate exit.
+- **Composite price stop-loss**: All stop-loss decisions use freshness-gated composite price from multiple sources with source-priority fallback (binance-futures > binance-spot > coinbase > chainlink), preventing stale single-source exits
+- **Fast-path exit evaluation**: ExternalPrice events (50-200ms ahead of CLOB) trigger exit evaluation using cached orderbook bids, frontrunning stale CLOB data. Gated by book freshness (`fast_path_max_book_age_ms`)
+- **FAK + GTC hybrid exits**: FAK (Fill-And-Kill) for immediate partial fills, GTC residual at bid-tick for remainder. Eliminates FOK retry loops. GTC chase cycle refreshes stale orders every 2s on orderbook updates.
+- **Proactive hedge**: Simultaneous opposite-side GTC buy on exit trigger when set completion cost <= `recovery_max_set_cost`. Replaces reactive 5-retry recovery with instant hedge attempt.
 - **Performance tracking**: Statistics with optional auto-disable when underperforming
 
 ### Stop-Loss Research Findings (Backtest)
@@ -377,9 +379,11 @@ All outbound traffic from the polyrust container is routed through a proxy VPS (
 - `docs/plans/backtesting-framework.md` — backtesting framework design
 - `docs/plans/arb-strategy-improvements.md` — arbitrage strategy improvement plan
 - `docs/plans/tailend-position-lifecycle-sm.md` — position lifecycle state machine design and implementation plan
+- `docs/plans/20260215-fast-exit-v2.md` — fast-exit v2 implementation plan (FAK exits, price-feed frontrunning, proactive hedge)
 - `docs/research/polymarket-price-discovery.md` — reference price discovery (CLOB midpoint, RTDS feeds, Chainlink/Binance oracles)
 - `docs/research/crypto-arb-reference-price.md` — crypto arb reference price mechanics for 15-min markets
 - `docs/research/arb-strategy-improvements.md` — arbitrage strategy improvement research
 - `docs/research/polymarket-modern-strategies.md` — modern Polymarket trading strategies research
 - `docs/research/stoploss-aggressiveness.md` — stop-loss aggressiveness sweep analysis and Pareto-optimal configs
+- `docs/research/fast-exit-architecture.md` — fast-exit v2 architecture: FAK+GTC hybrid, price-feed frontrunning, proactive hedge, lifecycle simplification
 - `docs/plans/dutch-book-strategy.md` — Dutch Book arbitrage strategy design and implementation plan
