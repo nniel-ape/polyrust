@@ -1288,81 +1288,28 @@ impl TailEndStrategy {
             let seconds_since_entry = now.signed_duration_since(pos.entry_time).num_seconds();
             let is_sellable = seconds_since_entry >= self.base.config.tailend.min_sell_delay_secs;
 
-            // Handle existing DeferredExit state
-            if let PositionLifecycleState::DeferredExit { .. } = &lifecycle.state {
-                if is_sellable {
-                    // Re-evaluate triggers — if still firing, transition to ExitExecuting
-                    let trigger = lifecycle.evaluate_triggers(
-                        &trigger_ctx,
-                        sl_config,
-                        &self.base.config.tailend,
-                    );
-                    if let Some(trigger_kind) = trigger {
-                        // Trigger persists — execute exit
-                        if let Some(action) = self
-                            .build_exit_order(
-                                &pos,
-                                current_bid,
-                                snapshot,
-                                neg_risk,
-                                min_order_size,
-                                &trigger_kind,
-                                &mut lifecycle,
-                                now,
-                            )
-                            .await
-                        {
-                            self.write_lifecycle(&pos.token_id, &lifecycle).await;
-                            actions.push(action);
-                            continue;
-                        }
-                    }
-                    // Trigger cleared or exit couldn't be built — return to Healthy
-                    if let Err(e) = lifecycle.transition(
-                        PositionLifecycleState::Healthy,
-                        "deferred trigger cleared",
-                        now,
-                    ) {
-                        warn!(token_id = %pos.token_id, error = %e, "Lifecycle transition error");
-                    }
-                    lifecycle.dual_trigger_ticks = 0;
-                    self.write_lifecycle(&pos.token_id, &lifecycle).await;
-                    continue;
-                }
-                // Still in sell delay — keep DeferredExit, skip further evaluation
-                self.write_lifecycle(&pos.token_id, &lifecycle).await;
-                continue;
-            }
-
             // Evaluate triggers for Healthy positions
             let trigger =
                 lifecycle.evaluate_triggers(&trigger_ctx, sl_config, &self.base.config.tailend);
 
             if let Some(trigger_kind) = trigger {
-                if !is_sellable {
-                    // Trigger during sell delay — defer exit
-                    if let Err(e) = lifecycle.transition(
-                        PositionLifecycleState::DeferredExit {
-                            trigger: trigger_kind.clone(),
-                            armed_at: now,
-                        },
-                        &format!("trigger during sell delay: {trigger_kind}"),
-                        now,
-                    ) {
-                        warn!(token_id = %pos.token_id, error = %e, "Lifecycle transition error");
-                    }
-                    info!(
-                        market = %pos.market_id,
+                // Hard crash bypasses sell delay (immediate exit)
+                let can_exit = is_sellable
+                    || matches!(trigger_kind, StopLossTriggerKind::HardCrash { .. });
+
+                if !can_exit {
+                    // Non-hard trigger during sell delay — skip, re-evaluate next tick
+                    debug!(
                         token_id = %pos.token_id,
                         trigger = %trigger_kind,
                         seconds_since_entry,
-                        "TailEnd exit deferred: trigger during sell delay"
+                        "Trigger during sell delay (non-hard), skipping"
                     );
                     self.write_lifecycle(&pos.token_id, &lifecycle).await;
                     continue;
                 }
 
-                // Sellable + trigger fired — execute exit
+                // Trigger fired and exit allowed — execute exit
                 if let Some(action) = self
                     .build_exit_order(
                         &pos,
@@ -3610,68 +3557,109 @@ mod tests {
         );
     }
 
-    /// Orderbook update with trigger condition during sell delay window
-    /// transitions lifecycle to DeferredExit (no sell order placed).
+    /// Non-hard trigger during sell delay does NOT place exit order and
+    /// lifecycle stays Healthy (skip and re-eval next tick).
     #[tokio::test]
-    async fn lifecycle_trigger_during_sell_delay_defers_exit() {
-        // entry_time 5s ago (still within sell delay of 10s), market 300s remaining
-        let (strategy, snapshot) = make_lifecycle_test_setup(5, 300).await;
+    async fn lifecycle_non_hard_trigger_during_sell_delay_skips() {
+        // entry_time 5s ago (within sell delay of 10s), market 300s remaining
+        let (strategy, _snapshot) = make_lifecycle_test_setup(5, 300).await;
+
+        // Clear external price data so HardCrash cannot fire (requires external price).
+        // This isolates PostEntryExit (Level 4) which only needs fresh book.
+        // Config has post_entry_exit_drop=0.04, so bid drop of 0.05 triggers it.
+        {
+            let mut cache = strategy.base.sl_composite_cache.write().await;
+            cache.clear();
+        }
+        {
+            let mut history = strategy.base.price_history.write().await;
+            history.clear();
+        }
+
+        // Bid=0.85 → drop of 0.05 from entry 0.90 >= post_entry_exit_drop(0.04)
+        // No external price → HardCrash won't fire, only PostEntryExit
+        let snapshot = polyrust_core::types::OrderbookSnapshot {
+            token_id: "token_up".to_string(),
+            bids: vec![polyrust_core::types::OrderbookLevel {
+                price: dec!(0.85),
+                size: dec!(100),
+            }],
+            asks: vec![polyrust_core::types::OrderbookLevel {
+                price: dec!(0.87),
+                size: dec!(100),
+            }],
+            timestamp: Utc::now(),
+        };
 
         let actions = strategy.handle_orderbook_update(&snapshot).await;
 
-        // Should NOT produce a PlaceOrder action (sell delay not elapsed)
+        // Should NOT produce a PlaceOrder action (sell delay not elapsed, non-hard trigger)
         assert!(
             !actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))),
-            "Should not sell during sell delay, got: {actions:?}"
+            "Should not sell during sell delay for non-hard trigger, got: {actions:?}"
         );
 
-        // Lifecycle should be DeferredExit
+        // Lifecycle should stay Healthy (skip and re-eval next tick)
         let lifecycles = strategy.base.position_lifecycle.read().await;
         let lc = lifecycles.get("token_up").expect("lifecycle should exist");
         assert!(
-            matches!(lc.state, PositionLifecycleState::DeferredExit { .. }),
-            "Expected DeferredExit during sell delay, got: {:?}",
+            matches!(lc.state, PositionLifecycleState::Healthy),
+            "Expected Healthy during sell delay (non-hard trigger skips), got: {:?}",
             lc.state
         );
     }
 
-    /// When a deferred exit becomes sellable and the trigger still fires,
-    /// the lifecycle transitions to ExitExecuting and a sell order is placed.
+    /// Hard crash trigger during sell delay BYPASSES sell delay and places exit order immediately.
     #[tokio::test]
-    async fn lifecycle_deferred_exit_fires_when_sellable() {
-        // Start with position in sell delay (5s ago)
+    async fn lifecycle_hard_crash_bypasses_sell_delay() {
+        // entry_time 5s ago (within sell delay of 10s), market 300s remaining
+        // The setup has bid=0.40 vs entry=0.90, which is a 0.50 drop — hard crash threshold
         let (strategy, snapshot) = make_lifecycle_test_setup(5, 300).await;
 
-        // First call: should defer (still in sell delay)
-        let _ = strategy.handle_orderbook_update(&snapshot).await;
-        {
-            let lifecycles = strategy.base.position_lifecycle.read().await;
-            let lc = lifecycles.get("token_up").unwrap();
-            assert!(matches!(
-                lc.state,
-                PositionLifecycleState::DeferredExit { .. }
-            ));
-        }
-
-        // Simulate time passing: move position entry_time to 20s ago
-        {
-            let mut positions = strategy.base.positions.write().await;
-            for pos_list in positions.values_mut() {
-                for pos in pos_list.iter_mut() {
-                    if pos.token_id == "token_up" {
-                        pos.entry_time = Utc::now() - Duration::seconds(20);
-                    }
-                }
-            }
-        }
-
-        // Second call: sell delay now elapsed, trigger still holds
         let actions = strategy.handle_orderbook_update(&snapshot).await;
 
-        // Should produce a PlaceOrder action
+        // Hard crash should bypass sell delay and produce exit order
         assert!(
             actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))),
-            "Should sell now that delay elapsed, got: {actions:?}"
+            "Hard crash should bypass sell delay and produce exit, got: {actions:?}"
+        );
+
+        // Lifecycle should be ExitExecuting (immediate exit)
+        let lifecycles = strategy.base.position_lifecycle.read().await;
+        let lc = lifecycles.get("token_up").expect("lifecycle should exist");
+        assert!(
+            matches!(lc.state, PositionLifecycleState::ExitExecuting { .. }),
+            "Expected ExitExecuting after hard crash bypass, got: {:?}",
+            lc.state
+        );
+    }
+
+    /// PostEntryExit trigger after sell delay elapsed still produces exit order.
+    #[tokio::test]
+    async fn lifecycle_post_entry_trigger_fires_when_sellable() {
+        // entry_time 20s ago (past sell delay of 10s), market 300s remaining
+        // Bid drop 0.13 from entry (0.90 - 0.77) triggers PostEntryExit (threshold 0.12)
+        let (strategy, _snapshot) = make_lifecycle_test_setup(20, 300).await;
+
+        let snapshot = polyrust_core::types::OrderbookSnapshot {
+            token_id: "token_up".to_string(),
+            bids: vec![polyrust_core::types::OrderbookLevel {
+                price: dec!(0.77), // drop of 0.13 from entry 0.90
+                size: dec!(100),
+            }],
+            asks: vec![polyrust_core::types::OrderbookLevel {
+                price: dec!(0.79),
+                size: dec!(100),
+            }],
+            timestamp: Utc::now(),
+        };
+
+        let actions = strategy.handle_orderbook_update(&snapshot).await;
+
+        // Should produce a sell action (sell delay elapsed + trigger fires)
+        assert!(
+            actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))),
+            "Should sell when delay elapsed and trigger fires, got: {actions:?}"
         );
 
         // Lifecycle should be ExitExecuting
@@ -3679,93 +3667,7 @@ mod tests {
         let lc = lifecycles.get("token_up").unwrap();
         assert!(
             matches!(lc.state, PositionLifecycleState::ExitExecuting { .. }),
-            "Expected ExitExecuting after deferred exit, got: {:?}",
-            lc.state
-        );
-    }
-
-    /// When a deferred exit's trigger condition clears before the sell delay
-    /// expires, the lifecycle transitions back to Healthy.
-    #[tokio::test]
-    async fn lifecycle_deferred_exit_clears_when_condition_resolves() {
-        // Start with position in sell delay (5s ago)
-        let (strategy, snapshot) = make_lifecycle_test_setup(5, 300).await;
-
-        // First call: should defer
-        let _ = strategy.handle_orderbook_update(&snapshot).await;
-        {
-            let lifecycles = strategy.base.position_lifecycle.read().await;
-            let lc = lifecycles.get("token_up").unwrap();
-            assert!(matches!(
-                lc.state,
-                PositionLifecycleState::DeferredExit { .. }
-            ));
-        }
-
-        // Simulate time passing (sell delay elapsed)
-        {
-            let mut positions = strategy.base.positions.write().await;
-            for pos_list in positions.values_mut() {
-                for pos in pos_list.iter_mut() {
-                    if pos.token_id == "token_up" {
-                        pos.entry_time = Utc::now() - Duration::seconds(20);
-                    }
-                }
-            }
-        }
-
-        // Now send a healthy snapshot (bid recovered near entry)
-        let healthy_snapshot = polyrust_core::types::OrderbookSnapshot {
-            token_id: "token_up".to_string(),
-            bids: vec![polyrust_core::types::OrderbookLevel {
-                price: dec!(0.89),
-                size: dec!(100),
-            }],
-            asks: vec![polyrust_core::types::OrderbookLevel {
-                price: dec!(0.91),
-                size: dec!(100),
-            }],
-            timestamp: Utc::now(),
-        };
-
-        // Also update price history to reflect no reversal
-        {
-            let mut history = strategy.base.price_history.write().await;
-            let mut entries = std::collections::VecDeque::new();
-            entries.push_back((Utc::now(), dec!(50100), "test".to_string()));
-            history.insert("BTC".to_string(), entries);
-        }
-        // Clear the composite cache so no stale reversal signal
-        {
-            let mut cache = strategy.base.sl_composite_cache.write().await;
-            cache.insert(
-                "BTC".to_string(),
-                (
-                    crate::crypto_arb::base::CompositePriceResult {
-                        price: dec!(50100),
-                        sources_used: 2,
-                        max_lag_ms: 100,
-                        dispersion_bps: dec!(5),
-                    },
-                    Utc::now(),
-                ),
-            );
-        }
-
-        let actions = strategy.handle_orderbook_update(&healthy_snapshot).await;
-
-        // Should NOT produce a sell action (conditions cleared)
-        assert!(
-            !actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))),
-            "Should not sell when conditions cleared, got: {actions:?}"
-        );
-
-        // Lifecycle should transition back to Healthy
-        let lifecycles = strategy.base.position_lifecycle.read().await;
-        let lc = lifecycles.get("token_up").unwrap();
-        assert!(
-            matches!(lc.state, PositionLifecycleState::Healthy),
-            "Expected Healthy after deferred exit cleared, got: {:?}",
+            "Expected ExitExecuting, got: {:?}",
             lc.state
         );
     }

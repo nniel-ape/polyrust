@@ -468,8 +468,8 @@ pub enum StopLossTriggerKind {
         /// Effective trailing distance used (after headroom cap + time decay).
         effective_distance: Decimal,
     },
-    /// Level 4: Adverse move detected during post-entry sell delay window.
-    /// Transition to DeferredExit — actual sell happens when delay expires.
+    /// Level 4: Adverse move detected during post-entry window.
+    /// Non-hard triggers during sell delay skip and re-evaluate next tick.
     PostEntryExit {
         /// Bid drop from entry that triggered the deferred exit.
         bid_drop: Decimal,
@@ -508,10 +508,7 @@ impl fmt::Display for StopLossTriggerKind {
 /// Per-position lifecycle state in the state machine.
 ///
 /// Valid transitions:
-/// - Healthy -> DeferredExit (trigger during sell delay)
-/// - Healthy -> ExitExecuting (trigger when sellable)
-/// - DeferredExit -> ExitExecuting (delay elapsed, trigger persists)
-/// - DeferredExit -> Healthy (trigger cleared)
+/// - Healthy -> ExitExecuting (trigger fires; hard crash bypasses sell delay)
 /// - ExitExecuting -> ResidualRisk (partial fill or rejection)
 /// - ExitExecuting -> (resolved) (fully filled — position removed)
 /// - ResidualRisk -> ExitExecuting (retry)
@@ -523,11 +520,6 @@ impl fmt::Display for StopLossTriggerKind {
 pub enum PositionLifecycleState {
     /// Position is active and being monitored. No exit trigger has fired.
     Healthy,
-    /// A trigger fired during the sell delay window. Exit is deferred until sellable.
-    DeferredExit {
-        trigger: StopLossTriggerKind,
-        armed_at: DateTime<Utc>,
-    },
     /// An exit order has been submitted and is in flight.
     ExitExecuting {
         order_id: OrderId,
@@ -556,7 +548,6 @@ impl fmt::Display for PositionLifecycleState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Healthy => write!(f, "Healthy"),
-            Self::DeferredExit { trigger, .. } => write!(f, "DeferredExit({trigger})"),
             Self::ExitExecuting {
                 order_type,
                 exit_price,
@@ -587,7 +578,6 @@ impl PositionLifecycleState {
     fn name(&self) -> &'static str {
         match self {
             Self::Healthy => "Healthy",
-            Self::DeferredExit { .. } => "DeferredExit",
             Self::ExitExecuting { .. } => "ExitExecuting",
             Self::ResidualRisk { .. } => "ResidualRisk",
             Self::RecoveryProbe { .. } => "RecoveryProbe",
@@ -603,10 +593,7 @@ impl PositionLifecycleState {
         use PositionLifecycleState::*;
         matches!(
             (self, target),
-            (Healthy, DeferredExit { .. })
-                | (Healthy, ExitExecuting { .. })
-                | (DeferredExit { .. }, ExitExecuting { .. })
-                | (DeferredExit { .. }, Healthy)
+            (Healthy, ExitExecuting { .. })
                 | (ExitExecuting { .. }, ResidualRisk { .. })
                 | (ResidualRisk { .. }, ExitExecuting { .. })
                 | (ResidualRisk { .. }, RecoveryProbe { .. })
@@ -871,7 +858,7 @@ impl PositionLifecycle {
 
         // ── Level 4: Post-Entry Exit ────────────────────────────────────
         // Fires within post_entry_window_secs of entry when adverse move detected.
-        // During sell delay: caller defers to DeferredExit state.
+        // During sell delay: caller skips non-hard triggers, re-evaluates next tick.
         // After sell delay but within window: caller executes exit immediately.
         let seconds_since_entry = ctx.now.signed_duration_since(ctx.entry_time).num_seconds();
         let within_post_entry_window = seconds_since_entry < tailend_config.post_entry_window_secs;

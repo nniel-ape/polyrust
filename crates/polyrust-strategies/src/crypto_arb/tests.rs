@@ -2822,21 +2822,8 @@ fn lifecycle_new_starts_healthy() {
 fn lifecycle_all_valid_transitions_succeed() {
     let t = now();
 
-    // Healthy -> DeferredExit
+    // Healthy -> ExitExecuting
     let mut lc = PositionLifecycle::new();
-    let result = lc.transition(
-        PositionLifecycleState::DeferredExit {
-            trigger: StopLossTriggerKind::PostEntryExit {
-                bid_drop: dec!(0.05),
-            },
-            armed_at: t,
-        },
-        "trigger during sell delay",
-        t,
-    );
-    assert!(result.is_ok());
-
-    // DeferredExit -> ExitExecuting
     let result = lc.transition(
         PositionLifecycleState::ExitExecuting {
             order_id: "order-1".to_string(),
@@ -2844,7 +2831,7 @@ fn lifecycle_all_valid_transitions_succeed() {
             exit_price: dec!(0.90),
             submitted_at: t,
         },
-        "delay elapsed",
+        "trigger fired",
         t,
     );
     assert!(result.is_ok());
@@ -2914,8 +2901,9 @@ fn lifecycle_all_valid_transitions_succeed() {
     let result = lc.transition(PositionLifecycleState::Healthy, "cooldown elapsed", t);
     assert!(result.is_ok());
 
-    // Verify transitions are logged
-    assert_eq!(lc.transition_log.len(), 8);
+    // Verify transitions are logged (7 transitions: Healthy->ExitExecuting->ResidualRisk->
+    // ExitExecuting->ResidualRisk->RecoveryProbe->Cooldown->Healthy)
+    assert_eq!(lc.transition_log.len(), 7);
 }
 
 #[test]
@@ -2937,28 +2925,6 @@ fn lifecycle_healthy_to_exit_executing() {
         lc.state,
         PositionLifecycleState::ExitExecuting { .. }
     ));
-}
-
-#[test]
-fn lifecycle_deferred_exit_to_healthy() {
-    let t = now();
-    let mut lc = PositionLifecycle::new();
-    lc.transition(
-        PositionLifecycleState::DeferredExit {
-            trigger: StopLossTriggerKind::DualTrigger {
-                consecutive_ticks: 2,
-            },
-            armed_at: t,
-        },
-        "dual trigger armed",
-        t,
-    )
-    .unwrap();
-
-    // Trigger cleared
-    let result = lc.transition(PositionLifecycleState::Healthy, "trigger cleared", t);
-    assert!(result.is_ok());
-    assert_eq!(lc.state, PositionLifecycleState::Healthy);
 }
 
 #[test]
@@ -3111,31 +3077,6 @@ fn lifecycle_invalid_transitions_return_error() {
     assert!(result.is_err());
     let msg = result.unwrap_err();
     assert!(msg.contains("Cooldown") && msg.contains("ExitExecuting"));
-
-    // DeferredExit -> ResidualRisk (invalid: must go through ExitExecuting)
-    let mut lc = PositionLifecycle::new();
-    lc.transition(
-        PositionLifecycleState::DeferredExit {
-            trigger: StopLossTriggerKind::PostEntryExit {
-                bid_drop: dec!(0.05),
-            },
-            armed_at: t,
-        },
-        "deferred",
-        t,
-    )
-    .unwrap();
-    let result = lc.transition(
-        PositionLifecycleState::ResidualRisk {
-            remaining_size: dec!(5),
-            retry_count: 0,
-            last_attempt: t,
-            use_gtc_next: false,
-        },
-        "skip ExitExecuting",
-        t,
-    );
-    assert!(result.is_err());
 }
 
 #[test]

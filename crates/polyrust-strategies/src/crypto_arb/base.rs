@@ -262,7 +262,7 @@ pub struct CryptoArbBase {
     /// Tuple: (composite result, timestamp when computed).
     pub sl_composite_cache: RwLock<HashMap<String, (CompositePriceResult, DateTime<Utc>)>>,
     /// Per-position lifecycle state machines, keyed by token_id.
-    /// Tracks each position through Healthy → DeferredExit → ExitExecuting → etc.
+    /// Tracks each position through Healthy → ExitExecuting → etc.
     pub position_lifecycle: RwLock<HashMap<TokenId, PositionLifecycle>>,
     /// Exit/recovery orders in flight, keyed by order_id.
     /// Used to route fill/reject events back to the correct position lifecycle.
