@@ -8,7 +8,7 @@ mod dashboard;
 pub mod domain;
 mod runtime;
 pub(crate) mod services;
-mod tailend;
+mod strategy;
 
 pub use runtime::CryptoArbRuntime;
 pub use config::{
@@ -16,7 +16,7 @@ pub use config::{
     SizingConfig, SpikeConfig, StopLossConfig, TailEndConfig,
 };
 pub use dashboard::CryptoArbDashboard;
-pub use tailend::TailEndStrategy;
+pub use strategy::tailend::TailEndStrategy;
 pub use domain::{
     ArbitrageOpportunity, ArbitragePosition, BoundarySnapshot, CompositePriceResult,
     CompositePriceSnapshot, ExitOrderMeta, MarketWithReference, ModeStats, OpenLimitOrder,

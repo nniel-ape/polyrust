@@ -17,7 +17,7 @@ use polyrust_core::prelude::*;
 use super::services::{kelly_position_size, net_profit_margin, parse_slug_timestamp, taker_fee};
 use super::runtime::CryptoArbRuntime;
 use super::config::{ArbitrageConfig, SizingConfig};
-use super::tailend::TailEndStrategy;
+use super::strategy::tailend::TailEndStrategy;
 use super::domain::{
     ArbitragePosition, BoundarySnapshot, CompositePriceSnapshot, ExitOrderMeta,
     MarketWithReference, ModeStats, OpenLimitOrder, PositionLifecycle, PositionLifecycleState,
@@ -980,7 +980,7 @@ fn tailend_config_defaults() {
 
 #[test]
 fn dynamic_ask_threshold_tightens_as_expiry_approaches() {
-    use super::tailend::TailEndStrategy;
+    use super::strategy::tailend::TailEndStrategy;
     use std::sync::Arc;
 
     let mut config = super::config::ArbitrageConfig::default();
@@ -1020,7 +1020,7 @@ fn dynamic_ask_threshold_tightens_as_expiry_approaches() {
 
 #[test]
 fn dynamic_ask_threshold_fallback_to_legacy() {
-    use super::tailend::TailEndStrategy;
+    use super::strategy::tailend::TailEndStrategy;
     use std::sync::Arc;
 
     let mut config = super::config::ArbitrageConfig::default();
@@ -2174,7 +2174,7 @@ async fn handle_cancel_failed_not_matched_does_not_create_position() {
 
 #[tokio::test]
 async fn strike_proximity_rejects_within_threshold() {
-    use super::tailend::TailEndStrategy;
+    use super::strategy::tailend::TailEndStrategy;
 
     let mut config = ArbitrageConfig::default();
     config.use_chainlink = false;
@@ -2229,7 +2229,7 @@ async fn strike_proximity_rejects_within_threshold() {
 
 #[tokio::test]
 async fn strike_proximity_allows_beyond_threshold() {
-    use super::tailend::TailEndStrategy;
+    use super::strategy::tailend::TailEndStrategy;
 
     let mut config = ArbitrageConfig::default();
     config.use_chainlink = false;

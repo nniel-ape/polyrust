@@ -129,16 +129,16 @@ crypto_arb/
 - [x] Run `cargo build --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 5: Split `tailend.rs` into `strategy/tailend/`
-- [ ] Create `crypto_arb/strategy/` and `strategy/tailend/` directories
-- [ ] Create `strategy/tailend/mod.rs` — move `TailEndStrategy` struct, `new()`, Strategy trait impl (`name`, `description`, `on_start`, `on_stop`, `dashboard_view`, thin `on_event` dispatch table)
-- [ ] Create `strategy/tailend/entry.rs` — move: `get_ask_threshold_impl()`, `evaluate_opportunity()`, `handle_external_price()`
-- [ ] Create `strategy/tailend/exit.rs` — move: `evaluate_exits_on_price_change()`, `handle_orderbook_update()`, `build_exit_order()`, `write_lifecycle()`
-- [ ] Create `strategy/tailend/order_events.rs` — move: `on_order_placed()`, `on_order_filled()`, extract inline `on_event` match arms as named methods: `handle_partially_filled()`, `handle_rejected()`, `handle_cancelled()`, `handle_cancel_failed()`, `handle_open_order_snapshot()`
-- [ ] Refactor `on_event` in `mod.rs` to be a thin dispatcher calling methods from entry/exit/order_events
-- [ ] Add `mod strategy;` to `crypto_arb/mod.rs`, update `TailEndStrategy` re-export path
-- [ ] Delete `tailend.rs` after all contents moved
-- [ ] Fix all import paths across strategy files
-- [ ] Run `cargo build --workspace && cargo clippy --workspace -- -D warnings`
+- [x] Create `crypto_arb/strategy/` and `strategy/tailend/` directories
+- [x] Create `strategy/tailend/mod.rs` — move `TailEndStrategy` struct, `new()`, Strategy trait impl (`name`, `description`, `on_start`, `on_stop`, `dashboard_view`, thin `on_event` dispatch table)
+- [x] Create `strategy/tailend/entry.rs` — move: `get_ask_threshold_impl()`, `evaluate_opportunity()`, `handle_external_price()`
+- [x] Create `strategy/tailend/exit.rs` — move: `evaluate_exits_on_price_change()`, `handle_orderbook_update()`, `build_exit_order()`, `write_lifecycle()`, `evaluate_hedge()`
+- [x] Create `strategy/tailend/order_events.rs` — move: `on_order_placed()`, `on_order_filled()`, extract inline `on_event` match arms as named methods: `handle_partially_filled()`, `handle_rejected()`, `handle_cancelled()`, `handle_cancel_failed()`, `handle_open_order_snapshot()`
+- [x] Refactor `on_event` in `mod.rs` to be a thin dispatcher calling methods from entry/exit/order_events
+- [x] Add `mod strategy;` to `crypto_arb/mod.rs`, update `TailEndStrategy` re-export path
+- [x] Delete `tailend.rs` after all contents moved
+- [x] Fix all import paths across strategy files
+- [x] Run `cargo build --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 6: Split `dashboard.rs` into `dashboard/`
 - [ ] Create `crypto_arb/dashboard/` directory
