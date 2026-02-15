@@ -390,13 +390,15 @@ async fn base_record_price_and_detect_spike() {
     let base = make_base_no_chainlink();
 
     // Record initial price
+    let now = Utc::now();
     let _ = base
-        .record_price("BTC", dec!(50000), "binance", Utc::now())
+        .record_price("BTC", dec!(50000), "binance", now, now)
         .await;
 
     // Small move - no spike
+    let now = Utc::now();
     let (spike, _) = base
-        .record_price("BTC", dec!(50100), "binance", Utc::now())
+        .record_price("BTC", dec!(50100), "binance", now, now)
         .await;
     assert!(spike.is_none());
 
@@ -408,7 +410,7 @@ async fn base_record_price_and_detect_spike() {
         let old_time = Utc::now() - Duration::seconds(15);
         history.insert(
             "TEST".to_string(),
-            VecDeque::from([(old_time, dec!(50000), "binance".to_string())]),
+            VecDeque::from([(old_time, dec!(50000), "binance".to_string(), old_time)]),
         );
     }
 
@@ -451,17 +453,11 @@ async fn base_find_best_reference_historical() {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
         // 5 seconds after window start
-        entries.push_back((
-            target_dt + Duration::seconds(5),
-            dec!(42600),
-            "binance".to_string(),
-        ));
+        let ts1 = target_dt + Duration::seconds(5);
+        entries.push_back((ts1, dec!(42600), "binance".to_string(), ts1));
         // 20 seconds after window start
-        entries.push_back((
-            target_dt + Duration::seconds(20),
-            dec!(42700),
-            "binance".to_string(),
-        ));
+        let ts2 = target_dt + Duration::seconds(20);
+        entries.push_back((ts2, dec!(42700), "binance".to_string(), ts2));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -700,10 +696,10 @@ async fn check_sustained_direction_up() {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
         // Use longer times to ensure they are within the sustained window
-        entries.push_back((now - Duration::seconds(10), dec!(50100), "rtds".to_string()));
-        entries.push_back((now - Duration::seconds(6), dec!(50200), "rtds".to_string()));
-        entries.push_back((now - Duration::seconds(3), dec!(50300), "rtds".to_string()));
-        entries.push_back((now - Duration::seconds(1), dec!(50400), "rtds".to_string()));
+        entries.push_back((now - Duration::seconds(10), dec!(50100), "rtds".to_string(), now - Duration::seconds(10)));
+        entries.push_back((now - Duration::seconds(6), dec!(50200), "rtds".to_string(), now - Duration::seconds(6)));
+        entries.push_back((now - Duration::seconds(3), dec!(50300), "rtds".to_string(), now - Duration::seconds(3)));
+        entries.push_back((now - Duration::seconds(1), dec!(50400), "rtds".to_string(), now - Duration::seconds(1)));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -731,9 +727,9 @@ async fn check_sustained_direction_not_sustained() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((now - Duration::seconds(4), dec!(49900), "rtds".to_string())); // Below
-        entries.push_back((now - Duration::seconds(2), dec!(50100), "rtds".to_string())); // Above
-        entries.push_back((now - Duration::seconds(1), dec!(50200), "rtds".to_string())); // Above
+        entries.push_back((now - Duration::seconds(4), dec!(49900), "rtds".to_string(), now - Duration::seconds(4))); // Below
+        entries.push_back((now - Duration::seconds(2), dec!(50100), "rtds".to_string(), now - Duration::seconds(2))); // Above
+        entries.push_back((now - Duration::seconds(1), dec!(50200), "rtds".to_string(), now - Duration::seconds(1))); // Above
         history.insert("BTC".to_string(), entries);
     }
 
@@ -756,7 +752,7 @@ async fn sustained_direction_single_tick_below_min_ticks() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((now - Duration::seconds(2), dec!(50100), "rtds".to_string()));
+        entries.push_back((now - Duration::seconds(2), dec!(50100), "rtds".to_string(), now - Duration::seconds(2)));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -779,8 +775,8 @@ async fn sustained_direction_two_ticks_favoring() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((now - Duration::seconds(4), dec!(50100), "rtds".to_string()));
-        entries.push_back((now - Duration::seconds(2), dec!(50200), "rtds".to_string()));
+        entries.push_back((now - Duration::seconds(4), dec!(50100), "rtds".to_string(), now - Duration::seconds(4)));
+        entries.push_back((now - Duration::seconds(2), dec!(50200), "rtds".to_string(), now - Duration::seconds(2)));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -802,8 +798,8 @@ async fn sustained_direction_two_ticks_one_against() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((now - Duration::seconds(4), dec!(49900), "rtds".to_string()));
-        entries.push_back((now - Duration::seconds(2), dec!(50200), "rtds".to_string()));
+        entries.push_back((now - Duration::seconds(4), dec!(49900), "rtds".to_string(), now - Duration::seconds(4)));
+        entries.push_back((now - Duration::seconds(2), dec!(50200), "rtds".to_string(), now - Duration::seconds(2)));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -826,9 +822,9 @@ async fn max_recent_volatility_no_wick() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((now - Duration::seconds(8), dec!(50100), "rtds".to_string()));
-        entries.push_back((now - Duration::seconds(5), dec!(50200), "rtds".to_string()));
-        entries.push_back((now - Duration::seconds(2), dec!(50150), "rtds".to_string()));
+        entries.push_back((now - Duration::seconds(8), dec!(50100), "rtds".to_string(), now - Duration::seconds(8)));
+        entries.push_back((now - Duration::seconds(5), dec!(50200), "rtds".to_string(), now - Duration::seconds(5)));
+        entries.push_back((now - Duration::seconds(2), dec!(50150), "rtds".to_string(), now - Duration::seconds(2)));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -852,9 +848,9 @@ async fn max_recent_volatility_with_wick() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((now - Duration::seconds(8), dec!(50100), "rtds".to_string()));
-        entries.push_back((now - Duration::seconds(5), dec!(51000), "rtds".to_string())); // 2% wick
-        entries.push_back((now - Duration::seconds(2), dec!(50150), "rtds".to_string()));
+        entries.push_back((now - Duration::seconds(8), dec!(50100), "rtds".to_string(), now - Duration::seconds(8)));
+        entries.push_back((now - Duration::seconds(5), dec!(51000), "rtds".to_string(), now - Duration::seconds(5))); // 2% wick
+        entries.push_back((now - Duration::seconds(2), dec!(50150), "rtds".to_string(), now - Duration::seconds(2)));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -1698,11 +1694,8 @@ async fn quality_upgrades_current_to_historical() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((
-            target_dt + Duration::seconds(5),
-            dec!(49800),
-            "binance".to_string(),
-        ));
+        let ts = target_dt + Duration::seconds(5);
+        entries.push_back((ts, dec!(49800), "binance".to_string(), ts));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -1741,11 +1734,8 @@ async fn quality_never_downgrades() {
         let mut history = base.price_history.write().await;
         let target = DateTime::from_timestamp(1706000000, 0).unwrap();
         let mut entries = VecDeque::new();
-        entries.push_back((
-            target + Duration::seconds(2),
-            dec!(49999),
-            "binance".to_string(),
-        ));
+        let ts = target + Duration::seconds(2);
+        entries.push_back((ts, dec!(49999), "binance".to_string(), ts));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -1831,11 +1821,8 @@ async fn quality_historical_does_not_upgrade_to_historical() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((
-            target_dt + Duration::seconds(5),
-            dec!(49900),
-            "binance".to_string(),
-        ));
+        let ts = target_dt + Duration::seconds(5);
+        entries.push_back((ts, dec!(49900), "binance".to_string(), ts));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -2205,8 +2192,8 @@ async fn strike_proximity_allows_beyond_threshold() {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
         let now = Utc::now();
-        entries.push_back((now - Duration::seconds(3), dec!(1996), "test".to_string()));
-        entries.push_back((now - Duration::seconds(1), dec!(1996), "test".to_string()));
+        entries.push_back((now - Duration::seconds(3), dec!(1996), "test".to_string(), now - Duration::seconds(3)));
+        entries.push_back((now - Duration::seconds(1), dec!(1996), "test".to_string(), now - Duration::seconds(1)));
         history.insert("ETH".to_string(), entries);
     }
 
@@ -3459,11 +3446,8 @@ async fn sl_single_fresh_returns_recent_price() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = std::collections::VecDeque::new();
-        entries.push_back((
-            now - chrono::Duration::milliseconds(500),
-            dec!(88500),
-            "binance-spot".to_string(),
-        ));
+        let ts = now - chrono::Duration::milliseconds(500);
+        entries.push_back((ts, dec!(88500), "binance-spot".to_string(), ts));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -3482,11 +3466,8 @@ async fn sl_single_fresh_returns_none_when_stale() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = std::collections::VecDeque::new();
-        entries.push_back((
-            now - chrono::Duration::seconds(5),
-            dec!(88500),
-            "binance-spot".to_string(),
-        ));
+        let ts = now - chrono::Duration::seconds(5);
+        entries.push_back((ts, dec!(88500), "binance-spot".to_string(), ts));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -4165,11 +4146,8 @@ async fn recovery_opposite_alpha_momentum_confirmed() {
         let mut entries = VecDeque::new();
         let now = Utc::now();
         for i in 0..sl_config.reentry_confirm_ticks {
-            entries.push_back((
-                now - Duration::seconds((sl_config.reentry_confirm_ticks - i) as i64),
-                dec!(49500), // Below 50000 reference = reversal for Up position
-                "test".to_string(),
-            ));
+            let ts = now - Duration::seconds((sl_config.reentry_confirm_ticks - i) as i64);
+            entries.push_back((ts, dec!(49500), "test".to_string(), ts)); // Below 50000 reference = reversal for Up position
         }
         history.insert("BTC".to_string(), entries);
     }
@@ -4199,7 +4177,7 @@ async fn recovery_opposite_alpha_momentum_confirmed() {
             .iter()
             .rev()
             .take(sl_config.reentry_confirm_ticks)
-            .all(|(_, price, _)| {
+            .all(|(_, price, _, _)| {
                 // For Up position, reversal = price dropped below reference
                 *price < pos.reference_price
             });
@@ -4474,4 +4452,176 @@ fn sell_fills_before_hedge_position_resolved() {
     // Test that ExitExecuting can transition to Healthy (for cancel-and-retry path):
     let result = lc.transition(PositionLifecycleState::Healthy, "sell cancelled for retry", t);
     assert!(result.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Task 6: Timestamp correctness and source priority
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sl_single_fresh_uses_source_timestamp_not_receive_time() {
+    let base = make_base_no_chainlink();
+    let now = Utc::now();
+
+    // Seed price_history: receive_time is recent (200ms ago),
+    // but source_timestamp is old (10s ago).
+    // Freshness should be computed from source_timestamp, not receive_time.
+    {
+        let mut history = base.price_history.write().await;
+        let mut entries = std::collections::VecDeque::new();
+        let receive_time = now - chrono::Duration::milliseconds(200);
+        let source_ts = now - chrono::Duration::seconds(10);
+        entries.push_back((receive_time, dec!(88500), "binance-spot".to_string(), source_ts));
+        history.insert("BTC".to_string(), entries);
+    }
+
+    // With max_age_ms = 1500, source is 10s old — should return None
+    let result = base.get_sl_single_fresh("BTC", 1500, now).await;
+    assert!(
+        result.is_none(),
+        "Should be stale: source_timestamp is 10s old, limit is 1.5s"
+    );
+
+    // With max_age_ms = 15000, source is 10s old — should return the price
+    let result = base.get_sl_single_fresh("BTC", 15000, now).await;
+    assert!(
+        result.is_some(),
+        "Should be fresh: source_timestamp is 10s old, limit is 15s"
+    );
+    assert_eq!(result.unwrap(), dec!(88500));
+}
+
+#[tokio::test]
+async fn composite_source_priority_fallback_order() {
+    use polyrust_core::context::SourcedPrice;
+
+    let base = make_base_no_chainlink();
+    let ctx = StrategyContext::new();
+    let now = Utc::now();
+
+    // Populate sourced_prices with only coinbase and chainlink (no binance).
+    // Both are fresh. Quorum requires 2+ sources by default but we set min_sources=2
+    // and only have 2 non-WEIGHTS sources (coinbase is in WEIGHTS, chainlink is not).
+    // Actually: WEIGHTS has binance-futures, binance-spot, coinbase.
+    // With only coinbase fresh, sources_used=1 < min_sources=2 → fallback kicks in.
+    {
+        let mut md = ctx.market_data.write().await;
+        let mut coin_sources = std::collections::HashMap::new();
+        coin_sources.insert(
+            "coinbase".to_string(),
+            SourcedPrice {
+                price: dec!(50100),
+                source: "coinbase".to_string(),
+                timestamp: now - chrono::Duration::milliseconds(100),
+            },
+        );
+        coin_sources.insert(
+            "chainlink".to_string(),
+            SourcedPrice {
+                price: dec!(50200),
+                source: "chainlink".to_string(),
+                timestamp: now - chrono::Duration::milliseconds(200),
+            },
+        );
+        md.sourced_prices.insert("BTC".to_string(), coin_sources);
+    }
+
+    // min_sources=2, only 1 weighted source (coinbase) is fresh → quorum fails
+    // Fallback should pick highest-priority fresh source.
+    // Priority: binance-futures > binance-spot > coinbase > chainlink
+    // Only coinbase and chainlink are available → coinbase wins.
+    let result = base
+        .composite_fair_price("BTC", &ctx, 5, 2, dec!(100))
+        .await;
+    assert!(result.is_some(), "Fallback should return a result");
+    let r = result.unwrap();
+    assert_eq!(r.price, dec!(50100), "Should pick coinbase (higher priority than chainlink)");
+    assert_eq!(r.sources_used, 1, "Fallback uses single source");
+}
+
+#[tokio::test]
+async fn composite_source_priority_prefers_binance_futures() {
+    use polyrust_core::context::SourcedPrice;
+
+    let base = make_base_no_chainlink();
+    let ctx = StrategyContext::new();
+    let now = Utc::now();
+
+    // Populate with binance-futures and chainlink, both fresh.
+    // binance-futures is in WEIGHTS so sources_used=1, but min_sources=2 → fallback.
+    // Fallback should prefer binance-futures over chainlink.
+    {
+        let mut md = ctx.market_data.write().await;
+        let mut coin_sources = std::collections::HashMap::new();
+        coin_sources.insert(
+            "binance-futures".to_string(),
+            SourcedPrice {
+                price: dec!(50000),
+                source: "binance-futures".to_string(),
+                timestamp: now - chrono::Duration::milliseconds(50),
+            },
+        );
+        coin_sources.insert(
+            "chainlink".to_string(),
+            SourcedPrice {
+                price: dec!(50300),
+                source: "chainlink".to_string(),
+                timestamp: now - chrono::Duration::milliseconds(100),
+            },
+        );
+        md.sourced_prices.insert("BTC".to_string(), coin_sources);
+    }
+
+    let result = base
+        .composite_fair_price("BTC", &ctx, 5, 2, dec!(100))
+        .await;
+    assert!(result.is_some(), "Fallback should return a result");
+    let r = result.unwrap();
+    assert_eq!(
+        r.price,
+        dec!(50000),
+        "Should pick binance-futures (highest priority)"
+    );
+}
+
+#[tokio::test]
+async fn composite_source_priority_skips_stale_sources() {
+    use polyrust_core::context::SourcedPrice;
+
+    let base = make_base_no_chainlink();
+    let ctx = StrategyContext::new();
+    let now = Utc::now();
+
+    // binance-futures is stale (10s), coinbase is fresh (100ms)
+    {
+        let mut md = ctx.market_data.write().await;
+        let mut coin_sources = std::collections::HashMap::new();
+        coin_sources.insert(
+            "binance-futures".to_string(),
+            SourcedPrice {
+                price: dec!(50000),
+                source: "binance-futures".to_string(),
+                timestamp: now - chrono::Duration::seconds(10),
+            },
+        );
+        coin_sources.insert(
+            "coinbase".to_string(),
+            SourcedPrice {
+                price: dec!(50100),
+                source: "coinbase".to_string(),
+                timestamp: now - chrono::Duration::milliseconds(100),
+            },
+        );
+        md.sourced_prices.insert("BTC".to_string(), coin_sources);
+    }
+
+    // max_stale_secs=5 → binance-futures is stale, coinbase is fresh
+    // Quorum fails (1 weighted source < min_sources=2), fallback kicks in.
+    // Fallback priority: binance-futures (stale, skip) > binance-spot (absent) > coinbase (fresh, pick)
+    let result = base
+        .composite_fair_price("BTC", &ctx, 5, 2, dec!(100))
+        .await;
+    assert!(result.is_some(), "Fallback should find coinbase");
+    let r = result.unwrap();
+    assert_eq!(r.price, dec!(50100), "Should pick coinbase (binance-futures is stale)");
 }

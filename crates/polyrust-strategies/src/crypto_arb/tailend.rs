@@ -548,11 +548,15 @@ impl TailEndStrategy {
         symbol: &str,
         price: Decimal,
         source: &str,
+        source_timestamp: DateTime<Utc>,
         ctx: &StrategyContext,
     ) -> Vec<Action> {
         // Record price and promote any pending markets
         let now = ctx.now().await;
-        let (_, promote_actions) = self.base.record_price(symbol, price, source, now).await;
+        let (_, promote_actions) = self
+            .base
+            .record_price(symbol, price, source, now, source_timestamp)
+            .await;
         let mut result = promote_actions;
 
         // Update the stop-loss composite cache for this coin.
@@ -941,7 +945,7 @@ impl TailEndStrategy {
                             let age = history
                                 .get(&pos.coin)
                                 .and_then(|h| h.back())
-                                .map(|(ts, _, _)| now.signed_duration_since(*ts).num_milliseconds())
+                                .map(|(.., source_ts)| now.signed_duration_since(*source_ts).num_milliseconds())
                                 .unwrap_or(sl_config.sl_max_external_age_ms * 3);
                             (Some(single), Some(age), None)
                         } else {
@@ -959,7 +963,7 @@ impl TailEndStrategy {
                         let age = history
                             .get(&pos.coin)
                             .and_then(|h| h.back())
-                            .map(|(ts, _, _)| now.signed_duration_since(*ts).num_milliseconds())
+                            .map(|(.., source_ts)| now.signed_duration_since(*source_ts).num_milliseconds())
                             .unwrap_or(sl_config.sl_max_external_age_ms * 3);
                         (Some(single), Some(age), None)
                     } else {
@@ -1165,7 +1169,7 @@ impl TailEndStrategy {
                             let age = history
                                 .get(&pos.coin)
                                 .and_then(|h| h.back())
-                                .map(|(ts, _, _)| now.signed_duration_since(*ts).num_milliseconds())
+                                .map(|(.., source_ts)| now.signed_duration_since(*source_ts).num_milliseconds())
                                 .unwrap_or(sl_config.sl_max_external_age_ms * 3);
                             (Some(single), Some(age), None)
                         } else {
@@ -1184,7 +1188,7 @@ impl TailEndStrategy {
                         let age = history
                             .get(&pos.coin)
                             .and_then(|h| h.back())
-                            .map(|(ts, _, _)| now.signed_duration_since(*ts).num_milliseconds())
+                            .map(|(.., source_ts)| now.signed_duration_since(*source_ts).num_milliseconds())
                             .unwrap_or(sl_config.sl_max_external_age_ms * 3);
                         (Some(single), Some(age), None)
                     } else {
@@ -1800,9 +1804,9 @@ impl Strategy for TailEndStrategy {
                 symbol,
                 price,
                 source,
-                ..
+                timestamp,
             }) => {
-                self.handle_external_price(symbol, *price, source, ctx)
+                self.handle_external_price(symbol, *price, source, *timestamp, ctx)
                     .await
             }
 
@@ -2401,8 +2405,8 @@ mod tests {
             let mut entries = VecDeque::new();
             let now = Utc::now();
             // BTC above reference (51000 > 50000) — favors Up direction
-            entries.push_back((now - Duration::seconds(3), dec!(51000), "test".to_string()));
-            entries.push_back((now - Duration::seconds(1), dec!(51000), "test".to_string()));
+            entries.push_back((now - Duration::seconds(3), dec!(51000), "test".to_string(), now - Duration::seconds(3)));
+            entries.push_back((now - Duration::seconds(1), dec!(51000), "test".to_string(), now - Duration::seconds(1)));
             history.insert("BTC".to_string(), entries);
         }
 
@@ -2601,7 +2605,7 @@ mod tests {
 
         // Trigger entry via external price
         let actions = strategy
-            .handle_external_price("BTC", dec!(51000), "test", &ctx)
+            .handle_external_price("BTC", dec!(51000), "test", ctx.now().await, &ctx)
             .await;
 
         // Should have produced a PlaceOrder action
@@ -2927,7 +2931,7 @@ mod tests {
         {
             let mut history = base.price_history.write().await;
             let mut entries = std::collections::VecDeque::new();
-            entries.push_back((now, dec!(49700), "test".to_string()));
+            entries.push_back((now, dec!(49700), "test".to_string(), now));
             history.insert("BTC".to_string(), entries);
         }
 
@@ -3936,7 +3940,7 @@ mod tests {
             use std::collections::VecDeque;
             let mut history = base.price_history.write().await;
             let mut entries = VecDeque::new();
-            entries.push_back((now - Duration::seconds(1), dec!(49500), "test".to_string()));
+            entries.push_back((now - Duration::seconds(1), dec!(49500), "test".to_string(), now - Duration::seconds(1)));
             history.insert("BTC".to_string(), entries);
         }
 

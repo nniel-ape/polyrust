@@ -203,9 +203,12 @@ pub struct CryptoArbBase {
     pub chainlink_client: Option<Arc<ChainlinkHistoricalClient>>,
     /// Active markets indexed by market ID.
     pub active_markets: RwLock<HashMap<MarketId, MarketWithReference>>,
-    /// Price history per coin: (timestamp, price, source).
+    /// Price history per coin: (receive_time, price, source, source_timestamp).
     /// Kept at PRICE_HISTORY_SIZE entries for retroactive reference lookup.
-    pub price_history: RwLock<HashMap<String, VecDeque<(DateTime<Utc>, Decimal, String)>>>,
+    /// `receive_time` is wall-clock when the bot processed the event;
+    /// `source_timestamp` is when the upstream feed generated the price.
+    pub price_history:
+        RwLock<HashMap<String, VecDeque<(DateTime<Utc>, Decimal, String, DateTime<Utc>)>>>,
     /// Proactive price snapshots at 15-min window boundaries, keyed by "{COIN}-{unix_ts}".
     pub boundary_prices: RwLock<HashMap<String, BoundarySnapshot>>,
     /// Open positions indexed by market ID.
@@ -360,7 +363,7 @@ impl CryptoArbBase {
                 let ts = DateTime::from_timestamp(cp.timestamp as i64, 0).unwrap_or_else(Utc::now);
                 let mut history = self.price_history.write().await;
                 let entry = history.entry(coin).or_default();
-                entry.push_back((ts, cp.price, "chainlink".to_string()));
+                entry.push_back((ts, cp.price, "chainlink".to_string(), ts));
                 success += 1;
             }
         }
@@ -393,6 +396,7 @@ impl CryptoArbBase {
         price: Decimal,
         source: &str,
         now: DateTime<Utc>,
+        source_timestamp: DateTime<Utc>,
     ) -> (Option<Decimal>, Vec<Action>) {
         // Update feed health tracking
         {
@@ -410,10 +414,10 @@ impl CryptoArbBase {
             let entry = history.entry(symbol.to_string()).or_default();
             let is_duplicate = entry
                 .back()
-                .map(|(_, last_price, _)| *last_price == price)
+                .map(|(_, last_price, _, _)| *last_price == price)
                 .unwrap_or(false);
             if !is_duplicate {
-                entry.push_back((now, price, source.to_string()));
+                entry.push_back((now, price, source.to_string(), source_timestamp));
                 if entry.len() > PRICE_HISTORY_SIZE {
                     entry.pop_front();
                 }
@@ -482,7 +486,7 @@ impl CryptoArbBase {
     /// Get the latest price for a coin from price history.
     pub async fn get_latest_price(&self, coin: &str) -> Option<Decimal> {
         let history = self.price_history.read().await;
-        history.get(coin).and_then(|h| h.back().map(|(_, p, _)| *p))
+        history.get(coin).and_then(|h| h.back().map(|(_, p, ..)| *p))
     }
 
     /// Get the settlement price for a coin at market end time.
@@ -526,14 +530,14 @@ impl CryptoArbBase {
         let history = self.price_history.read().await;
         let entries = history.get(coin)?;
         let mut best = None;
-        for (ts, price, _) in entries.iter() {
+        for (ts, price, ..) in entries.iter() {
             if *ts <= end_date {
                 best = Some(*price);
             } else {
                 break;
             }
         }
-        best.or_else(|| entries.back().map(|(_, p, _)| *p))
+        best.or_else(|| entries.back().map(|(_, p, ..)| *p))
     }
 
     /// Check if price has favored the given direction for at least `min_sustained_secs`.
@@ -558,7 +562,7 @@ impl CryptoArbBase {
         let cutoff = now - chrono::Duration::seconds(min_sustained_secs as i64);
 
         // Get all entries within the sustained window
-        let window_entries: Vec<_> = entries.iter().filter(|(ts, _, _)| *ts >= cutoff).collect();
+        let window_entries: Vec<_> = entries.iter().filter(|(ts, ..)| *ts >= cutoff).collect();
 
         // Need at least min_ticks entries to confirm direction
         if window_entries.len() < min_ticks {
@@ -576,10 +580,10 @@ impl CryptoArbBase {
         match predicted {
             OutcomeSide::Up | OutcomeSide::Yes => window_entries
                 .iter()
-                .all(|(_, price, _)| *price > reference_price),
+                .all(|(_, price, ..)| *price > reference_price),
             OutcomeSide::Down | OutcomeSide::No => window_entries
                 .iter()
-                .all(|(_, price, _)| *price < reference_price),
+                .all(|(_, price, ..)| *price < reference_price),
         }
     }
 
@@ -602,7 +606,7 @@ impl CryptoArbBase {
         let entries = history.get(coin)?;
         let cutoff = now - chrono::Duration::seconds(window_secs as i64);
 
-        let window_entries: Vec<_> = entries.iter().filter(|(ts, _, _)| *ts >= cutoff).collect();
+        let window_entries: Vec<_> = entries.iter().filter(|(ts, ..)| *ts >= cutoff).collect();
 
         if window_entries.is_empty() {
             return None;
@@ -610,12 +614,12 @@ impl CryptoArbBase {
 
         let max_price = window_entries
             .iter()
-            .map(|(_, p, _)| *p)
+            .map(|(_, p, ..)| *p)
             .max()
             .unwrap_or(reference_price);
         let min_price = window_entries
             .iter()
-            .map(|(_, p, _)| *p)
+            .map(|(_, p, ..)| *p)
             .min()
             .unwrap_or(reference_price);
 
@@ -709,6 +713,29 @@ impl CryptoArbBase {
         }
 
         if sources_used < min_sources || total_weight.is_zero() {
+            // Source-priority fallback: when composite quorum fails, use the
+            // highest-priority single fresh source instead of returning None.
+            // Priority: binance-futures > binance-spot > coinbase > chainlink
+            static PRIORITY: &[&str] = &[
+                "binance-futures",
+                "binance-spot",
+                "coinbase",
+                "chainlink",
+            ];
+            for &source_name in PRIORITY {
+                if let Some(sp) = sources.get(source_name) {
+                    let age_secs = (now - sp.timestamp).num_seconds();
+                    if age_secs <= max_stale_secs {
+                        let lag_ms = (now - sp.timestamp).num_milliseconds();
+                        return Some(CompositePriceResult {
+                            price: sp.price,
+                            sources_used: 1,
+                            max_lag_ms: lag_ms,
+                            dispersion_bps: Decimal::ZERO,
+                        });
+                    }
+                }
+            }
             return None;
         }
 
@@ -830,10 +857,12 @@ impl CryptoArbBase {
         let history = self.price_history.read().await;
         let entries = history.get(coin)?;
 
-        // price_history is a VecDeque of (timestamp, price, source).
-        // Check only the most recent entry — if it's too old, all earlier ones are too.
-        if let Some((ts, price, _source)) = entries.back() {
-            let age_ms = (now - *ts).num_milliseconds();
+        // price_history is a VecDeque of (receive_time, price, source, source_timestamp).
+        // Use source_timestamp for freshness — it reflects when the feed generated
+        // the price, not when the bot received it. This prevents stale source data
+        // from appearing fresh due to processing delay.
+        if let Some((_receive_time, price, _source, source_ts)) = entries.back() {
+            let age_ms = (now - *source_ts).num_milliseconds();
             if age_ms <= max_age_ms {
                 return Some(*price);
             }
@@ -865,8 +894,8 @@ impl CryptoArbBase {
         let baseline = entries
             .iter()
             .rev()
-            .find(|(ts, _, _)| *ts <= cutoff)
-            .map(|(_, p, _)| *p)?;
+            .find(|(ts, _, _, _)| *ts <= cutoff)
+            .map(|(_, p, _, _)| *p)?;
 
         if baseline.is_zero() {
             return None;
@@ -976,7 +1005,7 @@ impl CryptoArbBase {
         if let (Some(target_dt), Some(entries)) = (target, history.get(coin)) {
             // Find all entries within 30s of window start
             let mut best: Option<(u64, Decimal, bool)> = None; // (staleness, price, is_preferred)
-            for (ts, price, source) in entries {
+            for (ts, price, source, _) in entries {
                 let staleness = (*ts - target_dt).num_seconds().unsigned_abs();
                 if staleness >= 30 {
                     continue;
@@ -1103,7 +1132,7 @@ impl CryptoArbBase {
                 let target = DateTime::from_timestamp(mwr.window_ts, 0);
                 if let Some(target_dt) = target {
                     let mut best: Option<(u64, Decimal, bool)> = None;
-                    for (ts, price, source) in entries {
+                    for (ts, price, source, _) in entries {
                         let staleness = (*ts - target_dt).num_seconds().unsigned_abs();
                         if staleness >= 30 {
                             continue;

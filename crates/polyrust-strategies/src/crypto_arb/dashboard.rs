@@ -51,7 +51,7 @@ async fn render_reference_prices(base: &CryptoArbBase, html: &mut String) {
             }
             let current_price = price_history
                 .get(&mwr.coin)
-                .and_then(|h| h.back().map(|(_, p, _)| *p));
+                .and_then(|h| h.back().map(|(_, p, _, _)| *p));
 
             let ref_label = match mwr.reference_quality {
                 ReferenceQuality::OnChain(_) => "✓",
