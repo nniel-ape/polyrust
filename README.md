@@ -202,17 +202,18 @@ engine.run().await?;
 
 ## Reference Strategy: Crypto Arbitrage
 
-The included crypto arbitrage strategy exploits mispricing in 15-minute Up/Down crypto markets using high-confidence tail-end trades (<2 min remaining, market >= 90% certainty, uses FOK taker orders for speed).
+The included crypto arbitrage strategy exploits mispricing in 15-minute Up/Down crypto markets using high-confidence tail-end trades (<2 min remaining, market >= 90% certainty).
 
 ### Key Features
 
 - **Fee-aware profit margins** — Net profit calculation accounts for Polymarket's dynamic taker fees (3.15% at 50/50, ~0% at extremes)
-- **Hybrid order execution** — GTC maker orders (0% fee) for most trades, FOK taker orders only for tail-end urgency
+- **Hybrid order execution** — GTC maker orders (0% fee) for entries, FAK taker orders for fast exits
 - **Kelly criterion sizing** — Position size scales with confidence and edge, clamped to configured min/max
 - **Spike detection** — Pre-filters small moves, triggers evaluation only on significant price changes
-- **Position lifecycle state machine** — Per-position 6-state lifecycle (Healthy -> DeferredExit -> ExitExecuting -> ResidualRisk -> RecoveryProbe -> Cooldown) with 4-level trigger hierarchy for stop-loss decisions
-- **Composite price stop-loss** — All stop-loss decisions use freshness-gated composite price from multiple sources
-- **Execution ladder** — Depth-capped exit clips with geometric reduction, 2-second GTC refresh cycle, and recovery logic
+- **Position lifecycle state machine** — Per-position 3-state lifecycle (Healthy -> ExitExecuting -> Hedged) with 4-level trigger hierarchy for stop-loss decisions. Hard crash triggers bypass sell delay for immediate exit.
+- **Composite price stop-loss** — All stop-loss decisions use freshness-gated composite price from multiple sources with source-priority fallback (binance-futures > binance-spot > coinbase > chainlink), preventing stale single-source exits
+- **Fast-path exit evaluation** — ExternalPrice events (Binance, Coinbase) trigger stop-loss evaluation using cached orderbook bids, enabling exits 50-200ms ahead of CLOB orderbook updates. Gated by book freshness threshold (`fast_path_max_book_age_ms`).
+- **FAK + GTC hybrid exits** — FAK (Fill-And-Kill) for immediate partial fills at current bid, GTC residual at bid minus tick offset for remaining size. GTC chase cycle refreshes stale resting orders every 2s. Proactive opposite-side hedge placed simultaneously when set completion cost is within threshold.
 - **Performance tracking** — Win rate and P&L tracking with optional auto-disable for underperforming trades
 
 ### Configuration
@@ -223,7 +224,7 @@ Configure via `[arbitrage]` section in `config.toml`. Available sub-configs:
 - **SpikeConfig** — Spike detection thresholds and history
 - **OrderConfig** — Hybrid maker/taker mode, limit order offset, max age
 - **SizingConfig** — Kelly criterion parameters, min/max position size
-- **StopLossConfig** — Lifecycle state machine + dual-trigger + trailing stops + hard crash detection + recovery
+- **StopLossConfig** — 3-state lifecycle + dual-trigger + trailing stops + hard crash detection (bypass sell delay) + proactive hedge
 - **PerformanceConfig** — Tracking, auto-disable thresholds
 
 See `config.example.toml` for the complete reference and `CLAUDE.md` for detailed documentation.

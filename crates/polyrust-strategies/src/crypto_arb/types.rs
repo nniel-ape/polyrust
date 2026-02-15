@@ -891,8 +891,6 @@ pub struct ExitOrderMeta {
     pub order_type: OrderType,
     /// Lifecycle state that spawned this order (for context in logs).
     pub source_state: String,
-    /// Retry count at time of order submission (for escalation after cancel).
-    pub retry_count: u32,
     /// Limit price the order was placed at. Used to compute P&L when a
     /// cancel-failed "matched" response indicates the order was filled on the
     /// CLOB before the cancel arrived.

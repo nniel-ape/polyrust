@@ -945,7 +945,9 @@ impl TailEndStrategy {
                             let age = history
                                 .get(&pos.coin)
                                 .and_then(|h| h.back())
-                                .map(|(.., source_ts)| now.signed_duration_since(*source_ts).num_milliseconds())
+                                .map(|(.., source_ts)| {
+                                    now.signed_duration_since(*source_ts).num_milliseconds()
+                                })
                                 .unwrap_or(sl_config.sl_max_external_age_ms * 3);
                             (Some(single), Some(age), None)
                         } else {
@@ -963,7 +965,9 @@ impl TailEndStrategy {
                         let age = history
                             .get(&pos.coin)
                             .and_then(|h| h.back())
-                            .map(|(.., source_ts)| now.signed_duration_since(*source_ts).num_milliseconds())
+                            .map(|(.., source_ts)| {
+                                now.signed_duration_since(*source_ts).num_milliseconds()
+                            })
                             .unwrap_or(sl_config.sl_max_external_age_ms * 3);
                         (Some(single), Some(age), None)
                     } else {
@@ -1170,7 +1174,9 @@ impl TailEndStrategy {
                             let age = history
                                 .get(&pos.coin)
                                 .and_then(|h| h.back())
-                                .map(|(.., source_ts)| now.signed_duration_since(*source_ts).num_milliseconds())
+                                .map(|(.., source_ts)| {
+                                    now.signed_duration_since(*source_ts).num_milliseconds()
+                                })
                                 .unwrap_or(sl_config.sl_max_external_age_ms * 3);
                             (Some(single), Some(age), None)
                         } else {
@@ -1189,7 +1195,9 @@ impl TailEndStrategy {
                         let age = history
                             .get(&pos.coin)
                             .and_then(|h| h.back())
-                            .map(|(.., source_ts)| now.signed_duration_since(*source_ts).num_milliseconds())
+                            .map(|(.., source_ts)| {
+                                now.signed_duration_since(*source_ts).num_milliseconds()
+                            })
                             .unwrap_or(sl_config.sl_max_external_age_ms * 3);
                         (Some(single), Some(age), None)
                     } else {
@@ -1317,12 +1325,14 @@ impl TailEndStrategy {
         let exit_order_id = format!("exit-{}-{}", pos.token_id, now.timestamp_millis());
 
         // Evaluate hedge profitability: can we buy the opposite token to complete the set?
-        let hedge_action = self.evaluate_hedge(pos, neg_risk, now).await;
-        let (hedge_order_id, hedge_price) = if let Some((ref _action, ref h_oid, h_price)) = hedge_action {
-            (Some(h_oid.clone()), Some(h_price))
-        } else {
-            (None, None)
-        };
+        // Use clip size (not pos.size) so hedge matches the actual exit quantity.
+        let hedge_action = self.evaluate_hedge(pos, clip, neg_risk, now).await;
+        let (hedge_order_id, hedge_price) =
+            if let Some((ref _action, ref h_oid, h_price)) = hedge_action {
+                (Some(h_oid.clone()), Some(h_price))
+            } else {
+                (None, None)
+            };
 
         // Transition lifecycle to ExitExecuting
         if let Err(e) = lifecycle.transition(
@@ -1352,7 +1362,7 @@ impl TailEndStrategy {
                     order_token_id: pos.token_id.clone(),
                     order_type: OrderType::Fak,
                     source_state: format!("{trigger_kind}"),
-                    retry_count: 0,
+
                     exit_price: current_bid,
                     clip_size: clip,
                 },
@@ -1393,6 +1403,7 @@ impl TailEndStrategy {
     pub(crate) async fn evaluate_hedge(
         &self,
         pos: &ArbitragePosition,
+        exit_clip: Decimal,
         neg_risk: bool,
         now: DateTime<Utc>,
     ) -> Option<(Action, OrderId, Decimal)> {
@@ -1427,12 +1438,13 @@ impl TailEndStrategy {
             return None;
         }
 
-        // Build GTC buy order for opposite token
+        // Build GTC buy order for opposite token — sized to match exit clip,
+        // not full position, to avoid excess opposite tokens on partial fills.
         let hedge_order_id = format!("hedge-{}-{}", pos.token_id, now.timestamp_millis());
         let hedge_order = OrderRequest::new(
             opposite_token.clone(),
             opposite_ask,
-            pos.size,
+            exit_clip,
             OrderSide::Buy,
             OrderType::Gtc,
             neg_risk,
@@ -1450,9 +1462,9 @@ impl TailEndStrategy {
                     order_token_id: opposite_token,
                     order_type: OrderType::Gtc,
                     source_state: "Hedge(set completion)".to_string(),
-                    retry_count: 0,
+
                     exit_price: opposite_ask,
-                    clip_size: pos.size,
+                    clip_size: exit_clip,
                 },
             );
         }
@@ -1461,11 +1473,15 @@ impl TailEndStrategy {
             token_id = %pos.token_id,
             opposite_ask = %opposite_ask,
             combined_cost = %combined_cost,
-            size = %pos.size,
+            size = %exit_clip,
             "Hedge order placed: simultaneous opposite-side buy for set completion"
         );
 
-        Some((Action::PlaceOrder(hedge_order), hedge_order_id, opposite_ask))
+        Some((
+            Action::PlaceOrder(hedge_order),
+            hedge_order_id,
+            opposite_ask,
+        ))
     }
 
     /// Handle a fully filled order event (GTC entry fills, stop-loss sells, GTC SL fills).
@@ -1496,15 +1512,14 @@ impl TailEndStrategy {
                     let mut lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
 
                     // Cancel the sell order if it hasn't filled yet
-                    let cancel_sell = if let PositionLifecycleState::ExitExecuting {
-                        ref order_id,
-                        ..
-                    } = lifecycle.state
-                    {
-                        Some(order_id.clone())
-                    } else {
-                        None
-                    };
+                    let cancel_sell =
+                        if let PositionLifecycleState::ExitExecuting { ref order_id, .. } =
+                            lifecycle.state
+                        {
+                            Some(order_id.clone())
+                        } else {
+                            None
+                        };
 
                     if let Err(e) = lifecycle.transition(
                         PositionLifecycleState::Hedged {
@@ -1622,7 +1637,15 @@ impl TailEndStrategy {
                                     &format!("FAK partial fill, GTC residual for {remaining}"),
                                     now,
                                 ) {
-                                    warn!(token_id = %meta.token_id, error = %e, "Lifecycle transition for GTC residual failed");
+                                    warn!(token_id = %meta.token_id, error = %e, "Lifecycle transition for GTC residual failed — falling back to Healthy");
+                                    // Fall back to Healthy to avoid getting stuck in ExitExecuting
+                                    // with a stale FAK order ID. Next OB update will re-evaluate.
+                                    let _ = lifecycle.transition(
+                                        PositionLifecycleState::Healthy,
+                                        "GTC residual transition failed, reset",
+                                        now,
+                                    );
+                                    self.write_lifecycle(&meta.token_id, &lifecycle).await;
                                 } else {
                                     lifecycle.pending_exit_order_id = Some(gtc_oid.clone());
                                     self.write_lifecycle(&meta.token_id, &lifecycle).await;
@@ -1639,7 +1662,7 @@ impl TailEndStrategy {
                                                 order_type: OrderType::Gtc,
                                                 source_state: "ExitActive(GTC residual)"
                                                     .to_string(),
-                                                retry_count: 0,
+                            
                                                 exit_price: gtc_price,
                                                 clip_size: remaining,
                                             },
@@ -1675,8 +1698,7 @@ impl TailEndStrategy {
 
                             // Clean up exit order tracking
                             {
-                                let mut exit_orders =
-                                    self.base.exit_orders_by_id.write().await;
+                                let mut exit_orders = self.base.exit_orders_by_id.write().await;
                                 exit_orders.remove(order_id);
                                 if let Some(ref h_oid) = hedge_to_cancel {
                                     exit_orders.remove(h_oid);
@@ -1988,12 +2010,32 @@ impl Strategy for TailEndStrategy {
                                 }
                             }
 
+                            // Cancel any associated hedge order before cleaning up
+                            let hedge_to_cancel = {
+                                let exit_orders = self.base.exit_orders_by_id.read().await;
+                                exit_orders
+                                    .iter()
+                                    .find(|(_, m)| {
+                                        m.token_id == position_token
+                                            && m.source_state.starts_with("Hedge")
+                                    })
+                                    .map(|(oid, _)| oid.clone())
+                            };
+
                             // Clean up exit order tracking
                             {
                                 let mut exit_orders = self.base.exit_orders_by_id.write().await;
                                 exit_orders.retain(|_, meta| meta.token_id != position_token);
                             }
 
+                            if let Some(h_oid) = hedge_to_cancel {
+                                info!(
+                                    token_id = %position_token,
+                                    hedge_order_id = %h_oid,
+                                    "Cancelling orphaned hedge on exit rejection"
+                                );
+                                return Ok(vec![Action::CancelOrder(h_oid)]);
+                            }
                             return Ok(vec![]);
                         }
 
@@ -2016,8 +2058,7 @@ impl Strategy for TailEndStrategy {
 
                                 // Clean up hedge order tracking
                                 {
-                                    let mut exit_orders =
-                                        self.base.exit_orders_by_id.write().await;
+                                    let mut exit_orders = self.base.exit_orders_by_id.write().await;
                                     exit_orders.retain(|_, m| {
                                         !(m.token_id == position_token
                                             && m.source_state.starts_with("Hedge"))
@@ -2048,10 +2089,31 @@ impl Strategy for TailEndStrategy {
                     if let Some(meta) = exit_meta {
                         let now = self.base.event_time().await;
 
+                        // Before transitioning to Healthy, cancel any associated hedge
+                        // order to avoid orphaning it.
+                        let mut cancel_actions = Vec::new();
+                        let mut lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
+                        if let PositionLifecycleState::ExitExecuting {
+                            hedge_order_id: Some(ref h_oid),
+                            ..
+                        } = lifecycle.state
+                        {
+                            let h_oid_clone = h_oid.clone();
+                            {
+                                let mut exit_orders = self.base.exit_orders_by_id.write().await;
+                                exit_orders.remove(&h_oid_clone);
+                            }
+                            cancel_actions.push(Action::CancelOrder(h_oid_clone.clone()));
+                            info!(
+                                token_id = %meta.token_id,
+                                hedge_order_id = %h_oid_clone,
+                                "Cancelling orphaned hedge on GTC chase cancel"
+                            );
+                        }
+
                         // Transition back to Healthy so the next orderbook update
                         // re-evaluates triggers and places a fresh exit order at
                         // current bid (GTC chase cycle).
-                        let mut lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
                         lifecycle.pending_exit_order_id = None;
                         if let Err(e) = lifecycle.transition(
                             PositionLifecycleState::Healthy,
@@ -2073,6 +2135,9 @@ impl Strategy for TailEndStrategy {
                             token_id = %meta.token_id,
                             "GTC exit cancelled, will re-evaluate on next OB update"
                         );
+                        if !cancel_actions.is_empty() {
+                            return Ok(cancel_actions);
+                        }
                         return Ok(vec![]);
                     }
                 }
@@ -2122,25 +2187,22 @@ impl Strategy for TailEndStrategy {
                                     self.base.ensure_lifecycle(&meta.token_id).await;
 
                                 // Cancel the sell order
-                                let cancel_sell =
-                                    if let PositionLifecycleState::ExitExecuting {
-                                        ref order_id, ..
-                                    } = lifecycle.state
-                                    {
-                                        Some(order_id.clone())
-                                    } else {
-                                        None
-                                    };
+                                let cancel_sell = if let PositionLifecycleState::ExitExecuting {
+                                    ref order_id,
+                                    ..
+                                } = lifecycle.state
+                                {
+                                    Some(order_id.clone())
+                                } else {
+                                    None
+                                };
 
                                 if let Err(e) = lifecycle.transition(
                                     PositionLifecycleState::Hedged {
                                         hedge_cost,
                                         hedged_at: now,
                                     },
-                                    &format!(
-                                        "cancel-matched hedge at {}",
-                                        fill_price
-                                    ),
+                                    &format!("cancel-matched hedge at {}", fill_price),
                                     now,
                                 ) {
                                     warn!(
@@ -2162,8 +2224,7 @@ impl Strategy for TailEndStrategy {
 
                                 // Cancel the sell order
                                 {
-                                    let mut exit_orders =
-                                        self.base.exit_orders_by_id.write().await;
+                                    let mut exit_orders = self.base.exit_orders_by_id.write().await;
                                     exit_orders.remove(order_id);
                                 }
                                 if let Some(sell_oid) = cancel_sell {
@@ -2406,8 +2467,18 @@ mod tests {
             let mut entries = VecDeque::new();
             let now = Utc::now();
             // BTC above reference (51000 > 50000) — favors Up direction
-            entries.push_back((now - Duration::seconds(3), dec!(51000), "test".to_string(), now - Duration::seconds(3)));
-            entries.push_back((now - Duration::seconds(1), dec!(51000), "test".to_string(), now - Duration::seconds(1)));
+            entries.push_back((
+                now - Duration::seconds(3),
+                dec!(51000),
+                "test".to_string(),
+                now - Duration::seconds(3),
+            ));
+            entries.push_back((
+                now - Duration::seconds(1),
+                dec!(51000),
+                "test".to_string(),
+                now - Duration::seconds(1),
+            ));
             history.insert("BTC".to_string(), entries);
         }
 
@@ -3299,7 +3370,7 @@ mod tests {
                     order_token_id: "token_up".to_string(),
                     order_type: OrderType::Gtc,
                     source_state: "ExitActive(GTC residual)".to_string(),
-                    retry_count: 0,
+
                     exit_price: dec!(0.81),
                     clip_size: dec!(10),
                 },
@@ -3490,7 +3561,7 @@ mod tests {
                     order_token_id: "token_up".to_string(),
                     order_type: exit_order_type,
                     source_state: "HardCrash(bid_drop=0.08, reversal=0.006)".to_string(),
-                    retry_count: 0,
+
                     exit_price: dec!(0.85),
                     clip_size: dec!(10),
                 },
@@ -3686,7 +3757,7 @@ mod tests {
                     order_token_id: "token_up".to_string(),
                     order_type: OrderType::Fak,
                     source_state: "test".to_string(),
-                    retry_count: 0,
+
                     exit_price: dec!(0.85),
                     clip_size: dec!(10),
                 },
@@ -3818,7 +3889,7 @@ mod tests {
                     order_token_id: "token_up".to_string(),
                     order_type: OrderType::Fak,
                     source_state: "HardCrash".to_string(),
-                    retry_count: 0,
+
                     exit_price: dec!(0.85),
                     clip_size: dec!(10),
                 },
@@ -3938,7 +4009,12 @@ mod tests {
             use std::collections::VecDeque;
             let mut history = base.price_history.write().await;
             let mut entries = VecDeque::new();
-            entries.push_back((now - Duration::seconds(1), dec!(49500), "test".to_string(), now - Duration::seconds(1)));
+            entries.push_back((
+                now - Duration::seconds(1),
+                dec!(49500),
+                "test".to_string(),
+                now - Duration::seconds(1),
+            ));
             history.insert("BTC".to_string(), entries);
         }
 

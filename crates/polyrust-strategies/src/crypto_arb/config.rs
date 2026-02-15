@@ -319,11 +319,7 @@ pub struct StopLossConfig {
     /// Below this threshold, stop-losses are suppressed to avoid exiting
     /// positions that are about to settle. Default: 45.
     pub min_remaining_secs: i64,
-    /// Enable GTC fallback after FOK liquidity rejection.
-    /// After a FOK stop-loss sell is rejected for liquidity, the next attempt
-    /// uses a GTC order resting below the current bid. Default: true.
-    pub gtc_fallback: bool,
-    /// Number of ticks below current bid for GTC stop-loss orders.
+    /// Number of ticks below current bid for GTC residual exit orders.
     /// Default: 1 (e.g. bid=0.91 → GTC at 0.90).
     pub gtc_fallback_tick_offset: u32,
     /// Maximum age in seconds for a GTC stop-loss order before cancellation.
@@ -381,7 +377,6 @@ impl Default for StopLossConfig {
             trailing_min_distance: Decimal::new(15, 3), // 0.015
             stale_market_cooldown_secs: 120,
             min_remaining_secs: 45, // Suppress near-expiry exit (was 0)
-            gtc_fallback: true,
             gtc_fallback_tick_offset: 1,
             gtc_stop_loss_max_age_secs: 2,
             // Hard crash

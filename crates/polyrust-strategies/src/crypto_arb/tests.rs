@@ -696,10 +696,30 @@ async fn check_sustained_direction_up() {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
         // Use longer times to ensure they are within the sustained window
-        entries.push_back((now - Duration::seconds(10), dec!(50100), "rtds".to_string(), now - Duration::seconds(10)));
-        entries.push_back((now - Duration::seconds(6), dec!(50200), "rtds".to_string(), now - Duration::seconds(6)));
-        entries.push_back((now - Duration::seconds(3), dec!(50300), "rtds".to_string(), now - Duration::seconds(3)));
-        entries.push_back((now - Duration::seconds(1), dec!(50400), "rtds".to_string(), now - Duration::seconds(1)));
+        entries.push_back((
+            now - Duration::seconds(10),
+            dec!(50100),
+            "rtds".to_string(),
+            now - Duration::seconds(10),
+        ));
+        entries.push_back((
+            now - Duration::seconds(6),
+            dec!(50200),
+            "rtds".to_string(),
+            now - Duration::seconds(6),
+        ));
+        entries.push_back((
+            now - Duration::seconds(3),
+            dec!(50300),
+            "rtds".to_string(),
+            now - Duration::seconds(3),
+        ));
+        entries.push_back((
+            now - Duration::seconds(1),
+            dec!(50400),
+            "rtds".to_string(),
+            now - Duration::seconds(1),
+        ));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -727,9 +747,24 @@ async fn check_sustained_direction_not_sustained() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((now - Duration::seconds(4), dec!(49900), "rtds".to_string(), now - Duration::seconds(4))); // Below
-        entries.push_back((now - Duration::seconds(2), dec!(50100), "rtds".to_string(), now - Duration::seconds(2))); // Above
-        entries.push_back((now - Duration::seconds(1), dec!(50200), "rtds".to_string(), now - Duration::seconds(1))); // Above
+        entries.push_back((
+            now - Duration::seconds(4),
+            dec!(49900),
+            "rtds".to_string(),
+            now - Duration::seconds(4),
+        )); // Below
+        entries.push_back((
+            now - Duration::seconds(2),
+            dec!(50100),
+            "rtds".to_string(),
+            now - Duration::seconds(2),
+        )); // Above
+        entries.push_back((
+            now - Duration::seconds(1),
+            dec!(50200),
+            "rtds".to_string(),
+            now - Duration::seconds(1),
+        )); // Above
         history.insert("BTC".to_string(), entries);
     }
 
@@ -752,7 +787,12 @@ async fn sustained_direction_single_tick_below_min_ticks() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((now - Duration::seconds(2), dec!(50100), "rtds".to_string(), now - Duration::seconds(2)));
+        entries.push_back((
+            now - Duration::seconds(2),
+            dec!(50100),
+            "rtds".to_string(),
+            now - Duration::seconds(2),
+        ));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -775,8 +815,18 @@ async fn sustained_direction_two_ticks_favoring() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((now - Duration::seconds(4), dec!(50100), "rtds".to_string(), now - Duration::seconds(4)));
-        entries.push_back((now - Duration::seconds(2), dec!(50200), "rtds".to_string(), now - Duration::seconds(2)));
+        entries.push_back((
+            now - Duration::seconds(4),
+            dec!(50100),
+            "rtds".to_string(),
+            now - Duration::seconds(4),
+        ));
+        entries.push_back((
+            now - Duration::seconds(2),
+            dec!(50200),
+            "rtds".to_string(),
+            now - Duration::seconds(2),
+        ));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -798,8 +848,18 @@ async fn sustained_direction_two_ticks_one_against() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((now - Duration::seconds(4), dec!(49900), "rtds".to_string(), now - Duration::seconds(4)));
-        entries.push_back((now - Duration::seconds(2), dec!(50200), "rtds".to_string(), now - Duration::seconds(2)));
+        entries.push_back((
+            now - Duration::seconds(4),
+            dec!(49900),
+            "rtds".to_string(),
+            now - Duration::seconds(4),
+        ));
+        entries.push_back((
+            now - Duration::seconds(2),
+            dec!(50200),
+            "rtds".to_string(),
+            now - Duration::seconds(2),
+        ));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -822,9 +882,24 @@ async fn max_recent_volatility_no_wick() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((now - Duration::seconds(8), dec!(50100), "rtds".to_string(), now - Duration::seconds(8)));
-        entries.push_back((now - Duration::seconds(5), dec!(50200), "rtds".to_string(), now - Duration::seconds(5)));
-        entries.push_back((now - Duration::seconds(2), dec!(50150), "rtds".to_string(), now - Duration::seconds(2)));
+        entries.push_back((
+            now - Duration::seconds(8),
+            dec!(50100),
+            "rtds".to_string(),
+            now - Duration::seconds(8),
+        ));
+        entries.push_back((
+            now - Duration::seconds(5),
+            dec!(50200),
+            "rtds".to_string(),
+            now - Duration::seconds(5),
+        ));
+        entries.push_back((
+            now - Duration::seconds(2),
+            dec!(50150),
+            "rtds".to_string(),
+            now - Duration::seconds(2),
+        ));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -848,9 +923,24 @@ async fn max_recent_volatility_with_wick() {
     {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
-        entries.push_back((now - Duration::seconds(8), dec!(50100), "rtds".to_string(), now - Duration::seconds(8)));
-        entries.push_back((now - Duration::seconds(5), dec!(51000), "rtds".to_string(), now - Duration::seconds(5))); // 2% wick
-        entries.push_back((now - Duration::seconds(2), dec!(50150), "rtds".to_string(), now - Duration::seconds(2)));
+        entries.push_back((
+            now - Duration::seconds(8),
+            dec!(50100),
+            "rtds".to_string(),
+            now - Duration::seconds(8),
+        ));
+        entries.push_back((
+            now - Duration::seconds(5),
+            dec!(51000),
+            "rtds".to_string(),
+            now - Duration::seconds(5),
+        )); // 2% wick
+        entries.push_back((
+            now - Duration::seconds(2),
+            dec!(50150),
+            "rtds".to_string(),
+            now - Duration::seconds(2),
+        ));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -1566,7 +1656,6 @@ fn stop_loss_config_new_field_defaults() {
     assert_eq!(config.trailing_min_distance, dec!(0.015));
     assert_eq!(config.stale_market_cooldown_secs, 120);
     assert_eq!(config.min_remaining_secs, 45);
-    assert!(config.gtc_fallback);
     assert_eq!(config.gtc_fallback_tick_offset, 1);
     assert_eq!(config.gtc_stop_loss_max_age_secs, 2);
 }
@@ -1585,7 +1674,6 @@ fn stop_loss_config_deserialize_missing_new_fields() {
     assert_eq!(config.trailing_min_distance, dec!(0.015));
     assert_eq!(config.stale_market_cooldown_secs, 120);
     assert_eq!(config.min_remaining_secs, 45);
-    assert!(config.gtc_fallback);
 }
 
 // ---------------------------------------------------------------------------
@@ -2192,8 +2280,18 @@ async fn strike_proximity_allows_beyond_threshold() {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
         let now = Utc::now();
-        entries.push_back((now - Duration::seconds(3), dec!(1996), "test".to_string(), now - Duration::seconds(3)));
-        entries.push_back((now - Duration::seconds(1), dec!(1996), "test".to_string(), now - Duration::seconds(1)));
+        entries.push_back((
+            now - Duration::seconds(3),
+            dec!(1996),
+            "test".to_string(),
+            now - Duration::seconds(3),
+        ));
+        entries.push_back((
+            now - Duration::seconds(1),
+            dec!(1996),
+            "test".to_string(),
+            now - Duration::seconds(1),
+        ));
         history.insert("ETH".to_string(), entries);
     }
 
@@ -2668,7 +2766,6 @@ fn stop_loss_validate_trailing_min_greater_than_distance_errors() {
     );
 }
 
-
 #[test]
 fn sizing_validate_depth_cap_factor_bounds() {
     // Zero is invalid
@@ -3065,14 +3162,12 @@ fn exit_order_meta_fields() {
         order_token_id: "token-123".to_string(),
         order_type: OrderType::Fok,
         source_state: "ExitExecuting".to_string(),
-        retry_count: 0,
         exit_price: dec!(0.85),
         clip_size: dec!(10),
     };
     assert_eq!(meta.token_id, "token-123");
     assert_eq!(meta.order_type, OrderType::Fok);
     assert_eq!(meta.source_state, "ExitExecuting");
-    assert_eq!(meta.retry_count, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -3320,7 +3415,7 @@ async fn remove_lifecycle_also_cleans_exit_orders() {
                 order_token_id: "token_up".to_string(),
                 order_type: OrderType::Fok,
                 source_state: "ExitExecuting".to_string(),
-                retry_count: 0,
+
                 exit_price: dec!(0.85),
                 clip_size: dec!(10),
             },
@@ -3333,7 +3428,7 @@ async fn remove_lifecycle_also_cleans_exit_orders() {
                 order_token_id: "other_token".to_string(),
                 order_type: OrderType::Gtc,
                 source_state: "ExitExecuting".to_string(),
-                retry_count: 0,
+
                 exit_price: dec!(0.80),
                 clip_size: dec!(5),
             },
@@ -4161,14 +4256,10 @@ async fn recovery_opposite_alpha_momentum_confirmed() {
     {
         let history = base.price_history.read().await;
         let entries = history.get("BTC").unwrap();
-        let all_reversed = entries
-            .iter()
-            .rev()
-            .take(2)
-            .all(|(_, price, _, _)| {
-                // For Up position, reversal = price dropped below reference
-                *price < pos.reference_price
-            });
+        let all_reversed = entries.iter().rev().take(2).all(|(_, price, _, _)| {
+            // For Up position, reversal = price dropped below reference
+            *price < pos.reference_price
+        });
         assert!(all_reversed, "All recent ticks should show reversal");
     }
 
@@ -4298,7 +4389,7 @@ async fn hedge_placed_when_set_completion_cost_within_budget() {
 
     let strategy = TailEndStrategy::new(base.clone());
     let now = Utc::now();
-    let result = strategy.evaluate_hedge(&pos, false, now).await;
+    let result = strategy.evaluate_hedge(&pos, pos.size, false, now).await;
 
     assert!(
         result.is_some(),
@@ -4351,7 +4442,7 @@ async fn hedge_skipped_when_cost_exceeds_threshold() {
 
     let strategy = TailEndStrategy::new(base.clone());
     let now = Utc::now();
-    let result = strategy.evaluate_hedge(&pos, false, now).await;
+    let result = strategy.evaluate_hedge(&pos, pos.size, false, now).await;
 
     assert!(
         result.is_none(),
@@ -4438,7 +4529,11 @@ fn sell_fills_before_hedge_position_resolved() {
     // The ExitExecuting -> Healthy transition is used for partial fills that
     // cancel the hedge, while full fills just remove the lifecycle entirely.
     // Test that ExitExecuting can transition to Healthy (for cancel-and-retry path):
-    let result = lc.transition(PositionLifecycleState::Healthy, "sell cancelled for retry", t);
+    let result = lc.transition(
+        PositionLifecycleState::Healthy,
+        "sell cancelled for retry",
+        t,
+    );
     assert!(result.is_ok());
 }
 
@@ -4459,7 +4554,12 @@ async fn sl_single_fresh_uses_source_timestamp_not_receive_time() {
         let mut entries = std::collections::VecDeque::new();
         let receive_time = now - chrono::Duration::milliseconds(200);
         let source_ts = now - chrono::Duration::seconds(10);
-        entries.push_back((receive_time, dec!(88500), "binance-spot".to_string(), source_ts));
+        entries.push_back((
+            receive_time,
+            dec!(88500),
+            "binance-spot".to_string(),
+            source_ts,
+        ));
         history.insert("BTC".to_string(), entries);
     }
 
@@ -4523,7 +4623,11 @@ async fn composite_source_priority_fallback_order() {
         .await;
     assert!(result.is_some(), "Fallback should return a result");
     let r = result.unwrap();
-    assert_eq!(r.price, dec!(50100), "Should pick coinbase (higher priority than chainlink)");
+    assert_eq!(
+        r.price,
+        dec!(50100),
+        "Should pick coinbase (higher priority than chainlink)"
+    );
     assert_eq!(r.sources_used, 1, "Fallback uses single source");
 }
 
@@ -4611,5 +4715,9 @@ async fn composite_source_priority_skips_stale_sources() {
         .await;
     assert!(result.is_some(), "Fallback should find coinbase");
     let r = result.unwrap();
-    assert_eq!(r.price, dec!(50100), "Should pick coinbase (binance-futures is stale)");
+    assert_eq!(
+        r.price,
+        dec!(50100),
+        "Should pick coinbase (binance-futures is stale)"
+    );
 }

@@ -226,7 +226,7 @@ Strategy is disabled by default; set `enabled = true` in `[arbitrage]` to activa
 - With `exit_window=20`, SL is net positive at `eff_threshold >= 0.08` (vs only 0.50 at ew=60)
 - `hard_drop=0.50` confirmed best across all windows (both PnL and Sharpe)
 - **Current config**: `hard_drop=0.50, exit_drop=0.12, sell_delay=4, window=20` (Pareto-optimal: $366.80 PnL, Sharpe 0.2249, Net SL +$20.63)
-- Reentry params (`recovery_max_set_cost`, `reentry_cooldown_secs`) confirmed dead in backtest — no FOK rejections
+- `reentry_cooldown_secs` confirmed dead in backtest (removed in fast-exit v2). `recovery_max_set_cost` had no backtest signal but is now used for proactive hedge profitability gating.
 - Full research report: `docs/research/stoploss-aggressiveness.md`
 
 ## Dutch Book Arbitrage Strategy

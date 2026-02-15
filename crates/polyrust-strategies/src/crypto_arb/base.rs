@@ -23,7 +23,8 @@ use polyrust_market::ChainlinkHistoricalClient;
 use crate::crypto_arb::config::{ArbitrageConfig, SizingConfig};
 use crate::crypto_arb::types::{
     ArbitragePosition, BoundarySnapshot, ExitOrderMeta, MarketWithReference, ModeStats,
-    OpenLimitOrder, OrderTelemetry, PendingOrder, PositionLifecycle, ReferenceQuality, SpikeEvent,
+    OpenLimitOrder, OrderTelemetry, PendingOrder, PositionLifecycle, PositionLifecycleState,
+    ReferenceQuality, SpikeEvent,
 };
 
 /// Result of a composite fair price calculation from multiple data sources.
@@ -486,7 +487,9 @@ impl CryptoArbBase {
     /// Get the latest price for a coin from price history.
     pub async fn get_latest_price(&self, coin: &str) -> Option<Decimal> {
         let history = self.price_history.read().await;
-        history.get(coin).and_then(|h| h.back().map(|(_, p, ..)| *p))
+        history
+            .get(coin)
+            .and_then(|h| h.back().map(|(_, p, ..)| *p))
     }
 
     /// Get the settlement price for a coin at market end time.
@@ -716,12 +719,8 @@ impl CryptoArbBase {
             // Source-priority fallback: when composite quorum fails, use the
             // highest-priority single fresh source instead of returning None.
             // Priority: binance-futures > binance-spot > coinbase > chainlink
-            static PRIORITY: &[&str] = &[
-                "binance-futures",
-                "binance-spot",
-                "coinbase",
-                "chainlink",
-            ];
+            static PRIORITY: &[&str] =
+                &["binance-futures", "binance-spot", "coinbase", "chainlink"];
             for &source_name in PRIORITY {
                 if let Some(sp) = sources.get(source_name) {
                     let age_secs = (now - sp.timestamp).num_seconds();
@@ -1343,28 +1342,49 @@ impl CryptoArbBase {
                 .get_settlement_price(&market.coin, market.market.end_date)
                 .await;
             for pos in &positions {
-                let won = match (&pos.side, settlement_price) {
-                    (OutcomeSide::Up | OutcomeSide::Yes, Some(cp)) => cp > pos.reference_price,
-                    (OutcomeSide::Down | OutcomeSide::No, Some(cp)) => cp <= pos.reference_price,
-                    _ => false,
+                // Check if position is Hedged (complete set: both YES+NO tokens held).
+                // Hedged positions always redeem for $1.00/share regardless of outcome.
+                let is_hedged = {
+                    let lifecycles = self.position_lifecycle.read().await;
+                    lifecycles
+                        .get(&pos.token_id)
+                        .is_some_and(|lc| matches!(lc.state, PositionLifecycleState::Hedged { .. }))
                 };
-                // Use entry_fee_per_share (0 for GTC entry, actual taker fee for FOK entry)
-                // Include recovery_cost (negative) so win/loss classification reflects
-                // the true net outcome including any opposite-side recovery buys.
-                let pnl = if won {
+
+                let pnl = if is_hedged {
+                    // Hedged: set redeems for $1.00/share. P&L = redemption - entry - fees + recovery_cost.
+                    // recovery_cost is negative (hedge buy cost already recorded).
                     (Decimal::ONE - pos.entry_price) * pos.size
                         - (pos.entry_fee_per_share * pos.size)
                         + pos.recovery_cost
                 } else {
-                    -(pos.entry_price * pos.size) - (pos.entry_fee_per_share * pos.size)
-                        + pos.recovery_cost
+                    let won = match (&pos.side, settlement_price) {
+                        (OutcomeSide::Up | OutcomeSide::Yes, Some(cp)) => {
+                            cp > pos.reference_price
+                        }
+                        (OutcomeSide::Down | OutcomeSide::No, Some(cp)) => {
+                            cp <= pos.reference_price
+                        }
+                        _ => false,
+                    };
+                    // Use entry_fee_per_share (0 for GTC entry, actual taker fee for FOK entry)
+                    // Include recovery_cost (negative) so win/loss classification reflects
+                    // the true net outcome including any opposite-side recovery buys.
+                    if won {
+                        (Decimal::ONE - pos.entry_price) * pos.size
+                            - (pos.entry_fee_per_share * pos.size)
+                            + pos.recovery_cost
+                    } else {
+                        -(pos.entry_price * pos.size) - (pos.entry_fee_per_share * pos.size)
+                            + pos.recovery_cost
+                    }
                 };
                 self.record_trade_pnl(pnl).await;
                 // Clean up lifecycle state for expired positions
                 self.remove_lifecycle(&pos.token_id).await;
                 info!(
                     market = %market_id,
-                    won,
+                    hedged = is_hedged,
                     pnl = %pnl,
                     settlement_price = ?settlement_price,
                     reference_price = %pos.reference_price,
