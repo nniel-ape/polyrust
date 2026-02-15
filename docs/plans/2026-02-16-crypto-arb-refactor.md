@@ -115,18 +115,18 @@ crypto_arb/
 - [x] Run `cargo build --workspace` — expect failures from rename, fix incrementally
 
 ### Task 4: Extract service modules from `base.rs` methods
-- [ ] Create `crypto_arb/services/` directory with `mod.rs`
-- [ ] Create `services/fee_math.rs` — move free functions: `taker_fee()`, `net_profit_margin()`, `kelly_position_size()`, `parse_slug_timestamp()` (if present)
-- [ ] Create `services/pricing.rs` — move `impl CryptoArbRuntime` methods: `record_price`, `get_latest_price`, `get_settlement_price`, `check_sustained_direction`, `max_recent_volatility`, `are_feeds_fresh`, `record_signal_veto`, `composite_fair_price`, `update_sl_composite_cache`, `get_sl_composite`, `get_sl_single_fresh`, `detect_spike`, `record_spike`, `find_best_reference`, `prune_boundary_snapshots`, `try_upgrade_quality`
-- [ ] Create `services/market.rs` — move: `on_market_discovered`, `on_market_expired`, `promote_pending_markets`, `activate_market`, `rebuild_nearest_expiry`, `is_tracked_coin`, `extract_coin`
-- [ ] Create `services/position.rs` — move: `can_open_position`, `validate_min_order_size`, `has_market_exposure`, `record_position`, `ensure_lifecycle`, `remove_lifecycle`, `get_opposite_token`, `remove_position_by_token`, `reduce_or_remove_position_by_token`, `update_peak_bid`, `is_auto_disabled`, `record_trade_pnl`, `adjust_trade_pnl`, `add_recovery_cost`
-- [ ] Create `services/order.rs` — move: `try_reserve_market`, `release_reservation`, `consume_reservation`, `handle_cancel_failed`, `reconcile_limit_orders`, `check_stale_limit_orders`, `record_rejection_cooldown`, `is_rejection_cooled_down`, `record_stale_market_cooldown`, `is_stale_market_cooled_down`, `record_recovery_exit_cooldown`, `is_recovery_exit_cooled_down`
-- [ ] Create `services/observability.rs` — move: `record_tailend_skip`, `try_claim_dashboard_emit`, `maybe_log_status_summary`
-- [ ] Update `services/mod.rs` to re-export free functions (`taker_fee`, `net_profit_margin`, `kelly_position_size`)
-- [ ] Delete `base.rs` after all methods migrated
-- [ ] Update `crypto_arb/mod.rs`: remove `mod base`, add `mod services`, update re-exports
-- [ ] Fix all import paths in service files (`use super::runtime::CryptoArbRuntime`, domain imports, etc.)
-- [ ] Run `cargo build --workspace && cargo clippy --workspace -- -D warnings`
+- [x] Create `crypto_arb/services/` directory with `mod.rs`
+- [x] Create `services/fee_math.rs` — move free functions: `taker_fee()`, `net_profit_margin()`, `kelly_position_size()`, `parse_slug_timestamp()` (if present)
+- [x] Create `services/pricing.rs` — move `impl CryptoArbRuntime` methods: `record_price`, `get_latest_price`, `get_settlement_price`, `check_sustained_direction`, `max_recent_volatility`, `are_feeds_fresh`, `record_signal_veto`, `composite_fair_price`, `update_sl_composite_cache`, `get_sl_composite`, `get_sl_single_fresh`, `detect_spike`, `record_spike`, `find_best_reference`, `prune_boundary_snapshots`, `try_upgrade_quality`
+- [x] Create `services/market.rs` — move: `on_market_discovered`, `on_market_expired`, `promote_pending_markets`, `activate_market`, `rebuild_nearest_expiry`, `is_tracked_coin`, `extract_coin`
+- [x] Create `services/position.rs` — move: `can_open_position`, `validate_min_order_size`, `has_market_exposure`, `record_position`, `ensure_lifecycle`, `remove_lifecycle`, `get_opposite_token`, `remove_position_by_token`, `reduce_or_remove_position_by_token`, `update_peak_bid`, `is_auto_disabled`, `record_trade_pnl`, `adjust_trade_pnl`, `add_recovery_cost`
+- [x] Create `services/order.rs` — move: `try_reserve_market`, `release_reservation`, `consume_reservation`, `handle_cancel_failed`, `reconcile_limit_orders`, `check_stale_limit_orders`, `record_rejection_cooldown`, `is_rejection_cooled_down`, `record_stale_market_cooldown`, `is_stale_market_cooled_down`, `record_recovery_exit_cooldown`, `is_recovery_exit_cooled_down`
+- [x] Create `services/observability.rs` — move: `record_tailend_skip`, `try_claim_dashboard_emit`, `maybe_log_status_summary`
+- [x] Update `services/mod.rs` to re-export free functions (`taker_fee`, `net_profit_margin`, `kelly_position_size`)
+- [x] Delete `base.rs` after all methods migrated
+- [x] Update `crypto_arb/mod.rs`: remove `mod base`, add `mod services`, update re-exports
+- [x] Fix all import paths in service files (`use super::runtime::CryptoArbRuntime`, domain imports, etc.)
+- [x] Run `cargo build --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 5: Split `tailend.rs` into `strategy/tailend/`
 - [ ] Create `crypto_arb/strategy/` and `strategy/tailend/` directories

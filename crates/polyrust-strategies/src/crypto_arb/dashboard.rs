@@ -13,7 +13,7 @@ use rust_decimal::Decimal;
 
 use polyrust_core::prelude::*;
 
-use crate::crypto_arb::base::{escape_html, fmt_market_price, fmt_usd, net_profit_margin, taker_fee};
+use crate::crypto_arb::services::{escape_html, fmt_market_price, fmt_usd, net_profit_margin, taker_fee};
 use crate::crypto_arb::runtime::CryptoArbRuntime;
 use crate::crypto_arb::domain::ReferenceQuality;
 

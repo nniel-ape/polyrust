@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 
 use polyrust_core::prelude::*;
 
-use crate::crypto_arb::base::taker_fee;
+use crate::crypto_arb::services::taker_fee;
 use crate::crypto_arb::runtime::CryptoArbRuntime;
 use crate::crypto_arb::dashboard::try_emit_dashboard_updates;
 use crate::crypto_arb::domain::{
@@ -2829,7 +2829,7 @@ mod tests {
     /// Entry fee must be 0, only exit taker fee is deducted.
     #[test]
     fn pnl_gtc_entry_fok_exit_entry_fee_is_zero() {
-        use crate::crypto_arb::base::taker_fee;
+        use crate::crypto_arb::services::taker_fee;
 
         let entry_price = dec!(0.92);
         let exit_price = dec!(0.85);
@@ -2879,7 +2879,7 @@ mod tests {
     /// This verifies entry_fee_per_share is correctly used instead of estimated_fee.
     #[test]
     fn pnl_fok_entry_fok_exit_both_fees_deducted() {
-        use crate::crypto_arb::base::taker_fee;
+        use crate::crypto_arb::services::taker_fee;
 
         let entry_price = dec!(0.94);
         let exit_price = dec!(0.90);
@@ -2939,7 +2939,7 @@ mod tests {
     /// Market expiry with FOK entry: taker fee deducted from outcome.
     #[test]
     fn pnl_market_expiry_fok_entry_win() {
-        use crate::crypto_arb::base::taker_fee;
+        use crate::crypto_arb::services::taker_fee;
 
         let entry_price = dec!(0.92);
         let size = dec!(100);
@@ -2963,7 +2963,7 @@ mod tests {
     /// PnL must use actual fill price (0.93), not trigger bid (0.92).
     #[test]
     fn pnl_fok_exit_uses_actual_fill_price_not_trigger_bid() {
-        use crate::crypto_arb::base::taker_fee;
+        use crate::crypto_arb::services::taker_fee;
 
         let entry_price = dec!(0.95);
         let trigger_bid = dec!(0.92); // price when stop-loss triggered
@@ -2996,7 +2996,7 @@ mod tests {
     /// When trigger bid equals actual fill price, PnL is the same either way (sanity).
     #[test]
     fn pnl_fok_exit_same_trigger_and_fill_price() {
-        use crate::crypto_arb::base::taker_fee;
+        use crate::crypto_arb::services::taker_fee;
 
         let entry_price = dec!(0.95);
         let fill_price = dec!(0.90); // trigger and fill are identical

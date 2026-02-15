@@ -3,11 +3,11 @@
 //! High-confidence trades near expiration (< 120s, market >= 90%).
 //! State is managed through `CryptoArbRuntime`.
 
-mod base;
 mod config;
 mod dashboard;
 pub mod domain;
 mod runtime;
+pub(crate) mod services;
 mod tailend;
 
 pub use runtime::CryptoArbRuntime;
@@ -25,7 +25,7 @@ pub use domain::{
 };
 
 // Re-export fee helpers and utilities for use in strategies
-pub use base::{escape_html, kelly_position_size, net_profit_margin, taker_fee};
+pub use services::{escape_html, kelly_position_size, net_profit_margin, taker_fee};
 
 #[cfg(test)]
 mod tests;

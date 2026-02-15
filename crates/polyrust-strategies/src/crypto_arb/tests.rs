@@ -14,7 +14,7 @@ use rust_decimal_macros::dec;
 
 use polyrust_core::prelude::*;
 
-use super::base::{kelly_position_size, net_profit_margin, parse_slug_timestamp, taker_fee};
+use super::services::{kelly_position_size, net_profit_margin, parse_slug_timestamp, taker_fee};
 use super::runtime::CryptoArbRuntime;
 use super::config::{ArbitrageConfig, SizingConfig};
 use super::tailend::TailEndStrategy;
