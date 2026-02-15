@@ -98,8 +98,8 @@ Real-time updates use SSE: strategies emit `"dashboard-update"` signals, the SSE
 - **USDC**: 6 decimal places; store as `Decimal`, persist as TEXT in SQLite
 - **Tick sizes**: Typically 0.01 (2 decimal price, 2 decimal size). USDC amount precision is order-type-dependent:
   - GTC/GTD: `price_decimals + size_decimals` (e.g., 4 for tick=0.01), uses **tick-rounded** price
-  - FOK: `price_decimals` only (e.g., 2 for tick=0.01), uses **raw price** (round UP for BUY, DOWN for SELL)
-  - FOK must use raw price because tick-rounding drops effective bid below ask for sub-tick prices (e.g. 0.997→0.99)
+  - FOK/FAK: `price_decimals` only (e.g., 2 for tick=0.01), uses **raw price** (round UP for BUY, DOWN for SELL)
+  - FOK/FAK must use raw price because tick-rounding drops effective bid below ask for sub-tick prices (e.g. 0.997→0.99)
 - **neg_risk**: Boolean on orders — false for 15-minute markets (most common)
 
 ## Configuration
@@ -175,7 +175,7 @@ See `examples/simple_strategy.rs` for a complete runnable example.
 
 ## Key Dependencies
 
-- **`polymarket-client-sdk`** (rs-clob-client) v0.4.1 — all Polymarket interactions. Features: `clob`, `ws`, `rtds`, `data`, `gamma`, `tracing`, `heartbeats`, `ctf`
+- **`polymarket-client-sdk`** (rs-clob-client) v0.4.2 — all Polymarket interactions. Features: `clob`, `ws`, `rtds`, `data`, `gamma`, `tracing`, `heartbeats`, `ctf`
 - **`libsql`/turso** — embedded SQLite database (no external process)
 - **`axum`** 0.8 + **`askama`** 0.13 — dashboard web framework and templates
 - **`tokio`** — async runtime; broadcast channels for EventBus
@@ -368,7 +368,7 @@ All outbound traffic from the polyrust container is routed through a proxy VPS (
 - When adding a new workspace crate, update `Dockerfile` in 3 places: manifest `COPY`, dummy `RUN` source, and `find crates` touch
 - Never push Docker images with `config.toml` baked in — it's `.dockerignore`d and mounted at runtime
 - `cargo build --release --locked` in Docker requires `Cargo.lock` committed and up-to-date
-- USDC rounding in `rounding.rs` must branch on `OrderType` — FOK uses **raw price** (`size * price`), GTC uses **tick-rounded price** (`size * rounded_price`). FOK also has stricter decimal precision (`price_decimals` only vs `price_decimals + size_decimals`). See rs-clob-client issue #114
+- USDC rounding in `rounding.rs` must branch on `OrderType` — FOK/FAK use **raw price** (`size * price`), GTC uses **tick-rounded price** (`size * rounded_price`). FOK/FAK also have stricter decimal precision (`price_decimals` only vs `price_decimals + size_decimals`). See rs-clob-client issue #114
 
 ## Design Documents
 
