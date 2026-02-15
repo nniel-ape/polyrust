@@ -20,6 +20,9 @@ backtest_output.txt
 sweep_results/
 sweep_results*
 
+# Claude Code (local-only)
+.claude/
+
 # Ralphex (local-only)
 .ralphex/
 
