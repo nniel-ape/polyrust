@@ -603,7 +603,7 @@ pub async fn execute_action(
                             "Failed to sync balance after batch order placement - shared context may have stale data"
                         );
                     }
-                    for result in results {
+                    for (idx, result) in results.iter().enumerate() {
                         if result.success {
                             event_bus
                                 .publish(Event::OrderUpdate(OrderEvent::Placed(result.clone())));
@@ -616,8 +616,17 @@ pub async fn execute_action(
                                 if let Some(market_id) =
                                     find_market_id_for_token(context, &result.token_id).await
                                 {
-                                    // Batch orders: compute fee for FOK, capture orderbook for buys
-                                    let fee = None; // Batch orders are typically GTC
+                                    // Compute fee based on the original request's order type
+                                    let req_order_type = requests.get(idx).map(|r| r.order_type);
+                                    let fee = if req_order_type == Some(crate::types::OrderType::Fok) {
+                                        Some(crate::fees::taker_fee(
+                                            result.price,
+                                            result.size,
+                                            crate::fees::default_taker_fee_rate(),
+                                        ))
+                                    } else {
+                                        None
+                                    };
                                     let orderbook_snapshot = if result.side
                                         == crate::types::OrderSide::Buy
                                     {
@@ -637,7 +646,7 @@ pub async fn execute_action(
                                         strategy_name: strategy_name.to_string(),
                                         realized_pnl: None,
                                         fee,
-                                        order_type: None, // Batch doesn't track per-order type
+                                        order_type: req_order_type.map(|t| format!("{t:?}")),
                                         orderbook_snapshot,
                                     }));
                                 } else {
@@ -656,9 +665,9 @@ pub async fn execute_action(
                                 "Batch order rejected by backend"
                             );
                             event_bus.publish(Event::OrderUpdate(OrderEvent::Rejected {
-                                order_id: result.order_id,
-                                reason: result.message,
-                                token_id: Some(result.token_id),
+                                order_id: result.order_id.clone(),
+                                reason: result.message.clone(),
+                                token_id: Some(result.token_id.clone()),
                             }));
                         }
                     }
@@ -768,6 +777,12 @@ pub async fn execute_action(
             }));
         }
         Action::SubscribeMarket(info) => {
+            // Register market in shared context so find_market_id_for_token works
+            // for immediate FOK fills (e.g. Dutch Book batch orders).
+            {
+                let mut md = context.market_data.write().await;
+                md.markets.insert(info.id.clone(), info.clone());
+            }
             if let Some(tx) = feed_command_tx {
                 let market_id = info.id.clone();
                 if let Err(e) = tx.send(FeedCommand::Subscribe(info.clone())) {

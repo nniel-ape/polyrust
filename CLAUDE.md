@@ -52,7 +52,7 @@ polyrust-core (engine, event bus, traits, shared state)
   ├── polyrust-market (CLOB orderbook + RTDS price feeds)
   ├── polyrust-execution (live + paper backends)
   ├── polyrust-store (Turso persistence)
-  ├── polyrust-strategies (reference: crypto arbitrage)
+  ├── polyrust-strategies (crypto arbitrage + Dutch Book arbitrage)
   ├── polyrust-dashboard (Axum + HTMX monitoring UI)
   └── polyrust-backtest (historical data + backtesting engine)
 
@@ -115,7 +115,7 @@ Other runtime overrides via `POLY_*` env vars: `POLY_DASHBOARD_HOST`, `POLY_DASH
 Paper mode: `[paper] enabled = true` or `POLY_PAPER_TRADING=true`
 Docker deployment: Set `POLY_DASHBOARD_HOST=0.0.0.0` in `docker-compose.yml` to allow access from host machine.
 
-Strategy configuration: Add `[arbitrage]` section (with `enabled = true` and nested `[arbitrage.tailend]`) to `config.toml`. The strategy is disabled by default. See `config.example.toml` for the complete reference.
+Strategy configuration: Add `[arbitrage]` section (with `enabled = true` and nested `[arbitrage.tailend]`) or `[dutch_book]` section (with `enabled = true`) to `config.toml`. Both strategies are disabled by default. See `config.example.toml` for the complete reference.
 
 Backtest configuration: Add `[backtest]` section to `config.toml` or use env overrides (`POLY_BACKTEST_START`, `POLY_BACKTEST_END`, etc.). Backtesting evaluates strategies on historical data without live/paper trading. See `config.example.toml` for the complete reference.
 
@@ -226,6 +226,31 @@ Strategy is disabled by default; set `enabled = true` in `[arbitrage]` to activa
 - **Current config**: `hard_drop=0.50, exit_drop=0.12, sell_delay=4, window=20` (Pareto-optimal: $366.80 PnL, Sharpe 0.2249, Net SL +$20.63)
 - Reentry params (`recovery_max_set_cost`, `reentry_cooldown_secs`) confirmed dead in backtest — no FOK rejections
 - Full research report: `docs/research/stoploss-aggressiveness.md`
+
+## Dutch Book Arbitrage Strategy
+
+Market-neutral arbitrage: buys both YES and NO tokens when their combined ask price is below $1.00, locking in guaranteed profit upon market resolution. Works across all active Polymarket markets, not limited to 15-min crypto markets.
+
+### Strategy Configuration
+
+Configured via `[dutch_book]` in `config.toml`. Directory structure at `crates/polyrust-strategies/src/dutch_book/` with shared state through `Arc<RwLock<DutchBookState>>`:
+
+- `DutchBookStrategy` — main strategy: market scanning, arbitrage detection, paired order execution
+- `DutchBookDashboard` — dashboard view at `/strategy/dutch-book`
+- `GammaScanner` — background market discovery via Gamma API
+- `ArbitrageAnalyzer` — orderbook analysis for arbitrage opportunities
+
+Strategy is disabled by default; set `enabled = true` in `[dutch_book]` to activate.
+
+`DutchBookConfig` settings: `max_combined_cost` (fee buffer), `min_profit_threshold`, `max_position_size`, `min_liquidity_usd`, `max_days_until_resolution`, `scan_interval_secs`, `max_concurrent_positions`, `unwind_discount`. See `config.rs` for field details.
+
+### Key Features
+
+- **Paired FOK execution**: Buys both YES and NO simultaneously via `PlaceBatchOrder` with FOK orders
+- **Emergency unwind**: On partial fills (one side fills, other cancels), sells the filled side at a discount to avoid directional risk
+- **Background market discovery**: `GammaScanner` periodically queries Gamma API for active markets matching liquidity and resolution filters
+- **Position tracking**: Tracks paired positions from execution through market resolution and redemption
+- **Backtest compatible**: Works unchanged with `cargo run -- --backtest` using `strategy_name = "dutch-book"`
 
 ## Polymarket API Endpoints
 
@@ -357,3 +382,4 @@ All outbound traffic from the polyrust container is routed through a proxy VPS (
 - `docs/research/arb-strategy-improvements.md` — arbitrage strategy improvement research
 - `docs/research/polymarket-modern-strategies.md` — modern Polymarket trading strategies research
 - `docs/research/stoploss-aggressiveness.md` — stop-loss aggressiveness sweep analysis and Pareto-optimal configs
+- `docs/plans/dutch-book-strategy.md` — Dutch Book arbitrage strategy design and implementation plan

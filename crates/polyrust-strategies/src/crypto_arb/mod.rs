@@ -23,8 +23,8 @@ pub use types::{
     compute_exit_clip,
 };
 
-// Re-export fee helpers for use in strategies
-pub use base::{kelly_position_size, net_profit_margin, taker_fee};
+// Re-export fee helpers and utilities for use in strategies
+pub use base::{escape_html, kelly_position_size, net_profit_margin, taker_fee};
 
 #[cfg(test)]
 mod tests;

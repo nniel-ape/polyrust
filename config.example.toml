@@ -217,6 +217,26 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # price_decimals = 2      # Standard tick size for 15-min markets (0.01)
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# DUTCH BOOK ARBITRAGE STRATEGY
+# ═══════════════════════════════════════════════════════════════════════════════
+# Market-neutral arbitrage: buys both YES + NO when combined ask < $1.00.
+# Profit is locked in at the time of trade and realized when the market resolves.
+# Works across ALL active markets, not limited to 15-min crypto markets.
+#
+# IMPORTANT: Strategy is DISABLED by default. Set `enabled = true` to activate.
+
+# [dutch_book]
+# enabled = true                          # Enable the strategy
+# max_combined_cost = 0.99                # Max combined YES+NO ask to trade (< 1.0)
+# min_profit_threshold = 0.005            # Min profit % threshold (0.5%)
+# max_position_size = 100                 # Max shares per side of paired order
+# min_liquidity_usd = 10000              # Min market liquidity to consider
+# max_days_until_resolution = 7           # Max days until market resolves
+# scan_interval_secs = 600                # Gamma API scan interval (10 min)
+# max_concurrent_positions = 10           # Max paired positions at once
+# unwind_discount = 0.03                  # Emergency unwind sell at 97% (3% discount)
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # BACKTESTING
 # ═══════════════════════════════════════════════════════════════════════════════
 # Historical data backtesting framework for strategy evaluation

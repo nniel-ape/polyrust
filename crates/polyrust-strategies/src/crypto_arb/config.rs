@@ -273,6 +273,12 @@ impl SizingConfig {
                 self.kelly_multiplier
             ));
         }
+        if self.depth_cap_factor <= Decimal::ZERO || self.depth_cap_factor > Decimal::ONE {
+            return Err(format!(
+                "depth_cap_factor must be in (0, 1], got {}",
+                self.depth_cap_factor
+            ));
+        }
         Ok(())
     }
 }
