@@ -216,6 +216,17 @@ Strategy is disabled by default; set `enabled = true` in `[arbitrage]` to activa
 - **Execution ladder**: Depth-capped FOK exit clips with geometric reduction, 2-second GTC refresh cycle for residual risk, and recovery logic (opposite-side set completion + alpha re-entry)
 - **Performance tracking**: Statistics with optional auto-disable when underperforming
 
+### Stop-Loss Research Findings (Backtest)
+
+- Only `hard_drop_abs` and `post_entry_exit_drop` fire in backtest — all other SL params dead (dual-trigger, trailing, reversal, reentry)
+- The two active params are **NOT symmetric** (max $22 PnL diff): `hard_drop` is global, `exit_drop` is window-gated
+- `exit_window=20s` dominates 30/45/60 — fewer false-positive exits, +$25 PnL with flat Sharpe
+- With `exit_window=20`, SL is net positive at `eff_threshold >= 0.08` (vs only 0.50 at ew=60)
+- `hard_drop=0.50` confirmed best across all windows (both PnL and Sharpe)
+- **Current config**: `hard_drop=0.50, exit_drop=0.12, sell_delay=4, window=20` (Pareto-optimal: $366.80 PnL, Sharpe 0.2249, Net SL +$20.63)
+- Reentry params (`recovery_max_set_cost`, `reentry_cooldown_secs`) confirmed dead in backtest — no FOK rejections
+- Full research report: `docs/research/stoploss-aggressiveness.md`
+
 ## Polymarket API Endpoints
 
 - CLOB API: `https://clob.polymarket.com`
@@ -345,3 +356,4 @@ All outbound traffic from the polyrust container is routed through a proxy VPS (
 - `docs/research/crypto-arb-reference-price.md` — crypto arb reference price mechanics for 15-min markets
 - `docs/research/arb-strategy-improvements.md` — arbitrage strategy improvement research
 - `docs/research/polymarket-modern-strategies.md` — modern Polymarket trading strategies research
+- `docs/research/stoploss-aggressiveness.md` — stop-loss aggressiveness sweep analysis and Pareto-optimal configs
