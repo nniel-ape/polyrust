@@ -21,58 +21,11 @@ use polyrust_core::prelude::*;
 use polyrust_market::ChainlinkHistoricalClient;
 
 use crate::crypto_arb::config::{ArbitrageConfig, SizingConfig};
-use crate::crypto_arb::types::{
-    ArbitragePosition, BoundarySnapshot, ExitOrderMeta, MarketWithReference, ModeStats,
-    OpenLimitOrder, OrderTelemetry, PendingOrder, PositionLifecycle, PositionLifecycleState,
-    ReferenceQuality, SpikeEvent,
+use crate::crypto_arb::domain::{
+    ArbitragePosition, BoundarySnapshot, CompositePriceResult, ExitOrderMeta, MarketWithReference,
+    ModeStats, OpenLimitOrder, OrderTelemetry, PendingOrder, PositionLifecycle,
+    PositionLifecycleState, ReferenceQuality, SpikeEvent,
 };
-
-/// Result of a composite fair price calculation from multiple data sources.
-#[derive(Debug, Clone)]
-pub struct CompositePriceResult {
-    /// Weighted average price across sources.
-    pub price: Decimal,
-    /// Number of sources that contributed.
-    pub sources_used: usize,
-    /// Maximum lag in milliseconds across contributing sources.
-    pub max_lag_ms: i64,
-    /// Maximum dispersion from composite in basis points.
-    pub dispersion_bps: Decimal,
-}
-
-/// Classification of stop-loss sell rejection reasons.
-///
-/// Determines which cooldown schedule to use and whether to fall back to GTC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StopLossRejectionKind {
-    /// "couldn't be fully filled" or "no match" — transient liquidity gap.
-    /// Uses fast cooldowns and marks token for GTC fallback.
-    Liquidity,
-    /// "not enough balance" or "allowance" — token settlement issue.
-    /// Uses longer cooldowns.
-    BalanceAllowance,
-    /// "invalid amounts" / "must be higher than 0" — dust position too small to sell.
-    /// Position should be removed immediately; no cooldown retry.
-    InvalidSize,
-    /// Everything else — treated like balance/allowance (longer cooldowns).
-    Transient,
-}
-
-impl StopLossRejectionKind {
-    /// Classify a rejection reason string.
-    pub fn classify(reason: &str) -> Self {
-        let lower = reason.to_lowercase();
-        if lower.contains("fully filled") || lower.contains("no match") {
-            Self::Liquidity
-        } else if lower.contains("not enough balance") || lower.contains("allowance") {
-            Self::BalanceAllowance
-        } else if lower.contains("invalid amounts") || lower.contains("must be higher than 0") {
-            Self::InvalidSize
-        } else {
-            Self::Transient
-        }
-    }
-}
 
 /// Number of price history entries to keep per coin.
 /// At ~5s RTDS intervals, 200 entries covers ~16 minutes — enough for a full
@@ -806,7 +759,7 @@ impl CryptoArbBase {
             }
 
             // Propagate to per-position lifecycle entries
-            let snapshot = crate::crypto_arb::types::CompositePriceSnapshot::from_result(result);
+            let snapshot = crate::crypto_arb::domain::CompositePriceSnapshot::from_result(result);
             let positions = self.positions.read().await;
             let mut lifecycles = self.position_lifecycle.write().await;
             for positions_vec in positions.values() {
@@ -1891,8 +1844,8 @@ impl CryptoArbBase {
     /// Record a recovery exit cooldown to prevent same-side re-entry too quickly.
     pub async fn record_recovery_exit_cooldown(&self, market_id: &MarketId) {
         let now = self.event_time().await;
-        let expires_at = now
-            + chrono::Duration::seconds(self.config.stop_loss.recovery_cooldown_secs as i64);
+        let expires_at =
+            now + chrono::Duration::seconds(self.config.stop_loss.recovery_cooldown_secs as i64);
         let mut cooldowns = self.recovery_exit_cooldowns.write().await;
         cooldowns.insert(market_id.clone(), expires_at);
     }

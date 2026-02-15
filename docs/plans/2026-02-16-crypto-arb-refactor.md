@@ -89,19 +89,19 @@ crypto_arb/
 - [x] Run `cargo build --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 2: Extract domain types from `types.rs`
-- [ ] Create `crypto_arb/domain/` directory
-- [ ] Create `domain/mod.rs` with re-exports of all public types (matching current `types.rs` API)
-- [ ] Create `domain/market.rs` — move `ReferenceQuality`, `BoundarySnapshot`, `MarketWithReference`, `CompositePriceSnapshot` and their impls
-- [ ] Create `domain/position.rs` — move `ArbitrageOpportunity`, `ArbitragePosition`, `PendingOrder`, `OpenLimitOrder`, `ExitOrderMeta` and their impls
-- [ ] Create `domain/lifecycle.rs` — move `PositionLifecycle`, `PositionLifecycleState`, `StopLossTriggerKind`, `TriggerEvalContext`, `compute_exit_clip()` and their impls
-- [ ] Create `domain/telemetry.rs` — move `ModeStats`, `SpikeEvent`, `OrderTelemetry` and their impls
-- [ ] Move `CompositePriceResult` from `base.rs` to `domain/market.rs` (fix upward dependency)
-- [ ] Move `StopLossRejectionKind` from `base.rs` to `domain/telemetry.rs`
-- [ ] Fix `CompositePriceSnapshot::from_result` to reference local `CompositePriceResult` (same module)
-- [ ] Update `crypto_arb/mod.rs` to declare `mod domain` instead of `mod types`, re-export all types
-- [ ] Update all `use crate::crypto_arb::types::...` imports throughout crypto_arb to use `domain::`
-- [ ] Delete `types.rs` after all contents moved
-- [ ] Run `cargo build --workspace && cargo clippy --workspace -- -D warnings`
+- [x] Create `crypto_arb/domain/` directory
+- [x] Create `domain/mod.rs` with re-exports of all public types (matching current `types.rs` API)
+- [x] Create `domain/market.rs` — move `ReferenceQuality`, `BoundarySnapshot`, `MarketWithReference`, `CompositePriceSnapshot` and their impls
+- [x] Create `domain/position.rs` — move `ArbitrageOpportunity`, `ArbitragePosition`, `PendingOrder`, `OpenLimitOrder`, `ExitOrderMeta` and their impls
+- [x] Create `domain/lifecycle.rs` — move `PositionLifecycle`, `PositionLifecycleState`, `StopLossTriggerKind`, `TriggerEvalContext`, `compute_exit_clip()` and their impls
+- [x] Create `domain/telemetry.rs` — move `ModeStats`, `SpikeEvent`, `OrderTelemetry` and their impls
+- [x] Move `CompositePriceResult` from `base.rs` to `domain/market.rs` (fix upward dependency)
+- [x] Move `StopLossRejectionKind` from `base.rs` to `domain/telemetry.rs`
+- [x] Fix `CompositePriceSnapshot::from_result` to reference local `CompositePriceResult` (same module)
+- [x] Update `crypto_arb/mod.rs` to declare `mod domain` instead of `mod types`, re-export all types
+- [x] Update all `use crate::crypto_arb::types::...` imports throughout crypto_arb to use `domain::`
+- [x] Delete `types.rs` after all contents moved
+- [x] Run `cargo build --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 3: Create `runtime.rs` from `base.rs` struct definition
 - [ ] Create `crypto_arb/runtime.rs` with `CryptoArbRuntime` struct (copy struct definition from `base.rs:199-284`)

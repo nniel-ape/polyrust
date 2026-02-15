@@ -17,12 +17,12 @@ use tracing::{debug, info, warn};
 
 use polyrust_core::prelude::*;
 
-use crate::crypto_arb::base::{CryptoArbBase, StopLossRejectionKind, taker_fee};
+use crate::crypto_arb::base::{CryptoArbBase, taker_fee};
 use crate::crypto_arb::dashboard::try_emit_dashboard_updates;
-use crate::crypto_arb::types::{
+use crate::crypto_arb::domain::{
     ArbitrageOpportunity, ArbitragePosition, ExitOrderMeta, OpenLimitOrder, PendingOrder,
-    PositionLifecycle, PositionLifecycleState, StopLossTriggerKind, TriggerEvalContext,
-    compute_exit_clip,
+    PositionLifecycle, PositionLifecycleState, StopLossRejectionKind, StopLossTriggerKind,
+    TriggerEvalContext, compute_exit_clip,
 };
 
 /// TailEnd strategy: trades near expiration with high market prices.
@@ -1299,7 +1299,7 @@ impl TailEndStrategy {
         neg_risk: bool,
         min_order_size: Decimal,
         trigger_kind: &StopLossTriggerKind,
-        lifecycle: &mut crate::crypto_arb::types::PositionLifecycle,
+        lifecycle: &mut crate::crypto_arb::domain::PositionLifecycle,
         now: DateTime<Utc>,
     ) -> Option<Vec<Action>> {
         // Compute depth-capped clip size
@@ -2144,8 +2144,7 @@ impl Strategy for TailEndStrategy {
                         if is_hedge {
                             // Hedge order cancelled — clear hedge tracking but keep
                             // the sell order active in ExitExecuting state.
-                            let mut lifecycle =
-                                self.base.ensure_lifecycle(&meta.token_id).await;
+                            let mut lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
                             if let PositionLifecycleState::ExitExecuting {
                                 ref mut hedge_order_id,
                                 ref mut hedge_price,
@@ -2158,8 +2157,7 @@ impl Strategy for TailEndStrategy {
                             self.write_lifecycle(&meta.token_id, &lifecycle).await;
 
                             {
-                                let mut exit_orders =
-                                    self.base.exit_orders_by_id.write().await;
+                                let mut exit_orders = self.base.exit_orders_by_id.write().await;
                                 exit_orders.remove(order_id);
                             }
 
@@ -2495,7 +2493,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use crate::crypto_arb::config::ArbitrageConfig;
-    use crate::crypto_arb::types::{MarketWithReference, ReferenceQuality};
+    use crate::crypto_arb::domain::{MarketWithReference, ReferenceQuality};
 
     fn make_market_info(
         id: &str,
@@ -3024,7 +3022,7 @@ mod tests {
     // Lifecycle-driven stop-loss evaluation tests (Task 13)
     // -----------------------------------------------------------------------
 
-    use crate::crypto_arb::types::PositionLifecycleState;
+    use crate::crypto_arb::domain::PositionLifecycleState;
 
     /// Helper: create a TailEndStrategy with a market, position, and price history
     /// configured so that stop-loss can fire.
@@ -3094,7 +3092,7 @@ mod tests {
             cache.insert(
                 "BTC".to_string(),
                 (
-                    crate::crypto_arb::base::CompositePriceResult {
+                    crate::crypto_arb::domain::CompositePriceResult {
                         price: dec!(49700),
                         sources_used: 2,
                         max_lag_ms: 100,
@@ -4075,7 +4073,7 @@ mod tests {
         // Update SL composite cache with a reversed external price (BTC dropped below reference)
         // This satisfies the hard crash reversal check: (50000 - 49500) / 50000 = 0.01 > 0.006
         {
-            let composite = crate::crypto_arb::base::CompositePriceResult {
+            let composite = crate::crypto_arb::domain::CompositePriceResult {
                 price: dec!(49500),
                 sources_used: 2,
                 max_lag_ms: 100,

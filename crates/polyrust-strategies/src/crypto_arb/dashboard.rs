@@ -16,7 +16,7 @@ use polyrust_core::prelude::*;
 use crate::crypto_arb::base::{
     CryptoArbBase, escape_html, fmt_market_price, fmt_usd, net_profit_margin, taker_fee,
 };
-use crate::crypto_arb::types::ReferenceQuality;
+use crate::crypto_arb::domain::ReferenceQuality;
 
 // ---------------------------------------------------------------------------
 // Shared HTML rendering helpers

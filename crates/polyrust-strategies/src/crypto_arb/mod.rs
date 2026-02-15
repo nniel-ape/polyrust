@@ -6,8 +6,8 @@
 mod base;
 mod config;
 mod dashboard;
+pub mod domain;
 mod tailend;
-mod types;
 
 pub use base::CryptoArbBase;
 pub use config::{
@@ -16,11 +16,11 @@ pub use config::{
 };
 pub use dashboard::CryptoArbDashboard;
 pub use tailend::TailEndStrategy;
-pub use types::{
-    ArbitrageOpportunity, ArbitragePosition, BoundarySnapshot, CompositePriceSnapshot,
-    ExitOrderMeta, MarketWithReference, ModeStats, OpenLimitOrder, PendingOrder, PositionLifecycle,
-    PositionLifecycleState, ReferenceQuality, SpikeEvent, StopLossTriggerKind, TriggerEvalContext,
-    compute_exit_clip,
+pub use domain::{
+    ArbitrageOpportunity, ArbitragePosition, BoundarySnapshot, CompositePriceResult,
+    CompositePriceSnapshot, ExitOrderMeta, MarketWithReference, ModeStats, OpenLimitOrder,
+    OrderTelemetry, PendingOrder, PositionLifecycle, PositionLifecycleState, ReferenceQuality,
+    SpikeEvent, StopLossRejectionKind, StopLossTriggerKind, TriggerEvalContext, compute_exit_clip,
 };
 
 // Re-export fee helpers and utilities for use in strategies

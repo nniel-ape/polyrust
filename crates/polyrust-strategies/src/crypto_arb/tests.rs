@@ -19,7 +19,7 @@ use super::base::{
 };
 use super::config::{ArbitrageConfig, SizingConfig};
 use super::tailend::TailEndStrategy;
-use super::types::{
+use super::domain::{
     ArbitragePosition, BoundarySnapshot, CompositePriceSnapshot, ExitOrderMeta,
     MarketWithReference, ModeStats, OpenLimitOrder, PositionLifecycle, PositionLifecycleState,
     ReferenceQuality, StopLossTriggerKind, TriggerEvalContext, compute_exit_clip,
@@ -594,7 +594,7 @@ async fn consume_reservation_then_pending_preserves_exposure() {
     // Consume reservation and insert pending order
     base.consume_reservation(&"market1".to_string()).await;
     {
-        use super::types::PendingOrder;
+        use super::domain::PendingOrder;
         let mut pending = base.pending_orders.write().await;
         pending.insert(
             "token1".to_string(),
@@ -1391,7 +1391,7 @@ async fn has_market_exposure_checks_all_types() {
         let mut pending = base.pending_orders.write().await;
         pending.insert(
             "token2".to_string(),
-            super::types::PendingOrder {
+            super::domain::PendingOrder {
                 market_id: market_id.clone(),
                 token_id: "token2".to_string(),
                 side: OutcomeSide::Up,
@@ -1468,7 +1468,7 @@ async fn can_open_position_counts_all_order_types() {
         let mut pending = base.pending_orders.write().await;
         pending.insert(
             "token2".to_string(),
-            super::types::PendingOrder {
+            super::domain::PendingOrder {
                 market_id: "m2".to_string(),
                 token_id: "token2".to_string(),
                 side: OutcomeSide::Up,
@@ -1492,7 +1492,7 @@ async fn can_open_position_counts_all_order_types() {
         let mut limits = base.open_limit_orders.write().await;
         limits.insert(
             "order3".to_string(),
-            super::types::OpenLimitOrder {
+            super::domain::OpenLimitOrder {
                 order_id: "order3".to_string(),
                 market_id: "m3".to_string(),
                 token_id: "token3".to_string(),
@@ -1534,7 +1534,7 @@ async fn stale_limit_order_cancelled_after_max_age() {
         let mut limits = base.open_limit_orders.write().await;
         limits.insert(
             "old-order".to_string(),
-            super::types::OpenLimitOrder {
+            super::domain::OpenLimitOrder {
                 order_id: "old-order".to_string(),
                 market_id: "m1".to_string(),
                 token_id: "token1".to_string(),
@@ -1578,7 +1578,7 @@ async fn stale_order_cancel_pending_prevents_double() {
         let mut limits = base.open_limit_orders.write().await;
         limits.insert(
             "old-order".to_string(),
-            super::types::OpenLimitOrder {
+            super::domain::OpenLimitOrder {
                 order_id: "old-order".to_string(),
                 market_id: "m1".to_string(),
                 token_id: "token1".to_string(),
@@ -2310,7 +2310,7 @@ async fn strike_proximity_allows_beyond_threshold() {
 
 #[test]
 fn rejection_kind_classifies_liquidity() {
-    use super::base::StopLossRejectionKind;
+    use super::domain::StopLossRejectionKind;
 
     assert_eq!(
         StopLossRejectionKind::classify("couldn't be fully filled"),
@@ -2324,7 +2324,7 @@ fn rejection_kind_classifies_liquidity() {
 
 #[test]
 fn rejection_kind_classifies_balance() {
-    use super::base::StopLossRejectionKind;
+    use super::domain::StopLossRejectionKind;
 
     assert_eq!(
         StopLossRejectionKind::classify("not enough balance"),
@@ -2338,7 +2338,7 @@ fn rejection_kind_classifies_balance() {
 
 #[test]
 fn rejection_kind_classifies_transient() {
-    use super::base::StopLossRejectionKind;
+    use super::domain::StopLossRejectionKind;
 
     assert_eq!(
         StopLossRejectionKind::classify("rate limited"),
@@ -3406,7 +3406,7 @@ async fn remove_lifecycle_also_cleans_exit_orders() {
 
     // Simulate adding an exit order for this token
     {
-        use super::types::ExitOrderMeta;
+        use super::domain::ExitOrderMeta;
         let mut exit_orders = base.exit_orders_by_id.write().await;
         exit_orders.insert(
             "exit-order-1".to_string(),
@@ -3450,7 +3450,7 @@ async fn remove_lifecycle_also_cleans_exit_orders() {
 
 #[tokio::test]
 async fn sl_composite_cache_fresh_returns_result() {
-    use super::base::CompositePriceResult;
+    use super::domain::CompositePriceResult;
 
     let base = make_base_no_chainlink();
     let now = Utc::now();
@@ -3482,7 +3482,7 @@ async fn sl_composite_cache_fresh_returns_result() {
 
 #[tokio::test]
 async fn sl_composite_cache_stale_returns_none() {
-    use super::base::CompositePriceResult;
+    use super::domain::CompositePriceResult;
 
     let base = make_base_no_chainlink();
     let cached_at = Utc::now() - chrono::Duration::seconds(10);
@@ -3569,7 +3569,7 @@ async fn sl_single_fresh_returns_none_for_missing_coin() {
 
 #[tokio::test]
 async fn sl_composite_cache_propagates_to_lifecycle() {
-    use super::base::CompositePriceResult;
+    use super::domain::CompositePriceResult;
 
     let base = make_base_no_chainlink();
 
@@ -3610,7 +3610,7 @@ async fn sl_composite_cache_propagates_to_lifecycle() {
 
     // Propagate to lifecycle (simulating what update_sl_composite_cache does)
     {
-        let snapshot = super::types::CompositePriceSnapshot::from_result(&composite);
+        let snapshot = super::domain::CompositePriceSnapshot::from_result(&composite);
         let positions = base.positions.read().await;
         let mut lifecycles = base.position_lifecycle.write().await;
         for positions_vec in positions.values() {
@@ -4241,7 +4241,7 @@ async fn recovery_opposite_alpha_momentum_confirmed() {
         cache.insert(
             "BTC".to_string(),
             (
-                super::base::CompositePriceResult {
+                super::domain::CompositePriceResult {
                     price: dec!(49500),
                     sources_used: 2,
                     max_lag_ms: 100,
