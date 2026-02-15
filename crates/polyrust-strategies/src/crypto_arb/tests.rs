@@ -2822,7 +2822,7 @@ fn lifecycle_new_starts_healthy() {
 fn lifecycle_all_valid_transitions_succeed() {
     let t = now();
 
-    // Healthy -> ExitExecuting
+    // Healthy -> ExitExecuting (FOK)
     let mut lc = PositionLifecycle::new();
     let result = lc.transition(
         PositionLifecycleState::ExitExecuting {
@@ -2836,20 +2836,7 @@ fn lifecycle_all_valid_transitions_succeed() {
     );
     assert!(result.is_ok());
 
-    // ExitExecuting -> ResidualRisk
-    let result = lc.transition(
-        PositionLifecycleState::ResidualRisk {
-            remaining_size: dec!(5.0),
-            retry_count: 1,
-            last_attempt: t,
-            use_gtc_next: true,
-        },
-        "partial fill",
-        t,
-    );
-    assert!(result.is_ok());
-
-    // ResidualRisk -> ExitExecuting (retry)
+    // ExitExecuting -> ExitExecuting (GTC residual after partial fill)
     let result = lc.transition(
         PositionLifecycleState::ExitExecuting {
             order_id: "order-2".to_string(),
@@ -2857,53 +2844,43 @@ fn lifecycle_all_valid_transitions_succeed() {
             exit_price: dec!(0.89),
             submitted_at: t,
         },
-        "retry exit",
+        "GTC residual chase",
         t,
     );
     assert!(result.is_ok());
 
-    // ExitExecuting -> ResidualRisk again
-    let result = lc.transition(
-        PositionLifecycleState::ResidualRisk {
-            remaining_size: dec!(3.0),
-            retry_count: 2,
-            last_attempt: t,
-            use_gtc_next: false,
-        },
-        "rejected again",
-        t,
-    );
+    // ExitExecuting -> Healthy (cancelled)
+    let result = lc.transition(PositionLifecycleState::Healthy, "GTC cancelled", t);
     assert!(result.is_ok());
 
-    // ResidualRisk -> RecoveryProbe
+    // Healthy -> ExitExecuting (second trigger)
     let result = lc.transition(
-        PositionLifecycleState::RecoveryProbe {
-            recovery_order_id: "recovery-1".to_string(),
-            probe_side: OutcomeSide::Down,
+        PositionLifecycleState::ExitExecuting {
+            order_id: "order-3".to_string(),
+            order_type: OrderType::Fok,
+            exit_price: dec!(0.88),
             submitted_at: t,
         },
-        "max retries, attempt recovery",
+        "second trigger",
         t,
     );
     assert!(result.is_ok());
 
-    // RecoveryProbe -> Cooldown
-    let result = lc.transition(
-        PositionLifecycleState::Cooldown {
-            until: t + Duration::seconds(8),
-        },
-        "recovery filled",
-        t,
-    );
+    // ExitExecuting -> Healthy (rejected)
+    let result = lc.transition(PositionLifecycleState::Healthy, "order rejected", t);
     assert!(result.is_ok());
 
-    // Cooldown -> Healthy
-    let result = lc.transition(PositionLifecycleState::Healthy, "cooldown elapsed", t);
+    // Also test Cooldown -> Healthy (set state directly since RecoveryProbe
+    // is temporarily unreachable — will be re-enabled in Task 5 via proactive hedge)
+    let mut lc2 = PositionLifecycle::new();
+    lc2.state = PositionLifecycleState::Cooldown {
+        until: t + Duration::seconds(8),
+    };
+    let result = lc2.transition(PositionLifecycleState::Healthy, "cooldown elapsed", t);
     assert!(result.is_ok());
 
-    // Verify transitions are logged (7 transitions: Healthy->ExitExecuting->ResidualRisk->
-    // ExitExecuting->ResidualRisk->RecoveryProbe->Cooldown->Healthy)
-    assert_eq!(lc.transition_log.len(), 7);
+    // Verify transitions are logged (5 transitions in lc)
+    assert_eq!(lc.transition_log.len(), 5);
 }
 
 #[test]
@@ -2930,43 +2907,16 @@ fn lifecycle_healthy_to_exit_executing() {
 #[test]
 fn lifecycle_recovery_probe_to_exit_executing_is_invalid() {
     let t = now();
+    // Set state directly to RecoveryProbe (unreachable from normal flow
+    // after ResidualRisk removal, will be re-enabled in Task 5)
     let mut lc = PositionLifecycle::new();
-    // Walk through: Healthy -> ExitExecuting -> ResidualRisk -> RecoveryProbe
-    lc.transition(
-        PositionLifecycleState::ExitExecuting {
-            order_id: "o1".into(),
-            order_type: OrderType::Fok,
-            exit_price: dec!(0.90),
-            submitted_at: t,
-        },
-        "trigger",
-        t,
-    )
-    .unwrap();
-    lc.transition(
-        PositionLifecycleState::ResidualRisk {
-            remaining_size: dec!(5),
-            retry_count: 5,
-            last_attempt: t,
-            use_gtc_next: false,
-        },
-        "rejected",
-        t,
-    )
-    .unwrap();
-    lc.transition(
-        PositionLifecycleState::RecoveryProbe {
-            recovery_order_id: "r1".into(),
-            probe_side: OutcomeSide::Down,
-            submitted_at: t,
-        },
-        "try recovery",
-        t,
-    )
-    .unwrap();
+    lc.state = PositionLifecycleState::RecoveryProbe {
+        recovery_order_id: "r1".into(),
+        probe_side: OutcomeSide::Down,
+        submitted_at: t,
+    };
 
-    // RecoveryProbe -> ExitExecuting is not a valid transition;
-    // failed recovery resolves with loss instead of retrying exit.
+    // RecoveryProbe -> ExitExecuting is not a valid transition
     let result = lc.transition(
         PositionLifecycleState::ExitExecuting {
             order_id: "o2".into(),
@@ -2984,21 +2934,12 @@ fn lifecycle_recovery_probe_to_exit_executing_is_invalid() {
 fn lifecycle_invalid_transitions_return_error() {
     let t = now();
 
-    // Healthy -> ResidualRisk (invalid: must go through ExitExecuting)
+    // Healthy -> Healthy (invalid: self-loop on Healthy)
     let mut lc = PositionLifecycle::new();
-    let result = lc.transition(
-        PositionLifecycleState::ResidualRisk {
-            remaining_size: dec!(5),
-            retry_count: 0,
-            last_attempt: t,
-            use_gtc_next: false,
-        },
-        "skip ExitExecuting",
-        t,
-    );
+    let result = lc.transition(PositionLifecycleState::Healthy, "invalid self-loop", t);
     assert!(result.is_err());
     let msg = result.unwrap_err();
-    assert!(msg.contains("Healthy") && msg.contains("ResidualRisk"));
+    assert!(msg.contains("Healthy"));
 
     // Healthy -> RecoveryProbe (invalid)
     let mut lc = PositionLifecycle::new();
@@ -3024,45 +2965,9 @@ fn lifecycle_invalid_transitions_return_error() {
 
     // Cooldown -> ExitExecuting (invalid: must go through Healthy)
     let mut lc = PositionLifecycle::new();
-    // Walk to Cooldown state
-    lc.transition(
-        PositionLifecycleState::ExitExecuting {
-            order_id: "o1".into(),
-            order_type: OrderType::Fok,
-            exit_price: dec!(0.9),
-            submitted_at: t,
-        },
-        "trigger",
-        t,
-    )
-    .unwrap();
-    lc.transition(
-        PositionLifecycleState::ResidualRisk {
-            remaining_size: dec!(5),
-            retry_count: 5,
-            last_attempt: t,
-            use_gtc_next: false,
-        },
-        "rejected",
-        t,
-    )
-    .unwrap();
-    lc.transition(
-        PositionLifecycleState::RecoveryProbe {
-            recovery_order_id: "r1".into(),
-            probe_side: OutcomeSide::Down,
-            submitted_at: t,
-        },
-        "try recovery",
-        t,
-    )
-    .unwrap();
-    lc.transition(
-        PositionLifecycleState::Cooldown { until: t },
-        "recovered",
-        t,
-    )
-    .unwrap();
+    // Set state directly to Cooldown (RecoveryProbe path is temporarily
+    // unreachable after ResidualRisk removal — will be re-enabled in Task 5)
+    lc.state = PositionLifecycleState::Cooldown { until: t };
 
     let result = lc.transition(
         PositionLifecycleState::ExitExecuting {
@@ -3084,7 +2989,7 @@ fn lifecycle_transition_log_caps_at_50() {
     let t = now();
     let mut lc = PositionLifecycle::new();
 
-    // Generate 60 transitions by cycling Healthy -> ExitExecuting -> ResidualRisk -> ExitExecuting...
+    // Generate 60 transitions by cycling Healthy -> ExitExecuting -> Healthy -> ExitExecuting...
     for i in 0..60 {
         if matches!(lc.state, PositionLifecycleState::Healthy) {
             lc.transition(
@@ -3100,24 +3005,7 @@ fn lifecycle_transition_log_caps_at_50() {
             .unwrap();
         } else if matches!(lc.state, PositionLifecycleState::ExitExecuting { .. }) {
             lc.transition(
-                PositionLifecycleState::ResidualRisk {
-                    remaining_size: dec!(5),
-                    retry_count: i as u32,
-                    last_attempt: t,
-                    use_gtc_next: false,
-                },
-                &format!("transition {i}"),
-                t,
-            )
-            .unwrap();
-        } else if matches!(lc.state, PositionLifecycleState::ResidualRisk { .. }) {
-            lc.transition(
-                PositionLifecycleState::ExitExecuting {
-                    order_id: format!("o-{i}"),
-                    order_type: OrderType::Gtc,
-                    exit_price: dec!(0.89),
-                    submitted_at: t,
-                },
+                PositionLifecycleState::Healthy,
                 &format!("transition {i}"),
                 t,
             )
@@ -3139,12 +3027,7 @@ fn lifecycle_invalid_transition_preserves_state() {
 
     // Try invalid transition — state should remain Healthy
     let _ = lc.transition(
-        PositionLifecycleState::ResidualRisk {
-            remaining_size: dec!(5),
-            retry_count: 0,
-            last_attempt: t,
-            use_gtc_next: false,
-        },
+        PositionLifecycleState::Cooldown { until: t },
         "should fail",
         t,
     );
@@ -3465,7 +3348,7 @@ async fn remove_lifecycle_also_cleans_exit_orders() {
                 token_id: "other_token".to_string(),
                 order_token_id: "other_token".to_string(),
                 order_type: OrderType::Gtc,
-                source_state: "ResidualRisk".to_string(),
+                source_state: "ExitExecuting".to_string(),
                 retry_count: 0,
                 exit_price: dec!(0.80),
                 clip_size: dec!(5),
@@ -4372,173 +4255,6 @@ async fn recovery_same_side_reentry_allowed_after_cooldown() {
     assert!(
         !cooled,
         "Recovery exit cooldown should have expired (1s cooldown, checked 10s later)"
-    );
-}
-
-/// Test recovery failure: position resolved with loss and lifecycle cleaned up.
-#[tokio::test]
-async fn recovery_failure_resolves_position_with_loss() {
-    let base = make_base_with_market("m1", 300).await;
-
-    // Create position
-    let pos = make_position(
-        "m1",
-        "token_up",
-        OutcomeSide::Up,
-        dec!(0.93),
-        dec!(10),
-        dec!(50000),
-        dec!(0.93),
-    );
-    {
-        let mut positions = base.positions.write().await;
-        positions
-            .entry("m1".to_string())
-            .or_default()
-            .push(pos.clone());
-    }
-
-    // Set up lifecycle in RecoveryProbe state
-    let mut lifecycle = PositionLifecycle::new();
-    let now = Utc::now();
-    // Healthy -> ExitExecuting
-    lifecycle
-        .transition(
-            PositionLifecycleState::ExitExecuting {
-                order_id: "exit-1".into(),
-                order_type: OrderType::Fok,
-                exit_price: dec!(0.85),
-                submitted_at: now,
-            },
-            "trigger",
-            now,
-        )
-        .unwrap();
-    // ExitExecuting -> ResidualRisk
-    lifecycle
-        .transition(
-            PositionLifecycleState::ResidualRisk {
-                remaining_size: dec!(10),
-                retry_count: 5,
-                last_attempt: now,
-                use_gtc_next: true,
-            },
-            "rejected",
-            now,
-        )
-        .unwrap();
-    // ResidualRisk -> RecoveryProbe
-    lifecycle
-        .transition(
-            PositionLifecycleState::RecoveryProbe {
-                recovery_order_id: "recovery-1".into(),
-                probe_side: OutcomeSide::Down,
-                submitted_at: now,
-            },
-            "try recovery",
-            now,
-        )
-        .unwrap();
-
-    {
-        let mut lifecycles = base.position_lifecycle.write().await;
-        lifecycles.insert("token_up".to_string(), lifecycle);
-    }
-
-    // Simulate recovery failure: resolve position
-    base.reduce_or_remove_position_by_token("token_up", dec!(10))
-        .await;
-
-    // Verify position is removed
-    let positions = base.positions.read().await;
-    let m1_positions = positions.get("m1");
-    let token_up_exists = m1_positions
-        .map(|v| v.iter().any(|p| p.token_id == "token_up"))
-        .unwrap_or(false);
-    assert!(
-        !token_up_exists,
-        "Position should be removed after recovery failure"
-    );
-}
-
-/// Test lifecycle transitions through the full recovery cycle:
-/// Healthy → ExitExecuting → ResidualRisk → RecoveryProbe → Cooldown → Healthy
-#[test]
-fn lifecycle_full_recovery_cycle() {
-    let now = Utc::now();
-    let mut lifecycle = PositionLifecycle::new();
-
-    // Healthy → ExitExecuting
-    lifecycle
-        .transition(
-            PositionLifecycleState::ExitExecuting {
-                order_id: "exit-1".into(),
-                order_type: OrderType::Fok,
-                exit_price: dec!(0.85),
-                submitted_at: now,
-            },
-            "hard crash trigger",
-            now,
-        )
-        .unwrap();
-
-    // ExitExecuting → ResidualRisk
-    lifecycle
-        .transition(
-            PositionLifecycleState::ResidualRisk {
-                remaining_size: dec!(10),
-                retry_count: 5,
-                last_attempt: now,
-                use_gtc_next: true,
-            },
-            "FOK rejected",
-            now,
-        )
-        .unwrap();
-
-    // ResidualRisk → RecoveryProbe
-    lifecycle
-        .transition(
-            PositionLifecycleState::RecoveryProbe {
-                recovery_order_id: "recovery-set-token_up-123".into(),
-                probe_side: OutcomeSide::Down,
-                submitted_at: now,
-            },
-            "set completion viable",
-            now,
-        )
-        .unwrap();
-
-    // RecoveryProbe → Cooldown
-    let cooldown_until = now + Duration::seconds(8);
-    lifecycle
-        .transition(
-            PositionLifecycleState::Cooldown {
-                until: cooldown_until,
-            },
-            "recovery fill at 0.07",
-            now,
-        )
-        .unwrap();
-
-    // Cooldown → Healthy
-    let after_cooldown = cooldown_until + Duration::seconds(1);
-    lifecycle
-        .transition(
-            PositionLifecycleState::Healthy,
-            "cooldown elapsed",
-            after_cooldown,
-        )
-        .unwrap();
-
-    assert!(
-        matches!(lifecycle.state, PositionLifecycleState::Healthy),
-        "Should be back to Healthy after full recovery cycle"
-    );
-    assert_eq!(
-        lifecycle.transition_log.len(),
-        5,
-        "Should have 5 transitions in the log"
     );
 }
 

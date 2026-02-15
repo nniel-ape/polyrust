@@ -509,10 +509,9 @@ impl fmt::Display for StopLossTriggerKind {
 ///
 /// Valid transitions:
 /// - Healthy -> ExitExecuting (trigger fires; hard crash bypasses sell delay)
-/// - ExitExecuting -> ResidualRisk (partial fill or rejection)
+/// - ExitExecuting -> ExitExecuting (GTC residual after FAK partial fill)
+/// - ExitExecuting -> Healthy (GTC cancelled for chase, rejection, or FAK zero fill)
 /// - ExitExecuting -> (resolved) (fully filled — position removed)
-/// - ResidualRisk -> ExitExecuting (retry)
-/// - ResidualRisk -> RecoveryProbe (max retries or risk under budget)
 /// - RecoveryProbe -> Cooldown (recovery neutralized position)
 /// - RecoveryProbe -> (resolved) (recovery fails — position resolved with loss)
 /// - Cooldown -> Healthy (cooldown elapsed)
@@ -521,18 +520,12 @@ pub enum PositionLifecycleState {
     /// Position is active and being monitored. No exit trigger has fired.
     Healthy,
     /// An exit order has been submitted and is in flight.
+    /// FAK for initial clip, GTC for residual chase.
     ExitExecuting {
         order_id: OrderId,
         order_type: OrderType,
         exit_price: Decimal,
         submitted_at: DateTime<Utc>,
-    },
-    /// Partial fill or rejection left residual exposure. Retrying exit.
-    ResidualRisk {
-        remaining_size: Decimal,
-        retry_count: u32,
-        last_attempt: DateTime<Utc>,
-        use_gtc_next: bool,
     },
     /// Attempting recovery: opposite-side set completion or re-entry.
     RecoveryProbe {
@@ -555,16 +548,6 @@ impl fmt::Display for PositionLifecycleState {
             } => {
                 write!(f, "ExitExecuting({order_type:?}@{exit_price})")
             }
-            Self::ResidualRisk {
-                remaining_size,
-                retry_count,
-                ..
-            } => {
-                write!(
-                    f,
-                    "ResidualRisk(remaining={remaining_size}, retries={retry_count})"
-                )
-            }
             Self::RecoveryProbe { probe_side, .. } => {
                 write!(f, "RecoveryProbe({probe_side:?})")
             }
@@ -579,7 +562,6 @@ impl PositionLifecycleState {
         match self {
             Self::Healthy => "Healthy",
             Self::ExitExecuting { .. } => "ExitExecuting",
-            Self::ResidualRisk { .. } => "ResidualRisk",
             Self::RecoveryProbe { .. } => "RecoveryProbe",
             Self::Cooldown { .. } => "Cooldown",
         }
@@ -594,9 +576,8 @@ impl PositionLifecycleState {
         matches!(
             (self, target),
             (Healthy, ExitExecuting { .. })
-                | (ExitExecuting { .. }, ResidualRisk { .. })
-                | (ResidualRisk { .. }, ExitExecuting { .. })
-                | (ResidualRisk { .. }, RecoveryProbe { .. })
+                | (ExitExecuting { .. }, ExitExecuting { .. }) // GTC residual after FAK partial fill
+                | (ExitExecuting { .. }, Healthy) // GTC cancelled for chase or rejection
                 | (RecoveryProbe { .. }, Cooldown { .. })
                 | (Cooldown { .. }, Healthy)
         )
