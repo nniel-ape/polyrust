@@ -195,7 +195,6 @@ taker_fee_rate = "0.0315"  # Polymarket taker fee at 50/50 probability
 # │                                       │         │         │                │
 # │ RECOVERY                              │         │         │                │
 # │ stop_loss.recovery_max_set_cost       │ 1.01    │ 0.99    │ 1.04           │
-# │ stop_loss.reentry_cooldown_secs       │ 8       │ 4       │ 20             │
 # │                                       │         │         │                │
 # │ EXCLUDED (backtest runner overrides):                                      │
 # │ stop_loss.min_remaining_secs → forced to 0                                │
@@ -217,16 +216,13 @@ force = true
 #   1. Fine-grain the Pareto sweet spot (exit_drop 0.06-0.50, hard_drop 0.30-0.80)
 #   2. Narrow the exit_window optimum (20-45s bracket)
 #   3. Validate sell_delay=0 vs 4
-#   4. Test reentry params (recovery_max_set_cost, reentry_cooldown_secs)
+#   4. Test recovery_max_set_cost
 # Previous: 72-combo sweep established Pareto front, 0.50 as best eff_threshold
-# Note: reentry params may not fire in backtest (immediate fills = no FOK
-#   rejections), but included to validate that assumption at scale.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 [backtest.sweep.stop_loss]
 hard_drop_abs = ["0.30", "0.50", "0.80"]
 recovery_max_set_cost = ["1.00", "1.02", "1.05"]
-reentry_cooldown_secs = [0, 4, 8]
 
 [backtest.sweep.tailend]
 post_entry_exit_drop = ["0.06", "0.08", "0.10", "0.12", "0.15", "0.20", "0.35", "0.50"]

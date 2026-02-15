@@ -351,12 +351,6 @@ pub struct StopLossConfig {
     /// Number of consecutive ticks both dual-trigger conditions must hold (default 2).
     pub dual_trigger_consecutive_ticks: usize,
 
-    // ── Short-lived limit order refresh ─────────────────────────────────
-    /// Refresh interval in seconds for short-lived GTC stop-loss orders (default 2).
-    pub short_limit_refresh_secs: u64,
-    /// Tick offset below bid for short-lived GTC orders (default 1).
-    pub short_limit_tick_offset: u32,
-
     // ── Trailing arming ─────────────────────────────────────────────────
     /// Distance from entry at which trailing stop arms (default 0.015).
     /// Capped by available headroom: `min(trailing_arm_distance, price_cap - entry)`.
@@ -366,8 +360,6 @@ pub struct StopLossConfig {
     /// Fraction of bid depth to cap exit clip size (default 0.80).
     /// Exit clip = min(remaining, bid_depth * exit_depth_cap_factor).
     pub exit_depth_cap_factor: Decimal,
-    /// Maximum exit order retries before escalating to recovery (default 5).
-    pub max_exit_retries: u32,
 
     // ── Recovery ────────────────────────────────────────────────────────
     /// Enable recovery logic (opposite-side set completion + re-entry). Default: true.
@@ -376,10 +368,6 @@ pub struct StopLossConfig {
     pub recovery_max_set_cost: Decimal,
     /// Maximum extra risk fraction for recovery alpha trades. Default: 0.15 (15%).
     pub recovery_max_extra_frac: Decimal,
-    /// Number of consecutive confirming ticks before re-entry. Default: 2.
-    pub reentry_confirm_ticks: usize,
-    /// Cooldown in seconds after recovery before re-entry is allowed. Default: 8.
-    pub reentry_cooldown_secs: i64,
 }
 
 impl Default for StopLossConfig {
@@ -406,20 +394,14 @@ impl Default for StopLossConfig {
             sl_max_dispersion_bps: Decimal::new(50, 0), // 50 bps
             // Hysteresis
             dual_trigger_consecutive_ticks: 2,
-            // Short-lived limit
-            short_limit_refresh_secs: 2,
-            short_limit_tick_offset: 1,
             // Trailing arming
             trailing_arm_distance: Decimal::new(15, 3), // 0.015
             // Execution ladder
             exit_depth_cap_factor: Decimal::new(80, 2), // 0.80
-            max_exit_retries: 5,
             // Recovery
             recovery_enabled: true,
             recovery_max_set_cost: Decimal::new(101, 2), // 1.01
             recovery_max_extra_frac: Decimal::new(15, 2), // 0.15
-            reentry_confirm_ticks: 2,
-            reentry_cooldown_secs: 8,
         }
     }
 }
@@ -432,9 +414,6 @@ impl StopLossConfig {
                 "trailing_min_distance ({}) must be <= trailing_distance ({})",
                 self.trailing_min_distance, self.trailing_distance
             ));
-        }
-        if self.short_limit_refresh_secs < 1 {
-            return Err("short_limit_refresh_secs must be >= 1".to_string());
         }
         if self.exit_depth_cap_factor <= Decimal::ZERO || self.exit_depth_cap_factor > Decimal::ONE
         {
@@ -476,9 +455,6 @@ impl StopLossConfig {
                 self.sl_max_external_age_ms
             ));
         }
-        if self.max_exit_retries == 0 {
-            return Err("max_exit_retries must be >= 1".to_string());
-        }
         if self.recovery_max_set_cost <= Decimal::ZERO {
             return Err(format!(
                 "recovery_max_set_cost must be positive, got {}",
@@ -491,12 +467,6 @@ impl StopLossConfig {
             return Err(format!(
                 "recovery_max_extra_frac must be in [0, 1], got {}",
                 self.recovery_max_extra_frac
-            ));
-        }
-        if self.reentry_cooldown_secs < 0 {
-            return Err(format!(
-                "reentry_cooldown_secs must be non-negative, got {}",
-                self.reentry_cooldown_secs
             ));
         }
         Ok(())

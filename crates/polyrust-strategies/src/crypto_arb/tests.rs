@@ -2493,23 +2493,16 @@ fn stop_loss_config_lifecycle_field_defaults() {
     // Hysteresis
     assert_eq!(config.dual_trigger_consecutive_ticks, 2);
 
-    // Short-lived limit
-    assert_eq!(config.short_limit_refresh_secs, 2);
-    assert_eq!(config.short_limit_tick_offset, 1);
-
     // Trailing arming
     assert_eq!(config.trailing_arm_distance, dec!(0.015));
 
     // Execution ladder
     assert_eq!(config.exit_depth_cap_factor, dec!(0.80));
-    assert_eq!(config.max_exit_retries, 5);
 
     // Recovery
     assert!(config.recovery_enabled);
     assert_eq!(config.recovery_max_set_cost, dec!(1.01));
     assert_eq!(config.recovery_max_extra_frac, dec!(0.15));
-    assert_eq!(config.reentry_confirm_ticks, 2);
-    assert_eq!(config.reentry_cooldown_secs, 8);
 }
 
 #[test]
@@ -2543,10 +2536,6 @@ fn stop_loss_config_lifecycle_defaults_are_sane() {
         "dual_trigger_consecutive_ticks must be positive"
     );
     assert!(
-        config.short_limit_refresh_secs >= 1,
-        "short_limit_refresh_secs must be >= 1"
-    );
-    assert!(
         config.trailing_arm_distance > Decimal::ZERO,
         "trailing_arm_distance must be positive"
     );
@@ -2556,10 +2545,6 @@ fn stop_loss_config_lifecycle_defaults_are_sane() {
         "exit_depth_cap_factor must be in (0, 1]"
     );
     assert!(
-        config.max_exit_retries > 0,
-        "max_exit_retries must be positive"
-    );
-    assert!(
         config.recovery_max_set_cost > Decimal::ZERO,
         "recovery_max_set_cost must be positive"
     );
@@ -2567,14 +2552,6 @@ fn stop_loss_config_lifecycle_defaults_are_sane() {
         config.recovery_max_extra_frac > Decimal::ZERO
             && config.recovery_max_extra_frac < Decimal::ONE,
         "recovery_max_extra_frac must be in (0, 1)"
-    );
-    assert!(
-        config.reentry_confirm_ticks > 0,
-        "reentry_confirm_ticks must be positive"
-    );
-    assert!(
-        config.reentry_cooldown_secs > 0,
-        "reentry_cooldown_secs must be positive"
     );
 }
 
@@ -2593,16 +2570,11 @@ fn stop_loss_config_deserialize_with_lifecycle_fields() {
         sl_min_sources = 3
         sl_max_dispersion_bps = "75"
         dual_trigger_consecutive_ticks = 3
-        short_limit_refresh_secs = 3
-        short_limit_tick_offset = 2
         trailing_arm_distance = "0.020"
         exit_depth_cap_factor = "0.70"
-        max_exit_retries = 8
         recovery_enabled = false
         recovery_max_set_cost = "1.02"
         recovery_max_extra_frac = "0.20"
-        reentry_confirm_ticks = 3
-        reentry_cooldown_secs = 12
     "#;
     let config: super::config::StopLossConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.hard_drop_abs, dec!(0.10));
@@ -2612,16 +2584,11 @@ fn stop_loss_config_deserialize_with_lifecycle_fields() {
     assert_eq!(config.sl_min_sources, 3);
     assert_eq!(config.sl_max_dispersion_bps, dec!(75));
     assert_eq!(config.dual_trigger_consecutive_ticks, 3);
-    assert_eq!(config.short_limit_refresh_secs, 3);
-    assert_eq!(config.short_limit_tick_offset, 2);
     assert_eq!(config.trailing_arm_distance, dec!(0.020));
     assert_eq!(config.exit_depth_cap_factor, dec!(0.70));
-    assert_eq!(config.max_exit_retries, 8);
     assert!(!config.recovery_enabled);
     assert_eq!(config.recovery_max_set_cost, dec!(1.02));
     assert_eq!(config.recovery_max_extra_frac, dec!(0.20));
-    assert_eq!(config.reentry_confirm_ticks, 3);
-    assert_eq!(config.reentry_cooldown_secs, 12);
 }
 
 #[test]
@@ -2643,16 +2610,44 @@ fn stop_loss_config_deserialize_missing_lifecycle_fields_uses_defaults() {
     assert_eq!(config.sl_min_sources, 2);
     assert_eq!(config.sl_max_dispersion_bps, dec!(50));
     assert_eq!(config.dual_trigger_consecutive_ticks, 2);
-    assert_eq!(config.short_limit_refresh_secs, 2);
-    assert_eq!(config.short_limit_tick_offset, 1);
     assert_eq!(config.trailing_arm_distance, dec!(0.015));
     assert_eq!(config.exit_depth_cap_factor, dec!(0.80));
-    assert_eq!(config.max_exit_retries, 5);
     assert!(config.recovery_enabled);
     assert_eq!(config.recovery_max_set_cost, dec!(1.01));
     assert_eq!(config.recovery_max_extra_frac, dec!(0.15));
-    assert_eq!(config.reentry_confirm_ticks, 2);
-    assert_eq!(config.reentry_cooldown_secs, 8);
+}
+
+/// Backward compatibility: old configs with removed params still parse.
+/// These params were removed in fast-exit-v2: short_limit_refresh_secs,
+/// short_limit_tick_offset, max_exit_retries, reentry_confirm_ticks, reentry_cooldown_secs.
+#[test]
+fn stop_loss_config_old_config_with_removed_params_still_parses() {
+    let toml_str = r#"
+        reversal_pct = "0.003"
+        min_drop = "0.05"
+        trailing_enabled = true
+        trailing_distance = "0.05"
+        time_decay = true
+        hard_drop_abs = "0.08"
+        hard_reversal_pct = "0.006"
+        short_limit_refresh_secs = 2
+        short_limit_tick_offset = 1
+        max_exit_retries = 5
+        reentry_confirm_ticks = 2
+        reentry_cooldown_secs = 8
+        exit_depth_cap_factor = "0.80"
+        recovery_enabled = true
+        recovery_max_set_cost = "1.01"
+        recovery_max_extra_frac = "0.15"
+    "#;
+    let config: super::config::StopLossConfig = toml::from_str(toml_str).unwrap();
+    // Verify known fields parsed correctly
+    assert_eq!(config.hard_drop_abs, dec!(0.08));
+    assert_eq!(config.exit_depth_cap_factor, dec!(0.80));
+    assert!(config.recovery_enabled);
+    assert_eq!(config.recovery_max_set_cost, dec!(1.01));
+    assert_eq!(config.recovery_max_extra_frac, dec!(0.15));
+    // Removed fields are silently ignored — no parse error
 }
 
 // ---------------------------------------------------------------------------
@@ -2673,14 +2668,6 @@ fn stop_loss_validate_trailing_min_greater_than_distance_errors() {
     );
 }
 
-#[test]
-fn stop_loss_validate_short_limit_refresh_zero_errors() {
-    let mut config = super::config::StopLossConfig::default();
-    config.short_limit_refresh_secs = 0;
-    let result = config.validate();
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("short_limit_refresh_secs"));
-}
 
 #[test]
 fn sizing_validate_depth_cap_factor_bounds() {
@@ -4145,8 +4132,9 @@ async fn recovery_opposite_alpha_momentum_confirmed() {
         let mut history = base.price_history.write().await;
         let mut entries = VecDeque::new();
         let now = Utc::now();
-        for i in 0..sl_config.reentry_confirm_ticks {
-            let ts = now - Duration::seconds((sl_config.reentry_confirm_ticks - i) as i64);
+        let confirm_ticks = 2usize;
+        for i in 0..confirm_ticks {
+            let ts = now - Duration::seconds((confirm_ticks - i) as i64);
             entries.push_back((ts, dec!(49500), "test".to_string(), ts)); // Below 50000 reference = reversal for Up position
         }
         history.insert("BTC".to_string(), entries);
@@ -4176,7 +4164,7 @@ async fn recovery_opposite_alpha_momentum_confirmed() {
         let all_reversed = entries
             .iter()
             .rev()
-            .take(sl_config.reentry_confirm_ticks)
+            .take(2)
             .all(|(_, price, _, _)| {
                 // For Up position, reversal = price dropped below reference
                 *price < pos.reference_price
@@ -4221,8 +4209,8 @@ async fn recovery_same_side_reentry_blocked_during_cooldown() {
 async fn recovery_same_side_reentry_allowed_after_cooldown() {
     let mut config = ArbitrageConfig::default();
     config.use_chainlink = false;
-    // Set very short cooldown for testing
-    config.stop_loss.reentry_cooldown_secs = 1;
+    // Set very short cooldown for testing (uses stale_market_cooldown_secs)
+    config.stop_loss.stale_market_cooldown_secs = 1;
     let base = Arc::new(CryptoArbBase::new(config, vec![]));
 
     // Set event time to 10 seconds ago

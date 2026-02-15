@@ -132,8 +132,6 @@ pub struct StopLossSweepParams {
     pub trailing_min_distance: Option<ParamRange>,
     /// Max combined cost for opposite-side set completion.
     pub recovery_max_set_cost: Option<ParamRange>,
-    /// Cooldown seconds after recovery before re-entry.
-    pub reentry_cooldown_secs: Option<IntParamRange>,
 }
 
 /// Top-level sweep configuration.

@@ -1004,6 +1004,7 @@ impl TailEndStrategy {
                     token_id = %pos.token_id,
                     trigger = %trigger_kind,
                     book_age_ms,
+                    external_age_ms = external_age_ms.unwrap_or(-1),
                     "Fast-path exit trigger on ExternalPrice"
                 );
 
@@ -3209,7 +3210,7 @@ mod tests {
         );
     }
 
-    /// GTC refresh cycle: a GTC exit order that's older than short_limit_refresh_secs
+    /// GTC refresh cycle: a GTC exit order that's older than gtc_stop_loss_max_age_secs
     /// gets cancelled and re-placed at the current bid.
     #[tokio::test]
     async fn lifecycle_gtc_refresh_cancels_stale_order() {
@@ -3220,8 +3221,6 @@ mod tests {
         config.tailend.max_recent_volatility = dec!(1.0);
         config.stop_loss.min_remaining_secs = 0;
         config.stop_loss.exit_depth_cap_factor = dec!(0.80);
-        config.stop_loss.short_limit_refresh_secs = 2;
-        config.stop_loss.short_limit_tick_offset = 1;
 
         let base = Arc::new(CryptoArbBase::new(config, vec![]));
         let now = Utc::now();
@@ -3406,7 +3405,6 @@ mod tests {
         config.tailend.max_recent_volatility = dec!(1.0);
         config.stop_loss.min_remaining_secs = 0;
         config.stop_loss.exit_depth_cap_factor = dec!(0.80);
-        config.stop_loss.reentry_cooldown_secs = 8;
 
         let base = Arc::new(CryptoArbBase::new(config, vec![]));
         let now = Utc::now();

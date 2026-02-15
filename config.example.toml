@@ -103,6 +103,10 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # max_source_stale_secs = 10      # Max age per source in seconds (default 10)
 # min_sources = 2                 # Minimum fresh sources required (default 2)
 # max_dispersion_bps = 50         # Max allowed source disagreement in bps (default 50)
+#
+# Fast-path exit — evaluate exit triggers on ExternalPrice events using cached orderbook
+# fast_path_enabled = true         # Frontrun stale CLOB bids by 50-200ms (default true)
+# fast_path_max_book_age_ms = 2000 # Max cached orderbook age for fast-path (ms, default 2000)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fee Model
@@ -146,7 +150,7 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # Stop-Loss (Dual-Trigger + Trailing + Lifecycle)
 # ─────────────────────────────────────────────────────────────────────────────
 # Dual-trigger: crypto reversal AND market drop required to exit
-# Lifecycle state machine: Healthy → DeferredExit → ExitExecuting → ResidualRisk → RecoveryProbe → Cooldown
+# Lifecycle state machine: Healthy → ExitExecuting → Hedged | (resolved)
 
 # [arbitrage.stop_loss]
 # reversal_pct = 0.003        # 0.3% crypto price reversal threshold
@@ -174,23 +178,16 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # Hysteresis — dual trigger must hold for N consecutive ticks
 # dual_trigger_consecutive_ticks = 2
 #
-# Short-lived limit orders — 2s cancel/replace cadence for GTC exits
-# short_limit_refresh_secs = 2  # Refresh GTC exit orders every N seconds
-# short_limit_tick_offset = 1   # Ticks below bid for short-lived GTC exits
-#
 # Trailing arming — distance from entry to arm trailing stop
 # trailing_arm_distance = 0.015  # Capped by headroom: min(this, price_cap - entry)
 #
-# Execution ladder — depth-capped clip sizing + retry budget
+# Execution ladder — FAK exit with GTC residual
 # exit_depth_cap_factor = 0.80  # Cap exit clip to N% of bid depth
-# max_exit_retries = 5          # Max retries before escalating to recovery
 #
-# Recovery — opposite-side set completion + re-entry after failed exits
-# recovery_enabled = true       # Enable recovery logic
+# Recovery — proactive hedge (simultaneous opposite-side buy)
+# recovery_enabled = true       # Enable recovery logic (hedge on exit)
 # recovery_max_set_cost = 1.01  # Max combined cost for set completion (entry + other ask)
 # recovery_max_extra_frac = 0.15 # Max extra risk fraction for alpha trades (15%)
-# reentry_confirm_ticks = 2    # Consecutive confirming ticks before re-entry
-# reentry_cooldown_secs = 8    # Cooldown after recovery before re-entry allowed
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Performance Tracking & Auto-Disable
@@ -342,7 +339,6 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # trailing_distance = ["0.03", "0.05", "0.07"]
 # trailing_arm_distance = ["0.010", "0.015", "0.020"]
 # recovery_max_set_cost = ["1.00", "1.01", "1.02"]
-# reentry_cooldown_secs = [4, 8, 12]
 #
 # [backtest.sweep.tailend]
 # post_entry_exit_drop = ["0.03", "0.05", "0.07"]

@@ -1871,10 +1871,11 @@ impl CryptoArbBase {
     }
 
     /// Record a recovery exit cooldown to prevent same-side re-entry too quickly.
+    /// Uses `stale_market_cooldown_secs` as the cooldown duration (market-level cooldown).
     pub async fn record_recovery_exit_cooldown(&self, market_id: &MarketId) {
         let now = self.event_time().await;
-        let expires_at =
-            now + chrono::Duration::seconds(self.config.stop_loss.reentry_cooldown_secs);
+        let expires_at = now
+            + chrono::Duration::seconds(self.config.stop_loss.stale_market_cooldown_secs as i64);
         let mut cooldowns = self.recovery_exit_cooldowns.write().await;
         cooldowns.insert(market_id.clone(), expires_at);
     }

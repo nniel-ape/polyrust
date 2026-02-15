@@ -143,11 +143,6 @@ impl ParameterCombination {
                         config.stop_loss.recovery_max_set_cost = *v;
                     }
                 }
-                "stop_loss.reentry_cooldown_secs" => {
-                    if let ParamValue::U64(v) = value {
-                        config.stop_loss.reentry_cooldown_secs = *v as i64;
-                    }
-                }
                 // TailEnd post-entry params
                 "tailend.post_entry_exit_drop" => {
                     if let ParamValue::Decimal(v) = value {
@@ -451,13 +446,6 @@ impl ParameterGrid {
                     .collect(),
             });
         }
-        if let Some(ref range) = config.stop_loss.reentry_cooldown_secs {
-            axes.push(Axis {
-                name: "stop_loss.reentry_cooldown_secs".to_string(),
-                values: range.expand().into_iter().map(ParamValue::U64).collect(),
-            });
-        }
-
         Self { axes }
     }
 
@@ -722,10 +710,6 @@ mod tests {
                     ParamValue::Decimal(dec!(1.02)),
                 ),
                 (
-                    "stop_loss.reentry_cooldown_secs".to_string(),
-                    ParamValue::U64(12),
-                ),
-                (
                     "tailend.min_sell_delay_secs".to_string(),
                     ParamValue::U64(8),
                 ),
@@ -741,7 +725,6 @@ mod tests {
         assert_eq!(config.stop_loss.trailing_arm_distance, dec!(0.020));
         assert_eq!(config.stop_loss.trailing_min_distance, dec!(0.012));
         assert_eq!(config.stop_loss.recovery_max_set_cost, dec!(1.02));
-        assert_eq!(config.stop_loss.reentry_cooldown_secs, 12);
         assert_eq!(config.tailend.min_sell_delay_secs, 8);
     }
 
@@ -787,7 +770,6 @@ mod tests {
             trailing_arm_distance = ["0.010", "0.015"]
             trailing_min_distance = ["0.010", "0.020"]
             recovery_max_set_cost = ["1.00", "1.01"]
-            reentry_cooldown_secs = [4, 8, 12]
 
             [tailend]
             min_sell_delay_secs = [8, 10, 12]
@@ -814,16 +796,6 @@ mod tests {
         assert!(config.stop_loss.trailing_arm_distance.is_some());
         assert!(config.stop_loss.trailing_min_distance.is_some());
         assert!(config.stop_loss.recovery_max_set_cost.is_some());
-        assert!(config.stop_loss.reentry_cooldown_secs.is_some());
-        assert_eq!(
-            config
-                .stop_loss
-                .reentry_cooldown_secs
-                .unwrap()
-                .expand()
-                .len(),
-            3
-        );
         assert!(config.tailend.min_sell_delay_secs.is_some());
         assert_eq!(
             config.tailend.min_sell_delay_secs.unwrap().expand(),
