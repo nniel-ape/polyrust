@@ -112,6 +112,16 @@ pub struct TailEndConfig {
     /// Rejects entries when crypto price is too close to strike (high flip risk).
     /// Default: 0.0008 (0.08% ≈ $1.60 at $2000 ETH).
     pub min_strike_distance_pct: Decimal,
+
+    // ── Fast-path exit on ExternalPrice events ──────────────────────────
+    /// Enable exit trigger evaluation on ExternalPrice events using cached
+    /// orderbook snapshots. Frontrunning stale CLOB bids by 50-200ms.
+    /// Default: true.
+    pub fast_path_enabled: bool,
+    /// Maximum age in milliseconds for a cached orderbook snapshot to be
+    /// considered fresh enough for fast-path exit evaluation.
+    /// Default: 2000 (2 seconds).
+    pub fast_path_max_book_age_ms: i64,
 }
 
 fn default_min_sustained_ticks() -> usize {
@@ -150,6 +160,8 @@ impl Default for TailEndConfig {
             feed_stale_secs: 30,
             min_sell_delay_secs: 10,
             min_strike_distance_pct: Decimal::new(5, 3), // 0.005 = 0.5%
+            fast_path_enabled: true,
+            fast_path_max_book_age_ms: 2000,
         }
     }
 }

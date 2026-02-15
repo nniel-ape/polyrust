@@ -583,6 +583,11 @@ impl TailEndStrategy {
         // always has a recent composite without needing StrategyContext.
         self.base.update_sl_composite_cache(symbol, ctx).await;
 
+        // Fast-path exit evaluation: check stop-loss triggers using cached
+        // orderbook snapshots BEFORE entry evaluation (risk first, then entries).
+        let exit_actions = self.evaluate_exits_on_price_change(symbol, ctx).await;
+        result.extend(exit_actions);
+
         // Fast pre-filter: skip coins where no market is near expiration.
         // This avoids acquiring active_markets lock + iterating for 99%+ of events.
         // Runs BEFORE composite price check since it's a cheap HashMap lookup that
@@ -834,6 +839,230 @@ impl TailEndStrategy {
         }
 
         result
+    }
+
+    /// Evaluate exit triggers on ExternalPrice events using cached orderbook
+    /// snapshots. This "fast path" frontrunning gives 50-200ms advantage over
+    /// waiting for the next OrderbookUpdate event.
+    ///
+    /// Only evaluates positions in `Healthy` state. Skips if:
+    /// - `fast_path_enabled` is false
+    /// - No cached orderbook snapshot exists for the position's token
+    /// - Cached snapshot is older than `fast_path_max_book_age_ms`
+    async fn evaluate_exits_on_price_change(
+        &self,
+        coin: &str,
+        ctx: &StrategyContext,
+    ) -> Vec<Action> {
+        if !self.base.config.tailend.fast_path_enabled {
+            return vec![];
+        }
+
+        let now = ctx.now().await;
+        let sl_config = &self.base.config.stop_loss;
+        let tailend_config = &self.base.config.tailend;
+        let max_book_age_ms = tailend_config.fast_path_max_book_age_ms;
+
+        // Gather positions for this coin
+        let position_snapshot: Vec<(MarketId, ArbitragePosition)> = {
+            let positions = self.base.positions.read().await;
+            positions
+                .iter()
+                .flat_map(|(mid, plist)| plist.iter().map(|p| (mid.clone(), p.clone())))
+                .filter(|(_, p)| p.coin == coin)
+                .collect()
+        };
+
+        if position_snapshot.is_empty() {
+            return vec![];
+        }
+
+        let mut actions = Vec::new();
+
+        for (_, pos) in position_snapshot {
+            let mut lifecycle = self.base.ensure_lifecycle(&pos.token_id).await;
+
+            // Only evaluate Healthy positions — skip anything already exiting
+            if !matches!(lifecycle.state, PositionLifecycleState::Healthy) {
+                continue;
+            }
+
+            // Get cached orderbook snapshot for this token
+            let (snapshot, book_age_ms) = {
+                let md = ctx.market_data.read().await;
+                match md.orderbooks.get(&pos.token_id) {
+                    Some(ob) => {
+                        let age = now
+                            .signed_duration_since(ob.timestamp)
+                            .num_milliseconds();
+                        (ob.clone(), age)
+                    }
+                    None => continue,
+                }
+            };
+
+            // Check book freshness against fast-path threshold
+            if book_age_ms > max_book_age_ms {
+                debug!(
+                    token_id = %pos.token_id,
+                    book_age_ms,
+                    max_book_age_ms,
+                    "Fast-path skip: cached orderbook too stale"
+                );
+                continue;
+            }
+
+            let current_bid = match snapshot.best_bid() {
+                Some(b) => b,
+                None => continue,
+            };
+
+            // Get market metadata
+            let (time_remaining, neg_risk, min_order_size) = {
+                let markets = self.base.active_markets.read().await;
+                match markets.get(&pos.market_id) {
+                    Some(m) => (
+                        m.market.seconds_remaining_at(now),
+                        m.market.neg_risk,
+                        m.market.min_order_size,
+                    ),
+                    None => continue,
+                }
+            };
+
+            // Skip if time remaining is below threshold
+            if time_remaining <= sl_config.min_remaining_secs {
+                continue;
+            }
+
+            // Skip dust positions
+            if pos.size < min_order_size {
+                continue;
+            }
+
+            // Get composite/external price from SL cache
+            let (external_price, external_age_ms, composite_sources) = {
+                let cache = self.base.sl_composite_cache.read().await;
+                if let Some((composite, cached_at)) = cache.get(&pos.coin) {
+                    let age = now.signed_duration_since(*cached_at).num_milliseconds();
+                    if age <= sl_config.sl_max_external_age_ms * 2 {
+                        (
+                            Some(composite.price),
+                            Some(age),
+                            Some(composite.sources_used),
+                        )
+                    } else {
+                        drop(cache);
+                        if let Some(single) = self
+                            .base
+                            .get_sl_single_fresh(
+                                &pos.coin,
+                                sl_config.sl_max_external_age_ms * 2,
+                                now,
+                            )
+                            .await
+                        {
+                            let history = self.base.price_history.read().await;
+                            let age = history
+                                .get(&pos.coin)
+                                .and_then(|h| h.back())
+                                .map(|(ts, _, _)| {
+                                    now.signed_duration_since(*ts).num_milliseconds()
+                                })
+                                .unwrap_or(sl_config.sl_max_external_age_ms * 3);
+                            (Some(single), Some(age), None)
+                        } else {
+                            (None, None, None)
+                        }
+                    }
+                } else {
+                    drop(cache);
+                    if let Some(single) = self
+                        .base
+                        .get_sl_single_fresh(
+                            &pos.coin,
+                            sl_config.sl_max_external_age_ms * 2,
+                            now,
+                        )
+                        .await
+                    {
+                        let history = self.base.price_history.read().await;
+                        let age = history
+                            .get(&pos.coin)
+                            .and_then(|h| h.back())
+                            .map(|(ts, _, _)| {
+                                now.signed_duration_since(*ts).num_milliseconds()
+                            })
+                            .unwrap_or(sl_config.sl_max_external_age_ms * 3);
+                        (Some(single), Some(age), None)
+                    } else {
+                        (None, None, None)
+                    }
+                }
+            };
+
+            let trigger_ctx = TriggerEvalContext {
+                entry_price: pos.entry_price,
+                peak_bid: pos.peak_bid,
+                side: pos.side,
+                reference_price: pos.reference_price,
+                tick_size: pos.tick_size,
+                entry_time: pos.entry_time,
+                current_bid,
+                book_age_ms,
+                external_price,
+                external_age_ms,
+                composite_sources,
+                time_remaining,
+                now,
+            };
+
+            let trigger = lifecycle.evaluate_triggers(&trigger_ctx, sl_config, tailend_config);
+
+            if let Some(trigger_kind) = trigger {
+                let seconds_since_entry =
+                    now.signed_duration_since(pos.entry_time).num_seconds();
+                let is_sellable = seconds_since_entry >= tailend_config.min_sell_delay_secs;
+
+                // Non-sellable positions can only exit on hard crash (bypass sell delay)
+                if !is_sellable
+                    && !matches!(trigger_kind, StopLossTriggerKind::HardCrash { .. })
+                {
+                    self.write_lifecycle(&pos.token_id, &lifecycle).await;
+                    continue;
+                }
+
+                info!(
+                    token_id = %pos.token_id,
+                    trigger = %trigger_kind,
+                    book_age_ms,
+                    "Fast-path exit trigger on ExternalPrice"
+                );
+
+                if let Some(action) = self
+                    .build_exit_order(
+                        &pos,
+                        current_bid,
+                        &snapshot,
+                        neg_risk,
+                        min_order_size,
+                        &trigger_kind,
+                        &mut lifecycle,
+                        now,
+                    )
+                    .await
+                {
+                    self.write_lifecycle(&pos.token_id, &lifecycle).await;
+                    actions.push(action);
+                    continue;
+                }
+            }
+
+            // Write back lifecycle (updated dual_trigger_ticks, etc.)
+            self.write_lifecycle(&pos.token_id, &lifecycle).await;
+        }
+
+        actions
     }
 
     /// Handle an orderbook update: update cached asks, peak bids, evaluate
@@ -4761,6 +4990,208 @@ mod tests {
         assert!(
             !has_token,
             "exit_orders_by_id should be cleaned up after rejection"
+        );
+    }
+
+    // ── Fast-path exit tests ─────────────────────────────────────────────
+
+    /// Helper: create a TailEndStrategy with a position that has a hard crash
+    /// scenario (bid drops 10 cents below entry) and an external price reversal.
+    /// Returns (strategy, ctx, base) ready for fast-path exit testing.
+    async fn make_fast_path_test_setup(
+        fast_path_enabled: bool,
+        book_age_secs: i64,
+    ) -> (TailEndStrategy, StrategyContext) {
+        let now = Utc::now();
+        let mut config = ArbitrageConfig::default();
+        config.use_chainlink = false;
+        config.enabled = true;
+        config.tailend.fast_path_enabled = fast_path_enabled;
+        config.tailend.fast_path_max_book_age_ms = 2000;
+        config.tailend.min_sell_delay_secs = 10;
+        config.stop_loss.hard_drop_abs = dec!(0.08); // 8 cent drop triggers hard crash
+        config.stop_loss.hard_reversal_pct = dec!(0.006); // 0.6% reversal triggers hard crash
+        config.stop_loss.sl_max_book_age_ms = 3000; // Trigger eval needs fresh book too
+        config.stop_loss.sl_max_external_age_ms = 5000;
+        config.stop_loss.min_remaining_secs = 10;
+
+        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+
+        // Insert active market expiring in 60 seconds
+        let market = MarketWithReference {
+            market: make_market_info("market1", now + Duration::seconds(60)),
+            reference_price: dec!(50000),
+            reference_quality: ReferenceQuality::Exact,
+            discovery_time: now,
+            coin: "BTC".to_string(),
+            window_ts: 0,
+        };
+        base.active_markets
+            .write()
+            .await
+            .insert("market1".to_string(), market);
+
+        // Insert position: entered at 0.92, 20 seconds ago (past sell delay)
+        let pos = ArbitragePosition {
+            market_id: "market1".to_string(),
+            token_id: "token_up".to_string(),
+            side: OutcomeSide::Up,
+            entry_price: dec!(0.92),
+            size: dec!(10),
+            reference_price: dec!(50000),
+            coin: "BTC".to_string(),
+            order_id: None,
+            entry_time: now - Duration::seconds(20),
+            kelly_fraction: None,
+            peak_bid: dec!(0.92),
+            estimated_fee: Decimal::ZERO,
+            entry_market_price: dec!(0.92),
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+            entry_order_type: OrderType::Gtc,
+            entry_fee_per_share: Decimal::ZERO,
+            recovery_cost: Decimal::ZERO,
+        };
+        base.record_position(pos).await;
+
+        // Update SL composite cache with a reversed external price (BTC dropped below reference)
+        // This satisfies the hard crash reversal check: (50000 - 49500) / 50000 = 0.01 > 0.006
+        {
+            let composite = crate::crypto_arb::base::CompositePriceResult {
+                price: dec!(49500),
+                sources_used: 2,
+                max_lag_ms: 100,
+                dispersion_bps: dec!(10),
+            };
+            let mut cache = base.sl_composite_cache.write().await;
+            cache.insert("BTC".to_string(), (composite, now));
+        }
+
+        // Also populate price history for get_sl_single_fresh fallback
+        {
+            use std::collections::VecDeque;
+            let mut history = base.price_history.write().await;
+            let mut entries = VecDeque::new();
+            entries.push_back((now - Duration::seconds(1), dec!(49500), "test".to_string()));
+            history.insert("BTC".to_string(), entries);
+        }
+
+        let ctx = StrategyContext::new();
+
+        // Set up orderbook snapshot in StrategyContext (cached from previous OrderbookUpdate)
+        // Bid at 0.83 = 9 cent drop from entry (0.92), exceeding hard_drop_abs (0.08)
+        {
+            let mut md = ctx.market_data.write().await;
+            md.orderbooks.insert(
+                "token_up".to_string(),
+                polyrust_core::types::OrderbookSnapshot {
+                    token_id: "token_up".to_string(),
+                    bids: vec![polyrust_core::types::OrderbookLevel {
+                        price: dec!(0.83),
+                        size: dec!(50),
+                    }],
+                    asks: vec![polyrust_core::types::OrderbookLevel {
+                        price: dec!(0.85),
+                        size: dec!(50),
+                    }],
+                    timestamp: now - Duration::seconds(book_age_secs),
+                },
+            );
+        }
+
+        let strategy = TailEndStrategy::new(base);
+        (strategy, ctx)
+    }
+
+    #[tokio::test]
+    async fn fast_path_triggers_exit_with_fresh_book() {
+        let (strategy, ctx) = make_fast_path_test_setup(true, 1).await;
+
+        // Call evaluate_exits_on_price_change directly
+        let actions = strategy.evaluate_exits_on_price_change("BTC", &ctx).await;
+
+        // Should produce an exit PlaceOrder action (hard crash trigger)
+        assert!(
+            actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))),
+            "Fast-path should trigger exit order with fresh book and hard crash conditions"
+        );
+
+        // Lifecycle should be in ExitExecuting
+        let lifecycles = strategy.base.position_lifecycle.read().await;
+        let lc = lifecycles.get("token_up").expect("Lifecycle should exist");
+        assert!(
+            matches!(lc.state, PositionLifecycleState::ExitExecuting { .. }),
+            "Lifecycle should be ExitExecuting after fast-path exit, got: {:?}",
+            lc.state
+        );
+    }
+
+    #[tokio::test]
+    async fn fast_path_skips_stale_book() {
+        // Book is 5 seconds old, max age is 2 seconds
+        let (strategy, ctx) = make_fast_path_test_setup(true, 5).await;
+
+        let actions = strategy.evaluate_exits_on_price_change("BTC", &ctx).await;
+
+        // Should NOT produce any exit actions — book too stale
+        assert!(
+            actions.is_empty(),
+            "Fast-path should skip exit when book snapshot is stale"
+        );
+
+        // Lifecycle should still be Healthy
+        let lifecycles = strategy.base.position_lifecycle.read().await;
+        let lc = lifecycles.get("token_up").expect("Lifecycle should exist");
+        assert!(
+            matches!(lc.state, PositionLifecycleState::Healthy),
+            "Lifecycle should remain Healthy when book is stale, got: {:?}",
+            lc.state
+        );
+    }
+
+    #[tokio::test]
+    async fn fast_path_skips_exit_executing_positions() {
+        let (strategy, ctx) = make_fast_path_test_setup(true, 1).await;
+
+        // Manually transition lifecycle to ExitExecuting (simulate already exiting)
+        {
+            let now = Utc::now();
+            let mut lifecycle = strategy.base.ensure_lifecycle("token_up").await;
+            lifecycle
+                .transition(
+                    PositionLifecycleState::ExitExecuting {
+                        order_id: "existing-exit-123".to_string(),
+                        order_type: OrderType::Fok,
+                        exit_price: dec!(0.85),
+                        submitted_at: now,
+                    },
+                    "test pre-existing exit",
+                    now,
+                )
+                .unwrap();
+            let mut lifecycles = strategy.base.position_lifecycle.write().await;
+            lifecycles.insert("token_up".to_string(), lifecycle);
+        }
+
+        let actions = strategy.evaluate_exits_on_price_change("BTC", &ctx).await;
+
+        // Should NOT produce any new exit actions — position already exiting
+        assert!(
+            actions.is_empty(),
+            "Fast-path should skip positions in ExitExecuting state"
+        );
+    }
+
+    #[tokio::test]
+    async fn fast_path_disabled_produces_no_exits() {
+        let (strategy, ctx) = make_fast_path_test_setup(false, 1).await;
+
+        let actions = strategy.evaluate_exits_on_price_change("BTC", &ctx).await;
+
+        // Should NOT produce any exit actions — fast path disabled
+        assert!(
+            actions.is_empty(),
+            "Fast-path should produce no exits when disabled"
         );
     }
 }
