@@ -42,14 +42,14 @@ impl Default for DutchBookConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            max_combined_cost: Decimal::new(99, 2),       // 0.99
-            min_profit_threshold: Decimal::new(5, 3),     // 0.005
-            max_position_size: Decimal::new(100, 0),      // 100 USDC
-            min_liquidity_usd: Decimal::new(10000, 0),    // 10,000 USD
+            max_combined_cost: Decimal::new(99, 2),    // 0.99
+            min_profit_threshold: Decimal::new(5, 3),  // 0.005
+            max_position_size: Decimal::new(100, 0),   // 100 USDC
+            min_liquidity_usd: Decimal::new(10000, 0), // 10,000 USD
             max_days_until_resolution: 7,
             scan_interval_secs: 600,
             max_concurrent_positions: 10,
-            unwind_discount: Decimal::new(3, 2),          // 0.03
+            unwind_discount: Decimal::new(3, 2), // 0.03
         }
     }
 }

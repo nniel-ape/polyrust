@@ -14,8 +14,8 @@ use super::dashboard::DutchBookDashboard;
 use super::scanner::{GammaMarketResponse, GammaScanner};
 use super::strategy::DutchBookStrategy;
 use super::types::{
-    ArbitrageOpportunity, DutchBookState, ExecutionState, FilledSide, MarketEntry,
-    PairedOrder, PairedPosition,
+    ArbitrageOpportunity, DutchBookState, ExecutionState, FilledSide, MarketEntry, PairedOrder,
+    PairedPosition,
 };
 
 // ---------------------------------------------------------------------------
@@ -374,17 +374,14 @@ fn paired_position_profit_calculation() {
         yes_entry_price: dec!(0.40),
         no_entry_price: dec!(0.40),
         size: dec!(100),
-        combined_cost: dec!(83),  // approximate including fees
+        combined_cost: dec!(83),   // approximate including fees
         expected_profit: dec!(17), // 100 - 83 = 17 USDC
         opened_at: now,
     };
 
     assert_eq!(pos.combined_cost, dec!(83));
     assert_eq!(pos.expected_profit, dec!(17));
-    assert_eq!(
-        pos.yes_entry_price + pos.no_entry_price,
-        dec!(0.80)
-    );
+    assert_eq!(pos.yes_entry_price + pos.no_entry_price, dec!(0.80));
 }
 
 // ---------------------------------------------------------------------------
@@ -748,7 +745,10 @@ fn analyzer_add_market_registers_both_tokens() {
     assert_eq!(analyzer.tracked_count(), 1);
     assert!(analyzer.market_for_token("tok_yes").is_some());
     assert!(analyzer.market_for_token("tok_no").is_some());
-    assert_eq!(analyzer.market_for_token("tok_yes").unwrap().market_id, "m1");
+    assert_eq!(
+        analyzer.market_for_token("tok_yes").unwrap().market_id,
+        "m1"
+    );
     assert_eq!(analyzer.market_for_token("tok_no").unwrap().market_id, "m1");
 }
 
@@ -802,8 +802,14 @@ fn analyzer_detects_opportunity_when_combined_ask_below_threshold() {
 
     let mut orderbooks = HashMap::new();
     // Use wide spread: combined = 0.80, fees ≈ 0.03, net ≈ 0.83 → profitable
-    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.40), dec!(200)));
-    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.40), dec!(150)));
+    orderbooks.insert(
+        "tok_yes".to_string(),
+        make_orderbook("tok_yes", dec!(0.40), dec!(200)),
+    );
+    orderbooks.insert(
+        "tok_no".to_string(),
+        make_orderbook("tok_no", dec!(0.40), dec!(150)),
+    );
 
     let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
     assert!(opp.is_some());
@@ -833,11 +839,19 @@ fn analyzer_profit_pct_calculation_accuracy() {
     };
 
     let mut orderbooks = HashMap::new();
-    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.45), dec!(500)));
-    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.50), dec!(500)));
+    orderbooks.insert(
+        "tok_yes".to_string(),
+        make_orderbook("tok_yes", dec!(0.45), dec!(500)),
+    );
+    orderbooks.insert(
+        "tok_no".to_string(),
+        make_orderbook("tok_no", dec!(0.50), dec!(500)),
+    );
 
     // combined_cost = 0.95 (gross, before fees)
-    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config).unwrap();
+    let opp = analyzer
+        .check_arbitrage("tok_yes", &orderbooks, &config)
+        .unwrap();
     assert_eq!(opp.combined_cost, dec!(0.95));
 
     // Verify profit_pct is net of fees:
@@ -863,8 +877,14 @@ fn analyzer_no_opportunity_when_combined_at_threshold() {
 
     let mut orderbooks = HashMap::new();
     // combined = 0.99 — exactly at threshold, should be rejected (>= check)
-    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.50), dec!(100)));
-    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.49), dec!(100)));
+    orderbooks.insert(
+        "tok_yes".to_string(),
+        make_orderbook("tok_yes", dec!(0.50), dec!(100)),
+    );
+    orderbooks.insert(
+        "tok_no".to_string(),
+        make_orderbook("tok_no", dec!(0.49), dec!(100)),
+    );
 
     let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
     assert!(opp.is_none());
@@ -880,8 +900,14 @@ fn analyzer_no_opportunity_when_combined_above_threshold() {
 
     let mut orderbooks = HashMap::new();
     // combined = 1.01 — above $1, definitely no opportunity
-    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.52), dec!(100)));
-    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.49), dec!(100)));
+    orderbooks.insert(
+        "tok_yes".to_string(),
+        make_orderbook("tok_yes", dec!(0.52), dec!(100)),
+    );
+    orderbooks.insert(
+        "tok_no".to_string(),
+        make_orderbook("tok_no", dec!(0.49), dec!(100)),
+    );
 
     let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
     assert!(opp.is_none());
@@ -894,15 +920,21 @@ fn analyzer_no_opportunity_when_profit_below_threshold() {
     analyzer.add_market(&market);
 
     let config = DutchBookConfig {
-        max_combined_cost: dec!(0.999), // very permissive
+        max_combined_cost: dec!(0.999),   // very permissive
         min_profit_threshold: dec!(0.10), // require 10% net profit
         ..DutchBookConfig::default()
     };
 
     let mut orderbooks = HashMap::new();
     // combined = 0.90, fees ≈ 0.031, net ≈ 0.931, net_profit ≈ 7.4% — below 10% threshold
-    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.45), dec!(100)));
-    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.45), dec!(100)));
+    orderbooks.insert(
+        "tok_yes".to_string(),
+        make_orderbook("tok_yes", dec!(0.45), dec!(100)),
+    );
+    orderbooks.insert(
+        "tok_no".to_string(),
+        make_orderbook("tok_no", dec!(0.45), dec!(100)),
+    );
 
     let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
     assert!(opp.is_none());
@@ -918,7 +950,10 @@ fn analyzer_no_opportunity_when_yes_side_has_no_asks() {
 
     let mut orderbooks = HashMap::new();
     orderbooks.insert("tok_yes".to_string(), make_empty_orderbook("tok_yes"));
-    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.49), dec!(100)));
+    orderbooks.insert(
+        "tok_no".to_string(),
+        make_orderbook("tok_no", dec!(0.49), dec!(100)),
+    );
 
     let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
     assert!(opp.is_none());
@@ -933,7 +968,10 @@ fn analyzer_no_opportunity_when_no_side_has_no_asks() {
     let config = DutchBookConfig::default();
 
     let mut orderbooks = HashMap::new();
-    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.40), dec!(100)));
+    orderbooks.insert(
+        "tok_yes".to_string(),
+        make_orderbook("tok_yes", dec!(0.40), dec!(100)),
+    );
     orderbooks.insert("tok_no".to_string(), make_empty_orderbook("tok_no"));
 
     let opp = analyzer.check_arbitrage("tok_no", &orderbooks, &config);
@@ -976,7 +1014,10 @@ fn analyzer_returns_none_when_only_one_orderbook_present() {
 
     // Only YES side has an orderbook
     let mut orderbooks = HashMap::new();
-    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.40), dec!(100)));
+    orderbooks.insert(
+        "tok_yes".to_string(),
+        make_orderbook("tok_yes", dec!(0.40), dec!(100)),
+    );
 
     let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
     assert!(opp.is_none());
@@ -998,10 +1039,18 @@ fn analyzer_size_limited_by_yes_liquidity() {
     };
 
     let mut orderbooks = HashMap::new();
-    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.45), dec!(30))); // small YES liquidity
-    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.45), dec!(500)));
+    orderbooks.insert(
+        "tok_yes".to_string(),
+        make_orderbook("tok_yes", dec!(0.45), dec!(30)),
+    ); // small YES liquidity
+    orderbooks.insert(
+        "tok_no".to_string(),
+        make_orderbook("tok_no", dec!(0.45), dec!(500)),
+    );
 
-    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config).unwrap();
+    let opp = analyzer
+        .check_arbitrage("tok_yes", &orderbooks, &config)
+        .unwrap();
     assert_eq!(opp.max_size, dec!(30)); // limited by YES side
 }
 
@@ -1017,10 +1066,18 @@ fn analyzer_size_limited_by_no_liquidity() {
     };
 
     let mut orderbooks = HashMap::new();
-    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.45), dec!(500)));
-    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.45), dec!(25))); // small NO liquidity
+    orderbooks.insert(
+        "tok_yes".to_string(),
+        make_orderbook("tok_yes", dec!(0.45), dec!(500)),
+    );
+    orderbooks.insert(
+        "tok_no".to_string(),
+        make_orderbook("tok_no", dec!(0.45), dec!(25)),
+    ); // small NO liquidity
 
-    let opp = analyzer.check_arbitrage("tok_no", &orderbooks, &config).unwrap();
+    let opp = analyzer
+        .check_arbitrage("tok_no", &orderbooks, &config)
+        .unwrap();
     assert_eq!(opp.max_size, dec!(25)); // limited by NO side
 }
 
@@ -1036,10 +1093,18 @@ fn analyzer_size_limited_by_config_max_position_size() {
     };
 
     let mut orderbooks = HashMap::new();
-    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.45), dec!(500)));
-    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.45), dec!(500)));
+    orderbooks.insert(
+        "tok_yes".to_string(),
+        make_orderbook("tok_yes", dec!(0.45), dec!(500)),
+    );
+    orderbooks.insert(
+        "tok_no".to_string(),
+        make_orderbook("tok_no", dec!(0.45), dec!(500)),
+    );
 
-    let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config).unwrap();
+    let opp = analyzer
+        .check_arbitrage("tok_yes", &orderbooks, &config)
+        .unwrap();
     assert_eq!(opp.max_size, dec!(50)); // limited by config
 }
 
@@ -1052,8 +1117,14 @@ fn analyzer_triggered_from_either_token_side() {
     let config = DutchBookConfig::default();
 
     let mut orderbooks = HashMap::new();
-    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.40), dec!(200)));
-    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.40), dec!(150)));
+    orderbooks.insert(
+        "tok_yes".to_string(),
+        make_orderbook("tok_yes", dec!(0.40), dec!(200)),
+    );
+    orderbooks.insert(
+        "tok_no".to_string(),
+        make_orderbook("tok_no", dec!(0.40), dec!(150)),
+    );
 
     // Trigger from YES side
     let opp_a = analyzer.check_arbitrage("tok_yes", &orderbooks, &config);
@@ -1082,14 +1153,34 @@ fn analyzer_multiple_markets_independent() {
 
     let mut orderbooks = HashMap::new();
     // m1: opportunity (combined = 0.80, net ≈ 0.83)
-    orderbooks.insert("t1a".to_string(), make_orderbook("t1a", dec!(0.40), dec!(100)));
-    orderbooks.insert("t1b".to_string(), make_orderbook("t1b", dec!(0.40), dec!(100)));
+    orderbooks.insert(
+        "t1a".to_string(),
+        make_orderbook("t1a", dec!(0.40), dec!(100)),
+    );
+    orderbooks.insert(
+        "t1b".to_string(),
+        make_orderbook("t1b", dec!(0.40), dec!(100)),
+    );
     // m2: no opportunity (combined = 1.01)
-    orderbooks.insert("t2a".to_string(), make_orderbook("t2a", dec!(0.52), dec!(100)));
-    orderbooks.insert("t2b".to_string(), make_orderbook("t2b", dec!(0.49), dec!(100)));
+    orderbooks.insert(
+        "t2a".to_string(),
+        make_orderbook("t2a", dec!(0.52), dec!(100)),
+    );
+    orderbooks.insert(
+        "t2b".to_string(),
+        make_orderbook("t2b", dec!(0.49), dec!(100)),
+    );
 
-    assert!(analyzer.check_arbitrage("t1a", &orderbooks, &config).is_some());
-    assert!(analyzer.check_arbitrage("t2a", &orderbooks, &config).is_none());
+    assert!(
+        analyzer
+            .check_arbitrage("t1a", &orderbooks, &config)
+            .is_some()
+    );
+    assert!(
+        analyzer
+            .check_arbitrage("t2a", &orderbooks, &config)
+            .is_none()
+    );
 }
 
 #[test]
@@ -1118,8 +1209,14 @@ fn analyzer_exact_profit_threshold_boundary() {
     };
 
     let mut orderbooks = HashMap::new();
-    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.40), dec!(100)));
-    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.40), dec!(100)));
+    orderbooks.insert(
+        "tok_yes".to_string(),
+        make_orderbook("tok_yes", dec!(0.40), dec!(100)),
+    );
+    orderbooks.insert(
+        "tok_no".to_string(),
+        make_orderbook("tok_no", dec!(0.40), dec!(100)),
+    );
 
     let opp = analyzer.check_arbitrage("tok_yes", &orderbooks, &config_above);
     assert!(opp.is_none(), "should reject when threshold > profit");
@@ -1141,15 +1238,29 @@ fn analyzer_check_after_remove_returns_none() {
 
     let config = DutchBookConfig::default();
     let mut orderbooks = HashMap::new();
-    orderbooks.insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.40), dec!(100)));
-    orderbooks.insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.40), dec!(100)));
+    orderbooks.insert(
+        "tok_yes".to_string(),
+        make_orderbook("tok_yes", dec!(0.40), dec!(100)),
+    );
+    orderbooks.insert(
+        "tok_no".to_string(),
+        make_orderbook("tok_no", dec!(0.40), dec!(100)),
+    );
 
     // Should find opportunity before removal
-    assert!(analyzer.check_arbitrage("tok_yes", &orderbooks, &config).is_some());
+    assert!(
+        analyzer
+            .check_arbitrage("tok_yes", &orderbooks, &config)
+            .is_some()
+    );
 
     // After removal, same token should return None
     analyzer.remove_market("m1");
-    assert!(analyzer.check_arbitrage("tok_yes", &orderbooks, &config).is_none());
+    assert!(
+        analyzer
+            .check_arbitrage("tok_yes", &orderbooks, &config)
+            .is_none()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1347,15 +1458,23 @@ async fn strategy_enforces_position_limit() {
     {
         let mut md = ctx.market_data.write().await;
         // Market 1: opportunity exists
-        md.orderbooks
-            .insert("t1a".to_string(), make_orderbook("t1a", dec!(0.45), dec!(200)));
-        md.orderbooks
-            .insert("t1b".to_string(), make_orderbook("t1b", dec!(0.45), dec!(200)));
+        md.orderbooks.insert(
+            "t1a".to_string(),
+            make_orderbook("t1a", dec!(0.45), dec!(200)),
+        );
+        md.orderbooks.insert(
+            "t1b".to_string(),
+            make_orderbook("t1b", dec!(0.45), dec!(200)),
+        );
         // Market 2: opportunity also exists
-        md.orderbooks
-            .insert("t2a".to_string(), make_orderbook("t2a", dec!(0.44), dec!(200)));
-        md.orderbooks
-            .insert("t2b".to_string(), make_orderbook("t2b", dec!(0.44), dec!(200)));
+        md.orderbooks.insert(
+            "t2a".to_string(),
+            make_orderbook("t2a", dec!(0.44), dec!(200)),
+        );
+        md.orderbooks.insert(
+            "t2b".to_string(),
+            make_orderbook("t2b", dec!(0.44), dec!(200)),
+        );
     }
 
     // First opportunity triggers
@@ -1368,7 +1487,10 @@ async fn strategy_enforces_position_limit() {
     let snapshot2 = make_orderbook("t2a", dec!(0.44), dec!(200));
     let event2 = Event::MarketData(MarketDataEvent::OrderbookUpdate(snapshot2));
     let actions2 = strategy.on_event(&event2, &ctx).await.unwrap();
-    assert!(actions2.is_empty(), "Position limit should block second opportunity");
+    assert!(
+        actions2.is_empty(),
+        "Position limit should block second opportunity"
+    );
 }
 
 #[tokio::test]
@@ -1426,10 +1548,14 @@ async fn strategy_paired_orders_respect_neg_risk() {
     }
     {
         let mut md = ctx.market_data.write().await;
-        md.orderbooks
-            .insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.40), dec!(200)));
-        md.orderbooks
-            .insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.40), dec!(150)));
+        md.orderbooks.insert(
+            "tok_yes".to_string(),
+            make_orderbook("tok_yes", dec!(0.40), dec!(200)),
+        );
+        md.orderbooks.insert(
+            "tok_no".to_string(),
+            make_orderbook("tok_no", dec!(0.40), dec!(150)),
+        );
     }
 
     let snapshot = make_orderbook("tok_yes", dec!(0.40), dec!(200));
@@ -1525,11 +1651,15 @@ async fn strategy_both_filled_promotes_to_position() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Fill YES
-    let actions_yes = strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100)).await;
+    let actions_yes = strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
     assert!(actions_yes.is_empty()); // Not complete yet
 
     // Fill NO — should trigger promotion to PairedPosition
-    let actions_no = strategy.handle_order_filled(&no_oid, "tok_no", dec!(0.40), dec!(100)).await;
+    let actions_no = strategy
+        .handle_order_filled(&no_oid, "tok_no", dec!(0.40), dec!(100))
+        .await;
     assert!(!actions_no.is_empty()); // Should have a Log action
 
     // Active execution removed, position created
@@ -1552,7 +1682,9 @@ async fn strategy_fill_unknown_order_is_noop() {
     let config = DutchBookConfig::default();
     let mut strategy = DutchBookStrategy::new(config);
 
-    let actions = strategy.handle_order_filled("unknown_order", "tok_yes", dec!(0.50), dec!(10)).await;
+    let actions = strategy
+        .handle_order_filled("unknown_order", "tok_yes", dec!(0.50), dec!(10))
+        .await;
     assert!(actions.is_empty());
 }
 
@@ -1596,7 +1728,9 @@ async fn strategy_partial_fill_triggers_unwind() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Fill YES first
-    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100)).await;
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
 
     // Cancel NO — partial fill triggers emergency unwind
     let actions = strategy.handle_order_cancelled(&no_oid).await;
@@ -1832,8 +1966,12 @@ async fn lifecycle_both_filled_creates_position_with_correct_prices() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Fill both sides at the ask prices
-    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.45), dec!(100)).await;
-    let actions = strategy.handle_order_filled(&no_oid, "tok_no", dec!(0.50), dec!(100)).await;
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.45), dec!(100))
+        .await;
+    let actions = strategy
+        .handle_order_filled(&no_oid, "tok_no", dec!(0.50), dec!(100))
+        .await;
 
     // Should have a Log action
     assert!(!actions.is_empty());
@@ -1864,8 +2002,12 @@ async fn lifecycle_both_filled_no_first_then_yes() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Fill NO first, then YES
-    strategy.handle_order_filled(&no_oid, "tok_no", dec!(0.40), dec!(100)).await;
-    let actions = strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100)).await;
+    strategy
+        .handle_order_filled(&no_oid, "tok_no", dec!(0.40), dec!(100))
+        .await;
+    let actions = strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
 
     assert!(!actions.is_empty());
     assert_eq!(strategy.active_execution_count(), 0);
@@ -1891,7 +2033,9 @@ async fn lifecycle_partial_fill_no_side_triggers_unwind_sell_no() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Fill NO side
-    strategy.handle_order_filled(&no_oid, "tok_no", dec!(0.40), dec!(100)).await;
+    strategy
+        .handle_order_filled(&no_oid, "tok_no", dec!(0.40), dec!(100))
+        .await;
 
     // Cancel YES — partial fill, NO side filled, should sell NO
     let actions = strategy.handle_order_cancelled(&yes_oid).await;
@@ -1932,10 +2076,14 @@ async fn lifecycle_unwind_discount_configurable() {
     }
     {
         let mut md = ctx.market_data.write().await;
-        md.orderbooks
-            .insert("tok_yes".to_string(), make_orderbook("tok_yes", dec!(0.45), dec!(200)));
-        md.orderbooks
-            .insert("tok_no".to_string(), make_orderbook("tok_no", dec!(0.45), dec!(200)));
+        md.orderbooks.insert(
+            "tok_yes".to_string(),
+            make_orderbook("tok_yes", dec!(0.45), dec!(200)),
+        );
+        md.orderbooks.insert(
+            "tok_no".to_string(),
+            make_orderbook("tok_no", dec!(0.45), dec!(200)),
+        );
     }
 
     let snapshot = make_orderbook("tok_yes", dec!(0.45), dec!(200));
@@ -1943,7 +2091,9 @@ async fn lifecycle_unwind_discount_configurable() {
     strategy.on_event(&event, &ctx).await.unwrap();
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
-    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100)).await;
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
     let actions = strategy.handle_order_cancelled(&no_oid).await;
 
     match &actions[0] {
@@ -2019,7 +2169,9 @@ async fn lifecycle_unwind_placed_transitions_to_unwinding() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Partial fill: YES fills, NO cancels
-    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100)).await;
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
     let _unwind_actions = strategy.handle_order_cancelled(&no_oid).await;
 
     // Simulate unwind sell order placement
@@ -2057,7 +2209,9 @@ async fn lifecycle_unwind_fill_completes_execution() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Partial fill: YES fills, NO cancels
-    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100)).await;
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
     strategy.handle_order_cancelled(&no_oid).await;
 
     // Place unwind sell order
@@ -2074,8 +2228,9 @@ async fn lifecycle_unwind_fill_completes_execution() {
     strategy.handle_order_placed(&unwind_result);
 
     // Unwind sell fills
-    let actions =
-        strategy.handle_order_filled("unwind_sell_1", "tok_yes", dec!(0.4656), dec!(100)).await;
+    let actions = strategy
+        .handle_order_filled("unwind_sell_1", "tok_yes", dec!(0.4656), dec!(100))
+        .await;
 
     // Should emit a warning log about loss
     assert_eq!(actions.len(), 1);
@@ -2108,7 +2263,9 @@ async fn lifecycle_unwind_cancel_retries_then_gives_up() {
     let (yes_oid, no_oid) = simulate_placed_events(&mut strategy, "tok_yes", "tok_no");
 
     // Partial fill: YES fills, NO cancels
-    strategy.handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100)).await;
+    strategy
+        .handle_order_filled(&yes_oid, "tok_yes", dec!(0.40), dec!(100))
+        .await;
     strategy.handle_order_cancelled(&no_oid).await;
 
     // Place unwind sell order
@@ -2126,7 +2283,11 @@ async fn lifecycle_unwind_cancel_retries_then_gives_up() {
 
     // First cancel: should retry (returns PlaceOrder action for retry)
     let actions = strategy.handle_order_cancelled("unwind_sell_1").await;
-    assert_eq!(actions.len(), 1, "first cancel should retry with PlaceOrder");
+    assert_eq!(
+        actions.len(),
+        1,
+        "first cancel should retry with PlaceOrder"
+    );
     assert_eq!(strategy.active_execution_count(), 1);
 
     // Simulate the retry sell order being placed
@@ -2161,7 +2322,13 @@ async fn lifecycle_unwind_cancel_retries_then_gives_up() {
     // Third cancel: max retries reached, should give up and clean up
     let actions = strategy.handle_order_cancelled("unwind_sell_3").await;
     assert_eq!(actions.len(), 1, "third cancel should produce a log action");
-    assert!(matches!(&actions[0], Action::Log { level: LogLevel::Error, .. }));
+    assert!(matches!(
+        &actions[0],
+        Action::Log {
+            level: LogLevel::Error,
+            ..
+        }
+    ));
 
     // Execution should be cleaned up after max retries
     assert_eq!(strategy.active_execution_count(), 0);
@@ -2676,8 +2843,7 @@ async fn integration_default_config_event_flow() {
         ..DutchBookConfig::default()
     };
     let shared_state = Arc::new(RwLock::new(DutchBookState::new()));
-    let mut strategy =
-        DutchBookStrategy::with_shared_state(config, Arc::clone(&shared_state));
+    let mut strategy = DutchBookStrategy::with_shared_state(config, Arc::clone(&shared_state));
 
     let ctx = StrategyContext::new();
     {
@@ -2811,7 +2977,10 @@ async fn orphaned_unwind_sell_cancelled_even_with_new_execution() {
     let exec = strategy.active_executions.get("m1").unwrap();
     assert!(matches!(
         exec.state,
-        ExecutionState::AwaitingFills { yes_filled: false, no_filled: false }
+        ExecutionState::AwaitingFills {
+            yes_filled: false,
+            no_filled: false
+        }
     ));
 }
 
@@ -2851,9 +3020,9 @@ async fn extended_timeout_cleanup_tracks_cancel_on_placed_for_empty_sell_id() {
     strategy.last_cleanup = chrono::DateTime::<Utc>::MIN_UTC;
 
     // 4. Trigger cleanup via on_event
-    let dummy_event = Event::MarketData(MarketDataEvent::OrderbookUpdate(
-        make_empty_orderbook("tok_unknown"),
-    ));
+    let dummy_event = Event::MarketData(MarketDataEvent::OrderbookUpdate(make_empty_orderbook(
+        "tok_unknown",
+    )));
     let actions = strategy.on_event(&dummy_event, &ctx).await.unwrap();
 
     // Execution should be removed
@@ -3088,7 +3257,9 @@ async fn cancel_on_placed_cancels_ambiguous_sell_and_redispatches() {
 
     // Must cancel this SELL (ambiguous) and re-dispatch a new unwind
     assert!(
-        actions.iter().any(|a| matches!(a, Action::CancelOrder(oid) if oid == "first_sell")),
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::CancelOrder(oid) if oid == "first_sell")),
         "First SELL must be cancelled, got: {:?}",
         actions
     );
@@ -3344,7 +3515,9 @@ async fn late_sell_placed_tracked_in_stale_unwind_ids() {
         .await;
     // Stale fill handling should complete the unwind and cancel the active sell
     assert!(
-        fill_actions.iter().any(|a| matches!(a, Action::CancelOrder(oid) if oid == "sell_001")),
+        fill_actions
+            .iter()
+            .any(|a| matches!(a, Action::CancelOrder(oid) if oid == "sell_001")),
         "Stale fill from late SELL must cancel the active sell_001, got: {:?}",
         fill_actions
     );
@@ -3403,7 +3576,9 @@ async fn cancel_on_placed_tracks_orphaned_sell_for_late_fill() {
 
     // Cancel emitted
     assert!(
-        actions.iter().any(|a| matches!(a, Action::CancelOrder(oid) if oid == "orphan_sell_late")),
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::CancelOrder(oid) if oid == "orphan_sell_late")),
         "Orphaned SELL must be cancelled, got: {:?}",
         actions
     );
@@ -3424,7 +3599,13 @@ async fn cancel_on_placed_tracks_orphaned_sell_for_late_fill() {
 
     // Must produce a diagnostic log
     assert!(
-        fill_actions.iter().any(|a| matches!(a, Action::Log { level: LogLevel::Error, .. })),
+        fill_actions.iter().any(|a| matches!(
+            a,
+            Action::Log {
+                level: LogLevel::Error,
+                ..
+            }
+        )),
         "Late fill from orphaned sell must produce error log, got: {:?}",
         fill_actions
     );
@@ -3517,7 +3698,11 @@ async fn cancel_on_placed_redispatch_tracks_orphaned_sell() {
     let actions = strategy.handle_order_placed(&first_sell);
 
     // Cancel + redispatch
-    assert!(actions.iter().any(|a| matches!(a, Action::CancelOrder(oid) if oid == "ambiguous_sell")));
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::CancelOrder(oid) if oid == "ambiguous_sell"))
+    );
     assert!(actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))));
 
     // Orphaned sell tracked
@@ -3535,7 +3720,13 @@ async fn cancel_on_placed_redispatch_tracks_orphaned_sell() {
         .await;
 
     assert!(
-        fill_actions.iter().any(|a| matches!(a, Action::Log { level: LogLevel::Error, .. })),
+        fill_actions.iter().any(|a| matches!(
+            a,
+            Action::Log {
+                level: LogLevel::Error,
+                ..
+            }
+        )),
         "Late fill from ambiguous sell must produce error log, got: {:?}",
         fill_actions
     );
@@ -3581,13 +3772,19 @@ async fn stale_fill_tracks_active_sell_in_orphaned_sells() {
 
     // 3. Unwind cancelled → retry creates stale_unwind_id
     let retry_actions = strategy.handle_order_cancelled("sell_active").await;
-    assert!(retry_actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))));
-    assert!(strategy
-        .active_executions
-        .get("m1")
-        .unwrap()
-        .stale_unwind_ids
-        .contains(&"sell_active".to_string()));
+    assert!(
+        retry_actions
+            .iter()
+            .any(|a| matches!(a, Action::PlaceOrder(_)))
+    );
+    assert!(
+        strategy
+            .active_executions
+            .get("m1")
+            .unwrap()
+            .stale_unwind_ids
+            .contains(&"sell_active".to_string())
+    );
 
     // 4. New SELL Placed for retry
     let retry_sell = OrderResult {
@@ -3638,7 +3835,13 @@ async fn stale_fill_tracks_active_sell_in_orphaned_sells() {
         .await;
 
     assert!(
-        double_fill.iter().any(|a| matches!(a, Action::Log { level: LogLevel::Error, .. })),
+        double_fill.iter().any(|a| matches!(
+            a,
+            Action::Log {
+                level: LogLevel::Error,
+                ..
+            }
+        )),
         "Double-sell from cancelled active order must produce error log, got: {:?}",
         double_fill
     );
@@ -3685,9 +3888,9 @@ async fn extended_timeout_cancel_on_placed_populates_token_to_market() {
     strategy.last_cleanup = chrono::DateTime::<Utc>::MIN_UTC;
 
     // 4. Trigger cleanup
-    let dummy_event = Event::MarketData(MarketDataEvent::OrderbookUpdate(
-        make_empty_orderbook("tok_unknown"),
-    ));
+    let dummy_event = Event::MarketData(MarketDataEvent::OrderbookUpdate(make_empty_orderbook(
+        "tok_unknown",
+    )));
     strategy.on_event(&dummy_event, &ctx).await.unwrap();
 
     // Execution removed

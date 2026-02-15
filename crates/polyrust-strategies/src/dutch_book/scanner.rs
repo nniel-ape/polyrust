@@ -104,7 +104,9 @@ impl GammaScanner {
             let page_len = page.len();
 
             for raw in page {
-                if let Some(info) = self.convert_and_filter(raw, now, max_end) && !known_market_ids.contains(&info.id) {
+                if let Some(info) = self.convert_and_filter(raw, now, max_end)
+                    && !known_market_ids.contains(&info.id)
+                {
                     all_markets.push(info);
                 }
             }
@@ -143,10 +145,7 @@ impl GammaScanner {
     }
 
     /// HTTP GET with exponential backoff retry.
-    async fn fetch_with_retry(
-        &self,
-        url: &str,
-    ) -> std::result::Result<reqwest::Response, String> {
+    async fn fetch_with_retry(&self, url: &str) -> std::result::Result<reqwest::Response, String> {
         let mut attempts = 0;
 
         loop {
@@ -156,10 +155,7 @@ impl GammaScanner {
                 Ok(response) => {
                     let status = response.status();
                     if attempts >= MAX_RETRIES {
-                        return Err(format!(
-                            "HTTP error {} after {MAX_RETRIES} retries",
-                            status
-                        ));
+                        return Err(format!("HTTP error {} after {MAX_RETRIES} retries", status));
                     }
                     warn!(
                         %url, %status, attempts, max_retries = MAX_RETRIES,
@@ -168,9 +164,7 @@ impl GammaScanner {
                 }
                 Err(e) => {
                     if attempts >= MAX_RETRIES {
-                        return Err(format!(
-                            "Request failed after {MAX_RETRIES} retries: {e}"
-                        ));
+                        return Err(format!("Request failed after {MAX_RETRIES} retries: {e}"));
                     }
                     warn!(
                         %url, %e, attempts, max_retries = MAX_RETRIES,

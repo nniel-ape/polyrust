@@ -153,11 +153,14 @@ impl DutchBookStrategy {
 
         // Check for arbitrage opportunity using orderbooks from shared state
         let md = ctx.market_data.read().await;
-        let opportunity = match self.analyzer.check_arbitrage(token_id, &md.orderbooks, &self.config)
-        {
-            Some(opp) => opp,
-            None => return vec![],
-        };
+        let opportunity =
+            match self
+                .analyzer
+                .check_arbitrage(token_id, &md.orderbooks, &self.config)
+            {
+                Some(opp) => opp,
+                None => return vec![],
+            };
         drop(md);
 
         // Check balance before placing orders (include estimated taker fees)
@@ -261,15 +264,14 @@ impl DutchBookStrategy {
         // Resolve market_id from the token_id. Primary path uses the analyzer;
         // fallback uses cancel_token_to_market for markets already removed from
         // the analyzer (e.g., after expiry) but with pending cancel_on_placed.
-        let (entry, market_id) =
-            if let Some(e) = self.analyzer.market_for_token(&result.token_id) {
-                let mid = e.market_id.clone();
-                (Some(e.clone()), mid)
-            } else if let Some(mid) = self.cancel_token_to_market.get(&result.token_id) {
-                (None, mid.clone())
-            } else {
-                return vec![];
-            };
+        let (entry, market_id) = if let Some(e) = self.analyzer.market_for_token(&result.token_id) {
+            let mid = e.market_id.clone();
+            (Some(e.clone()), mid)
+        } else if let Some(mid) = self.cancel_token_to_market.get(&result.token_id) {
+            (None, mid.clone())
+        } else {
+            return vec![];
+        };
 
         // Check cancel_on_placed — an orphaned unwind SELL from a previous execution
         // must be cancelled even if a new execution already exists for this market.
@@ -292,15 +294,12 @@ impl DutchBookStrategy {
 
             let mut actions = vec![Action::CancelOrder(order_id.clone())];
 
-            let needs_redispatch = self
-                .active_executions
-                .get(&market_id)
-                .is_some_and(|exec| {
-                    matches!(
-                        &exec.state,
-                        ExecutionState::Unwinding { sell_order_id } if sell_order_id.is_empty()
-                    )
-                });
+            let needs_redispatch = self.active_executions.get(&market_id).is_some_and(|exec| {
+                matches!(
+                    &exec.state,
+                    ExecutionState::Unwinding { sell_order_id } if sell_order_id.is_empty()
+                )
+            });
 
             if needs_redispatch {
                 warn!(
@@ -342,8 +341,7 @@ impl DutchBookStrategy {
                 exec.state = ExecutionState::Unwinding {
                     sell_order_id: order_id.clone(),
                 };
-                self.order_to_market
-                    .insert(order_id, market_id.clone());
+                self.order_to_market.insert(order_id, market_id.clone());
                 debug!(
                     %market_id,
                     state = ?exec.state,
@@ -371,8 +369,7 @@ impl DutchBookStrategy {
                 } else if result.token_id == entry.token_b {
                     exec.no_order_id = order_id.clone();
                 }
-                self.order_to_market
-                    .insert(order_id, market_id);
+                self.order_to_market.insert(order_id, market_id);
             }
         }
 
@@ -553,8 +550,7 @@ impl DutchBookStrategy {
             expected_profit,
             opened_at: Utc::now(),
         };
-        self.open_positions
-            .insert(market_id.to_string(), position);
+        self.open_positions.insert(market_id.to_string(), position);
 
         vec![Action::Log {
             level: LogLevel::Info,
@@ -616,9 +612,7 @@ impl DutchBookStrategy {
                 vec![]
             }
             // Partial fill (one cancelled + other filled) → unwind
-            _ if exec.state.needs_unwind() => {
-                self.start_emergency_unwind(&market_id.clone())
-            }
+            _ if exec.state.needs_unwind() => self.start_emergency_unwind(&market_id.clone()),
             _ => vec![],
         }
     }
@@ -793,7 +787,11 @@ impl DutchBookStrategy {
     ///
     /// Checks both the current unwind sell_order_id and stale_unwind_ids (from previous
     /// retry attempts) to handle late fills that arrive after an unwind was cancelled.
-    async fn handle_unwind_order_event(&mut self, order_id: &str, is_fill: bool) -> Option<Vec<Action>> {
+    async fn handle_unwind_order_event(
+        &mut self,
+        order_id: &str,
+        is_fill: bool,
+    ) -> Option<Vec<Action>> {
         // Find which execution this unwind order belongs to.
         // Check both the active sell_order_id and stale IDs from previous retries.
         let (market_id, is_stale) = {
@@ -847,12 +845,14 @@ impl DutchBookStrategy {
             let loss = match (&exec.yes_fill_price, &exec.no_fill_price) {
                 (Some(p), None) => {
                     let buy_cost = (*p + taker_fee_per_share(*p, fee_rate)) * exec.size;
-                    let sell_proceeds = *p * (Decimal::ONE - self.config.unwind_discount) * exec.size;
+                    let sell_proceeds =
+                        *p * (Decimal::ONE - self.config.unwind_discount) * exec.size;
                     buy_cost - sell_proceeds
                 }
                 (None, Some(p)) => {
                     let buy_cost = (*p + taker_fee_per_share(*p, fee_rate)) * exec.size;
-                    let sell_proceeds = *p * (Decimal::ONE - self.config.unwind_discount) * exec.size;
+                    let sell_proceeds =
+                        *p * (Decimal::ONE - self.config.unwind_discount) * exec.size;
                     buy_cost - sell_proceeds
                 }
                 _ => Decimal::ZERO,
@@ -902,12 +902,14 @@ impl DutchBookStrategy {
             let loss = match (&exec.yes_fill_price, &exec.no_fill_price) {
                 (Some(p), None) => {
                     let buy_cost = (*p + taker_fee_per_share(*p, fee_rate)) * exec.size;
-                    let sell_proceeds = *p * (Decimal::ONE - self.config.unwind_discount) * exec.size;
+                    let sell_proceeds =
+                        *p * (Decimal::ONE - self.config.unwind_discount) * exec.size;
                     buy_cost - sell_proceeds
                 }
                 (None, Some(p)) => {
                     let buy_cost = (*p + taker_fee_per_share(*p, fee_rate)) * exec.size;
-                    let sell_proceeds = *p * (Decimal::ONE - self.config.unwind_discount) * exec.size;
+                    let sell_proceeds =
+                        *p * (Decimal::ONE - self.config.unwind_discount) * exec.size;
                     buy_cost - sell_proceeds
                 }
                 _ => Decimal::ZERO,
@@ -927,9 +929,7 @@ impl DutchBookStrategy {
 
             Some(vec![Action::Log {
                 level: LogLevel::Warn,
-                message: format!(
-                    "Dutch Book unwind for market {market_id}: ~{loss} USDC loss"
-                ),
+                message: format!("Dutch Book unwind for market {market_id}: ~{loss} USDC loss"),
             }])
         } else {
             // Unwind order cancelled/rejected — retry or give up
@@ -977,21 +977,22 @@ impl DutchBookStrategy {
                 // transition back to PartialFill and re-trigger unwind.
                 exec.stale_unwind_ids.push(order_id.to_string());
 
-                let (filled_side, filled_order_id) = match (&exec.yes_fill_price, &exec.no_fill_price) {
-                    (Some(_), None) => (FilledSide::Yes, exec.yes_order_id.clone()),
-                    (None, Some(_)) => (FilledSide::No, exec.no_order_id.clone()),
-                    _ => {
-                        // Should not happen — clean up defensively
-                        let exec = self.active_executions.remove(&market_id)?;
-                        self.order_to_market.remove(&exec.yes_order_id);
-                        self.order_to_market.remove(&exec.no_order_id);
-                        self.order_to_market.remove(order_id);
-                        for stale_id in &exec.stale_unwind_ids {
-                            self.order_to_market.remove(stale_id.as_str());
+                let (filled_side, filled_order_id) =
+                    match (&exec.yes_fill_price, &exec.no_fill_price) {
+                        (Some(_), None) => (FilledSide::Yes, exec.yes_order_id.clone()),
+                        (None, Some(_)) => (FilledSide::No, exec.no_order_id.clone()),
+                        _ => {
+                            // Should not happen — clean up defensively
+                            let exec = self.active_executions.remove(&market_id)?;
+                            self.order_to_market.remove(&exec.yes_order_id);
+                            self.order_to_market.remove(&exec.no_order_id);
+                            self.order_to_market.remove(order_id);
+                            for stale_id in &exec.stale_unwind_ids {
+                                self.order_to_market.remove(stale_id.as_str());
+                            }
+                            return Some(vec![]);
                         }
-                        return Some(vec![]);
-                    }
-                };
+                    };
 
                 warn!(
                     %market_id, %order_id,
@@ -1287,7 +1288,10 @@ impl Strategy for DutchBookStrategy {
                 price,
                 size,
                 ..
-            }) => self.handle_order_filled(order_id, token_id, *price, *size).await,
+            }) => {
+                self.handle_order_filled(order_id, token_id, *price, *size)
+                    .await
+            }
 
             Event::OrderUpdate(OrderEvent::Cancelled(order_id)) => {
                 self.handle_order_cancelled(order_id).await
@@ -1316,7 +1320,11 @@ impl Strategy for DutchBookStrategy {
                 self.handle_cancel_failed(order_id, reason).await
             }
 
-            Event::OrderUpdate(OrderEvent::Rejected { order_id, reason, token_id }) => {
+            Event::OrderUpdate(OrderEvent::Rejected {
+                order_id,
+                reason,
+                token_id,
+            }) => {
                 if let Some(oid) = order_id {
                     debug!(%oid, %reason, "Dutch Book order rejected");
                     let actions = self.handle_order_cancelled(oid).await;
@@ -1353,7 +1361,10 @@ impl Strategy for DutchBookStrategy {
         actions.extend(event_actions);
 
         // Sync dashboard state when there's active state to display
-        if !actions.is_empty() || !self.open_positions.is_empty() || !self.active_executions.is_empty() {
+        if !actions.is_empty()
+            || !self.open_positions.is_empty()
+            || !self.active_executions.is_empty()
+        {
             self.sync_dashboard_state().await;
         }
 

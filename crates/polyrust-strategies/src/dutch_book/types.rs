@@ -94,10 +94,7 @@ pub enum FilledSide {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionState {
     /// Waiting for fill/cancel events for both sides
-    AwaitingFills {
-        yes_filled: bool,
-        no_filled: bool,
-    },
+    AwaitingFills { yes_filled: bool, no_filled: bool },
     /// Both orders filled successfully
     BothFilled,
     /// One side filled, the other was cancelled — needs emergency unwind
@@ -106,15 +103,11 @@ pub enum ExecutionState {
         filled_order_id: OrderId,
     },
     /// Emergency unwind in progress — selling the filled side
-    Unwinding {
-        sell_order_id: OrderId,
-    },
+    Unwinding { sell_order_id: OrderId },
     /// One side cancelled, awaiting the other side's event.
     /// If the other side also cancels → Complete (both missed).
     /// If the other side fills → PartialFill (needs unwind).
-    OneCancelled {
-        cancelled_side: FilledSide,
-    },
+    OneCancelled { cancelled_side: FilledSide },
     /// Execution complete (either both filled → position, or unwind done, or both cancelled)
     Complete,
 }
@@ -242,7 +235,6 @@ impl ExecutionState {
     pub fn needs_unwind(&self) -> bool {
         matches!(self, Self::PartialFill { .. })
     }
-
 }
 
 /// A market being tracked for Dutch Book opportunities.

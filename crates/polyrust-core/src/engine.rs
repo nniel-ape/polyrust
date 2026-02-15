@@ -618,15 +618,16 @@ pub async fn execute_action(
                                 {
                                     // Compute fee based on the original request's order type
                                     let req_order_type = requests.get(idx).map(|r| r.order_type);
-                                    let fee = if req_order_type == Some(crate::types::OrderType::Fok) {
-                                        Some(crate::fees::taker_fee(
-                                            result.price,
-                                            result.size,
-                                            crate::fees::default_taker_fee_rate(),
-                                        ))
-                                    } else {
-                                        None
-                                    };
+                                    let fee =
+                                        if req_order_type == Some(crate::types::OrderType::Fok) {
+                                            Some(crate::fees::taker_fee(
+                                                result.price,
+                                                result.size,
+                                                crate::fees::default_taker_fee_rate(),
+                                            ))
+                                        } else {
+                                            None
+                                        };
                                     let orderbook_snapshot = if result.side
                                         == crate::types::OrderSide::Buy
                                     {
