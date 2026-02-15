@@ -14,9 +14,8 @@ use rust_decimal_macros::dec;
 
 use polyrust_core::prelude::*;
 
-use super::base::{
-    CryptoArbBase, kelly_position_size, net_profit_margin, parse_slug_timestamp, taker_fee,
-};
+use super::base::{kelly_position_size, net_profit_margin, parse_slug_timestamp, taker_fee};
+use super::runtime::CryptoArbRuntime;
 use super::config::{ArbitrageConfig, SizingConfig};
 use super::tailend::TailEndStrategy;
 use super::domain::{
@@ -62,10 +61,10 @@ fn make_mwr(reference_price: Decimal, time_remaining_secs: i64) -> MarketWithRef
     }
 }
 
-fn make_base_no_chainlink() -> Arc<CryptoArbBase> {
+fn make_base_no_chainlink() -> Arc<CryptoArbRuntime> {
     let mut config = ArbitrageConfig::default();
     config.use_chainlink = false;
-    Arc::new(CryptoArbBase::new(config, vec![]))
+    Arc::new(CryptoArbRuntime::new(config, vec![]))
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +350,7 @@ fn config_deserialize_missing_sub_configs() {
 }
 
 // ---------------------------------------------------------------------------
-// CryptoArbBase async tests
+// CryptoArbRuntime async tests
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -557,7 +556,7 @@ async fn reservation_counted_in_can_open_position() {
     let mut config = ArbitrageConfig::default();
     config.use_chainlink = false;
     config.max_positions = 2;
-    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
     assert!(base.can_open_position().await);
 
@@ -626,7 +625,7 @@ async fn base_is_auto_disabled() {
     config.performance.auto_disable = true;
     config.performance.min_trades = 3;
     config.performance.min_win_rate = dec!(0.50);
-    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
     // Initially not disabled
     assert!(!base.is_auto_disabled().await);
@@ -992,7 +991,7 @@ fn dynamic_ask_threshold_tightens_as_expiry_approaches() {
         (30, dec!(0.95)),  // 0.95 at 30s
     ];
 
-    let base = Arc::new(super::base::CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(super::runtime::CryptoArbRuntime::new(config, vec![]));
     let strategy = TailEndStrategy::new(base);
 
     // At 120s, should use 0.90 (120s bucket)
@@ -1028,7 +1027,7 @@ fn dynamic_ask_threshold_fallback_to_legacy() {
     config.tailend.dynamic_thresholds = vec![]; // Empty - should fallback
     config.tailend.ask_threshold = dec!(0.88); // Legacy threshold
 
-    let base = Arc::new(super::base::CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(super::runtime::CryptoArbRuntime::new(config, vec![]));
     let strategy = TailEndStrategy::new(base);
 
     // Should fallback to legacy threshold when dynamic thresholds is empty
@@ -1044,7 +1043,7 @@ async fn rejection_cooldown_blocks_reevaluation() {
     use std::sync::Arc;
 
     let config = super::config::ArbitrageConfig::default();
-    let base = Arc::new(super::base::CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(super::runtime::CryptoArbRuntime::new(config, vec![]));
 
     let market_id = "market-123".to_string();
 
@@ -1070,7 +1069,7 @@ async fn rejection_cooldown_expires() {
     use std::sync::Arc;
 
     let config = super::config::ArbitrageConfig::default();
-    let base = Arc::new(super::base::CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(super::runtime::CryptoArbRuntime::new(config, vec![]));
 
     let market_id = "market-456".to_string();
 
@@ -1117,7 +1116,7 @@ fn make_position(
 }
 
 /// Helper to set up a base with an active market having a known end_date.
-async fn make_base_with_market(market_id: &str, time_remaining_secs: i64) -> Arc<CryptoArbBase> {
+async fn make_base_with_market(market_id: &str, time_remaining_secs: i64) -> Arc<CryptoArbRuntime> {
     let mut config = super::config::ArbitrageConfig::default();
     config.use_chainlink = false;
     config.stop_loss.reversal_pct = dec!(0.005); // 0.5%
@@ -1125,7 +1124,7 @@ async fn make_base_with_market(market_id: &str, time_remaining_secs: i64) -> Arc
     config.stop_loss.trailing_enabled = true;
     config.stop_loss.trailing_distance = dec!(0.03);
     config.stop_loss.time_decay = true;
-    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
     // Insert active market
     {
@@ -1308,7 +1307,7 @@ async fn auto_disable_boundary_at_min_trades() {
     config.performance.auto_disable = true;
     config.performance.min_trades = 20;
     config.performance.min_win_rate = dec!(0.40);
-    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
     // Record exactly 20 trades: 8 wins (40%), 12 losses
     for _ in 0..8 {
@@ -1331,7 +1330,7 @@ async fn auto_disable_below_threshold() {
     config.performance.auto_disable = true;
     config.performance.min_trades = 20;
     config.performance.min_win_rate = dec!(0.40);
-    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
     // Record 20 trades: 7 wins (35%), 13 losses
     for _ in 0..7 {
@@ -1446,7 +1445,7 @@ async fn can_open_position_counts_all_order_types() {
     let mut config = super::config::ArbitrageConfig::default();
     config.max_positions = 3;
     config.use_chainlink = false;
-    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
     assert!(base.can_open_position().await);
 
@@ -1527,7 +1526,7 @@ async fn stale_limit_order_cancelled_after_max_age() {
     let mut config = super::config::ArbitrageConfig::default();
     config.order.max_age_secs = 1; // 1 second for quick test
     config.use_chainlink = false;
-    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
     // Add a limit order with a past placed_at
     {
@@ -1572,7 +1571,7 @@ async fn stale_order_cancel_pending_prevents_double() {
     let mut config = super::config::ArbitrageConfig::default();
     config.order.max_age_secs = 1;
     config.use_chainlink = false;
-    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
     {
         let mut limits = base.open_limit_orders.write().await;
@@ -1714,7 +1713,7 @@ async fn quality_upgrades_current_to_exact_on_boundary() {
 
     // Use a window_ts that is a 15-min boundary
     let window_ts = 1706000100i64;
-    let boundary_ts = window_ts - (window_ts % super::base::WINDOW_SECS);
+    let boundary_ts = window_ts - (window_ts % super::runtime::WINDOW_SECS);
 
     // Insert a market with Current quality at that window_ts
     {
@@ -1842,7 +1841,7 @@ async fn quality_upgrade_updates_reference_price() {
     let base = make_base_no_chainlink();
 
     let window_ts = 1706000100i64;
-    let boundary_ts = window_ts - (window_ts % super::base::WINDOW_SECS);
+    let boundary_ts = window_ts - (window_ts % super::runtime::WINDOW_SECS);
 
     // Insert market at Current with one price
     {
@@ -2184,7 +2183,7 @@ async fn strike_proximity_rejects_within_threshold() {
     config.tailend.min_sustained_ticks = 0;
     config.tailend.max_recent_volatility = dec!(1.0);
     config.tailend.min_strike_distance_pct = dec!(0.0008); // 0.08%
-    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
     let market = MarketWithReference {
         market: make_market_info("m1", Utc::now() + Duration::seconds(60)),
@@ -2239,7 +2238,7 @@ async fn strike_proximity_allows_beyond_threshold() {
     config.tailend.min_sustained_ticks = 0;
     config.tailend.max_recent_volatility = dec!(1.0);
     config.tailend.min_strike_distance_pct = dec!(0.0008); // 0.08%
-    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
     let market = MarketWithReference {
         market: make_market_info("m1", Utc::now() + Duration::seconds(60)),
@@ -4302,7 +4301,7 @@ async fn recovery_same_side_reentry_allowed_after_cooldown() {
     config.use_chainlink = false;
     // Set very short cooldown for testing (uses stale_market_cooldown_secs)
     config.stop_loss.stale_market_cooldown_secs = 1;
-    let base = Arc::new(CryptoArbBase::new(config, vec![]));
+    let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
     // Set event time to 10 seconds ago
     let past = Utc::now() - Duration::seconds(10);

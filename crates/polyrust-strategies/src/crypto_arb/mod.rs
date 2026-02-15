@@ -1,15 +1,16 @@
 //! Crypto arbitrage strategy for 15-minute Up/Down prediction markets.
 //!
 //! High-confidence trades near expiration (< 120s, market >= 90%).
-//! State is managed through `CryptoArbBase`.
+//! State is managed through `CryptoArbRuntime`.
 
 mod base;
 mod config;
 mod dashboard;
 pub mod domain;
+mod runtime;
 mod tailend;
 
-pub use base::CryptoArbBase;
+pub use runtime::CryptoArbRuntime;
 pub use config::{
     ArbitrageConfig, FeeConfig, OrderConfig, PerformanceConfig, ReferenceQualityLevel,
     SizingConfig, SpikeConfig, StopLossConfig, TailEndConfig,

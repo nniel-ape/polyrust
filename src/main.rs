@@ -13,7 +13,7 @@ use polyrust_market::{
 };
 use polyrust_store::Store;
 use polyrust_strategies::{
-    ArbitrageConfig, CryptoArbBase, CryptoArbDashboard, DutchBookConfig, DutchBookDashboard,
+    ArbitrageConfig, CryptoArbRuntime, CryptoArbDashboard, DutchBookConfig, DutchBookDashboard,
     DutchBookState, DutchBookStrategy, ReferenceQualityLevel, TailEndStrategy,
 };
 use serde::Deserialize;
@@ -188,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Create shared base for all crypto arbitrage strategies
     info!(enabled = arb_config.enabled, "Loaded arbitrage config");
-    let base = Arc::new(CryptoArbBase::new(
+    let base = Arc::new(CryptoArbRuntime::new(
         arb_config.clone(),
         config.polymarket.rpc_urls.clone(),
     ));
@@ -744,7 +744,7 @@ async fn run_backtest() -> anyhow::Result<()> {
     // Instantiate strategy based on strategy_name
     let strategy: Box<dyn Strategy> = match backtest_config.strategy_name.as_str() {
         "crypto-arb-tailend" => {
-            let base = Arc::new(CryptoArbBase::new(arb_config.clone(), vec![]));
+            let base = Arc::new(CryptoArbRuntime::new(arb_config.clone(), vec![]));
             Box::new(TailEndStrategy::new(base))
         }
         "dutch-book" => Box::new(DutchBookStrategy::new(dutch_book_config)),

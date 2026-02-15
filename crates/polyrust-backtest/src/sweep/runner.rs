@@ -4,7 +4,7 @@ use std::time::Instant;
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{info, warn};
 
-use polyrust_strategies::{ArbitrageConfig, CryptoArbBase, ReferenceQualityLevel, TailEndStrategy};
+use polyrust_strategies::{ArbitrageConfig, CryptoArbRuntime, ReferenceQualityLevel, TailEndStrategy};
 
 use crate::config::BacktestConfig;
 use crate::data::store::HistoricalDataStore;
@@ -237,7 +237,7 @@ async fn run_single(
     let run_start = Instant::now();
 
     // Create fresh strategy
-    let base = Arc::new(CryptoArbBase::new(arb_config, vec![]));
+    let base = Arc::new(CryptoArbRuntime::new(arb_config, vec![]));
     let strategy: Box<dyn polyrust_core::strategy::Strategy> = Box::new(TailEndStrategy::new(base));
 
     // Create engine without Store (no SQLite overhead)

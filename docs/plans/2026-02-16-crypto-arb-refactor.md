@@ -104,15 +104,15 @@ crypto_arb/
 - [x] Run `cargo build --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 3: Create `runtime.rs` from `base.rs` struct definition
-- [ ] Create `crypto_arb/runtime.rs` with `CryptoArbRuntime` struct (copy struct definition from `base.rs:199-284`)
-- [ ] Rename `CryptoArbBase` → `CryptoArbRuntime` in the struct
-- [ ] Change all field visibility from `pub` to `pub(super)` (except `config` which stays `pub` for read access)
-- [ ] Move constants `PRICE_HISTORY_SIZE`, `BOUNDARY_TOLERANCE_SECS`, `WINDOW_SECS` to `runtime.rs`
-- [ ] Move `CryptoArbRuntime::new()` and `warm_up()` to `runtime.rs`
-- [ ] Move `update_event_time()` and `event_time()` to `runtime.rs`
-- [ ] Add `mod runtime;` to `crypto_arb/mod.rs`, update re-exports from `base::CryptoArbBase` to `runtime::CryptoArbRuntime`
-- [ ] Keep `base.rs` intact for now (methods still reference `CryptoArbBase` — will be migrated in tasks 4-5)
-- [ ] Run `cargo build --workspace` — expect failures from rename, fix incrementally
+- [x] Create `crypto_arb/runtime.rs` with `CryptoArbRuntime` struct (copy struct definition from `base.rs:199-284`)
+- [x] Rename `CryptoArbBase` → `CryptoArbRuntime` in the struct
+- [x] Change all field visibility from `pub` to `pub(super)` (except `config` which stays `pub` for read access)
+- [x] Move constants `PRICE_HISTORY_SIZE`, `BOUNDARY_TOLERANCE_SECS`, `WINDOW_SECS` to `runtime.rs`
+- [x] Move `CryptoArbRuntime::new()` and `warm_up()` to `runtime.rs`
+- [x] Move `update_event_time()` and `event_time()` to `runtime.rs`
+- [x] Add `mod runtime;` to `crypto_arb/mod.rs`, update re-exports from `base::CryptoArbBase` to `runtime::CryptoArbRuntime`
+- [x] Keep `base.rs` intact for now (methods still reference `CryptoArbBase` — will be migrated in tasks 4-5)
+- [x] Run `cargo build --workspace` — expect failures from rename, fix incrementally
 
 ### Task 4: Extract service modules from `base.rs` methods
 - [ ] Create `crypto_arb/services/` directory with `mod.rs`

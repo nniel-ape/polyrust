@@ -17,7 +17,8 @@ use tracing::{debug, info, warn};
 
 use polyrust_core::prelude::*;
 
-use crate::crypto_arb::base::{CryptoArbBase, taker_fee};
+use crate::crypto_arb::base::taker_fee;
+use crate::crypto_arb::runtime::CryptoArbRuntime;
 use crate::crypto_arb::dashboard::try_emit_dashboard_updates;
 use crate::crypto_arb::domain::{
     ArbitrageOpportunity, ArbitragePosition, ExitOrderMeta, OpenLimitOrder, PendingOrder,
@@ -27,11 +28,11 @@ use crate::crypto_arb::domain::{
 
 /// TailEnd strategy: trades near expiration with high market prices.
 pub struct TailEndStrategy {
-    base: Arc<CryptoArbBase>,
+    base: Arc<CryptoArbRuntime>,
 }
 
 impl TailEndStrategy {
-    pub fn new(base: Arc<CryptoArbBase>) -> Self {
+    pub fn new(base: Arc<CryptoArbRuntime>) -> Self {
         // Validate config at construction time as defense-in-depth.
         // main.rs should call ArbitrageConfig::validate() first for graceful errors.
         if let Err(e) = base.config.validate() {
@@ -2523,7 +2524,7 @@ mod tests {
         config.enabled = true;
         config.tailend.min_sustained_secs = 5; // Small window to keep test simple
         config.tailend.max_recent_volatility = dec!(1.0); // Disable volatility filter
-        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+        let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
         let market = MarketWithReference {
             market: make_market_info("market1", Utc::now() + Duration::seconds(time_remaining)),
@@ -2686,7 +2687,7 @@ mod tests {
         config.tailend.min_sustained_secs = 0;
         config.tailend.max_recent_volatility = dec!(1.0);
         config.tailend.max_spread_bps = dec!(50); // 50 bps = 0.5%
-        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+        let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
         let market = MarketWithReference {
             market: make_market_info("market1", Utc::now() + Duration::seconds(60)),
@@ -3057,7 +3058,7 @@ mod tests {
         // Exit depth cap
         config.stop_loss.exit_depth_cap_factor = dec!(0.80);
 
-        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+        let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
         let now = Utc::now();
         let end_date = now + Duration::seconds(time_remaining_secs);
@@ -3372,7 +3373,7 @@ mod tests {
         config.stop_loss.min_remaining_secs = 0;
         config.stop_loss.exit_depth_cap_factor = dec!(0.80);
 
-        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+        let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
         let now = Utc::now();
 
         // Insert active market
@@ -3556,7 +3557,7 @@ mod tests {
         config.stop_loss.min_remaining_secs = 0;
         config.stop_loss.exit_depth_cap_factor = dec!(0.80);
 
-        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+        let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
         let now = Utc::now();
 
         // Insert active market
@@ -3765,7 +3766,7 @@ mod tests {
         config.stop_loss.min_remaining_secs = 0;
         config.stop_loss.exit_depth_cap_factor = dec!(0.80);
 
-        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+        let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
         let now = Utc::now();
 
         {
@@ -3896,7 +3897,7 @@ mod tests {
         config.tailend.max_recent_volatility = dec!(1.0);
         config.stop_loss.min_remaining_secs = 0;
 
-        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+        let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
         let now = Utc::now();
 
         {
@@ -4031,7 +4032,7 @@ mod tests {
         config.stop_loss.sl_max_external_age_ms = 5000;
         config.stop_loss.min_remaining_secs = 10;
 
-        let base = Arc::new(CryptoArbBase::new(config, vec![]));
+        let base = Arc::new(CryptoArbRuntime::new(config, vec![]));
 
         // Insert active market expiring in 60 seconds
         let market = MarketWithReference {

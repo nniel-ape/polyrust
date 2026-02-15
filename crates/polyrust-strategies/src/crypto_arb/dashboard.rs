@@ -13,9 +13,8 @@ use rust_decimal::Decimal;
 
 use polyrust_core::prelude::*;
 
-use crate::crypto_arb::base::{
-    CryptoArbBase, escape_html, fmt_market_price, fmt_usd, net_profit_margin, taker_fee,
-};
+use crate::crypto_arb::base::{escape_html, fmt_market_price, fmt_usd, net_profit_margin, taker_fee};
+use crate::crypto_arb::runtime::CryptoArbRuntime;
 use crate::crypto_arb::domain::ReferenceQuality;
 
 // ---------------------------------------------------------------------------
@@ -23,7 +22,7 @@ use crate::crypto_arb::domain::ReferenceQuality;
 // ---------------------------------------------------------------------------
 
 /// Render reference prices & predictions table (shared across dashboards).
-async fn render_reference_prices(base: &CryptoArbBase, html: &mut String) {
+async fn render_reference_prices(base: &CryptoArbRuntime, html: &mut String) {
     html.push_str(r#"<div class="bp-card mb-4">"#);
     html.push_str(r#"<h2 class="bp-section-title">Reference Prices &amp; Predictions</h2>"#);
 
@@ -102,7 +101,7 @@ async fn render_reference_prices(base: &CryptoArbBase, html: &mut String) {
 }
 
 /// Render positions table.
-async fn render_positions(base: &CryptoArbBase, html: &mut String) {
+async fn render_positions(base: &CryptoArbRuntime, html: &mut String) {
     let positions = base.positions.read().await;
     let cached_asks = base.cached_asks.read().await;
 
@@ -167,7 +166,7 @@ async fn render_positions(base: &CryptoArbBase, html: &mut String) {
 }
 
 /// Render performance stats.
-async fn render_performance(base: &CryptoArbBase, html: &mut String) {
+async fn render_performance(base: &CryptoArbRuntime, html: &mut String) {
     let s = base.stats.read().await;
 
     html.push_str(r#"<div class="bp-card mb-4">"#);
@@ -217,11 +216,11 @@ async fn render_performance(base: &CryptoArbBase, html: &mut String) {
 
 /// Dashboard view for the crypto arbitrage strategy at `/strategy/crypto-arb`.
 pub struct CryptoArbDashboard {
-    base: Arc<CryptoArbBase>,
+    base: Arc<CryptoArbRuntime>,
 }
 
 impl CryptoArbDashboard {
-    pub fn new(base: Arc<CryptoArbBase>) -> Self {
+    pub fn new(base: Arc<CryptoArbRuntime>) -> Self {
         Self { base }
     }
 }
@@ -510,7 +509,7 @@ const SKIP_GROUPS: &[SkipGroup] = &[
 
 /// Render the TailEnd skip-reason bar chart. Reads the current 60s period
 /// stats from `tailend_skip_stats` without draining.
-fn render_skip_stats(base: &CryptoArbBase, html: &mut String) {
+fn render_skip_stats(base: &CryptoArbRuntime, html: &mut String) {
     let snapshot: Vec<(&'static str, u64)> = {
         let stats = base.tailend_skip_stats.lock().unwrap();
         stats.iter().map(|(k, v)| (*k, *v)).collect()
@@ -574,7 +573,7 @@ fn render_skip_stats(base: &CryptoArbBase, html: &mut String) {
 /// without re-acquiring strategy locks. Called at the end of each strategy's
 /// `on_event()` — the shared 5-second throttle ensures only one strategy per
 /// window triggers the render.
-pub async fn try_emit_dashboard_updates(base: &Arc<CryptoArbBase>) -> Vec<Action> {
+pub async fn try_emit_dashboard_updates(base: &Arc<CryptoArbRuntime>) -> Vec<Action> {
     if !base.try_claim_dashboard_emit().await {
         return vec![];
     }
