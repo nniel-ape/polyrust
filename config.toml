@@ -77,8 +77,8 @@ base_size = 5                   # Base USDC position size per trade
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAILEND STRATEGY — high-confidence trades near market expiration
-# Calibrated via 9 sweeps / 1,336 combos (2026-02-14/15)
-# See analysis/output/sweep_calibration_report.md for full calibration details
+# Calibrated via 12 sweeps / 2,081 combos (2026-02-14/15)
+# See docs/research/stoploss-aggressiveness.md for SL calibration details
 # ─────────────────────────────────────────────────────────────────────────────
 
 [arbitrage.tailend]
@@ -94,11 +94,13 @@ min_strike_distance_pct = "0.001"
 # Min seconds price must sustain above threshold (0 = no wait; dead param)
 min_sustained_secs = 0
 # Bid drop from entry that triggers early exit within post_entry_window
-post_entry_exit_drop = "0.03"
+# Calibrated: 0.12 is Pareto-optimal balanced (Sharpe 0.2249, PnL $366.80)
+post_entry_exit_drop = "0.12"
 # Seconds after entry during which post_entry_exit_drop is active
-post_entry_window_secs = 60
+# Calibrated: 20s dominates 30/45/60 — fewer false positives, +$25 PnL
+post_entry_window_secs = 20
 # Min seconds after entry before selling is allowed (anti-churn)
-min_sell_delay_secs = 8
+min_sell_delay_secs = 4
 # Cooldown after FOK rejection before retrying (secs)
 fok_cooldown_secs = 15
 # Max orderbook age before considering it stale (secs)
@@ -111,14 +113,16 @@ max_source_stale_secs = 5
 # ─────────────────────────────────────────────────────────────────────────────
 # STOP-LOSS — 4-level trigger hierarchy
 # Priority: HardCrash > DualTrigger > TrailingStop > PostEntryExit
-# In backtest, only hard_drop_abs showed sensitivity (cliff at 0.02-0.03).
+# In backtest, only hard_drop_abs + post_entry_exit_drop fire.
 # All other params are dead in 15-min tail-end regime (positions converge
 # to 1.0 monotonically). They exist for live trading protection.
+# See docs/research/stoploss-aggressiveness.md for full calibration.
 # ─────────────────────────────────────────────────────────────────────────────
 
 [arbitrage.stop_loss]
 # Level 1 — HardCrash (EITHER leg triggers independently)
-hard_drop_abs = 0.03            # Bid drop from entry to trigger (e.g., 0.95→0.92)
+# Calibrated: 0.50 is optimal — wins both PnL and Sharpe across all windows
+hard_drop_abs = 0.50            # Bid drop from entry to trigger (e.g., 0.95→0.45)
 hard_reversal_pct = 0.006       # External crypto reversal % (0.6%)
 # Level 2 — DualTrigger (BOTH must hold for N consecutive ticks)
 reversal_pct = 0.003            # Crypto reversal % for dual trigger (0.3%)
@@ -201,11 +205,37 @@ taker_fee_rate = "0.0315"  # Polymarket taker fee at 50/50 probability
 # └────────────────────────────────────────────────────────────────────────────┘
 
 [backtest.sweep]
-parallelism = 8
+parallelism = 10
 output_dir = "sweep_results"
 rank_by = "sharpe"
-top_n = 20
+top_n = 100
 force = true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MASSIVE SL + REENTRY SWEEP (1,296 combos — ~3h at parallelism=10)
+# Goals:
+#   1. Fine-grain the Pareto sweet spot (exit_drop 0.06-0.50, hard_drop 0.30-0.80)
+#   2. Narrow the exit_window optimum (20-45s bracket)
+#   3. Validate sell_delay=0 vs 4
+#   4. Test reentry params (recovery_max_set_cost, reentry_cooldown_secs)
+# Previous: 72-combo sweep established Pareto front, 0.50 as best eff_threshold
+# Note: reentry params may not fire in backtest (immediate fills = no FOK
+#   rejections), but included to validate that assumption at scale.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[backtest.sweep.stop_loss]
+hard_drop_abs = ["0.30", "0.50", "0.80"]
+recovery_max_set_cost = ["1.00", "1.02", "1.05"]
+reentry_cooldown_secs = [0, 4, 8]
+
+[backtest.sweep.tailend]
+post_entry_exit_drop = ["0.06", "0.08", "0.10", "0.12", "0.15", "0.20", "0.35", "0.50"]
+post_entry_window_secs = [20, 30, 45]
+min_sell_delay_secs = [4]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PREVIOUS SWEEPS (archived)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # VOLATILITY CEILING TEST (5 combos — ~1 min)
@@ -314,5 +344,22 @@ force = true
 # [backtest.sweep.stop_loss]
 # hard_drop_abs = ["<winner>", "<runner_up>"]
 # reversal_pct = ["<winner>", "<runner_up>"]
-[backtest.sweep.tailend]
-min_strike_distance_pct = [0, 0.0005, 0.001]
+# ═══════════════════════════════════════════════════════════════════════════════
+# STOP-LOSS DEEP RESEARCH (396 combos — ~18 min)
+#
+# Goals:
+# 1. Fine-grained SL thresholds (11 values) to find precise optimal point
+# 2. Decouple hard_drop_abs vs post_entry_exit_drop (verify if truly symmetric)
+# 3. Cross with timing params (min_sell_delay × post_entry_window) for interactions
+# 4. New economic metrics: premature_exit_cost, correct_stop_savings in CSV
+#
+# Grid: 3 × 6 × 2 × 2 = 72 combinations (~3 min)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# [backtest.sweep.stop_loss]
+# hard_drop_abs = ["0.03", "0.50", "1.0"]
+#
+# [backtest.sweep.tailend]
+# post_entry_exit_drop = ["0.03", "0.05", "0.10", "0.20", "0.50", "1.0"]
+# min_sell_delay_secs = [0, 8]
+# post_entry_window_secs = [30, 60]
