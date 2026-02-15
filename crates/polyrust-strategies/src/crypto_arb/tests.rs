@@ -18,6 +18,7 @@ use super::base::{
     CryptoArbBase, kelly_position_size, net_profit_margin, parse_slug_timestamp, taker_fee,
 };
 use super::config::{ArbitrageConfig, SizingConfig};
+use super::tailend::TailEndStrategy;
 use super::types::{
     ArbitragePosition, BoundarySnapshot, CompositePriceSnapshot, ExitOrderMeta,
     MarketWithReference, ModeStats, OpenLimitOrder, PositionLifecycle, PositionLifecycleState,
@@ -2830,6 +2831,8 @@ fn lifecycle_all_valid_transitions_succeed() {
             order_type: OrderType::Fok,
             exit_price: dec!(0.90),
             submitted_at: t,
+            hedge_order_id: None,
+            hedge_price: None,
         },
         "trigger fired",
         t,
@@ -2843,6 +2846,8 @@ fn lifecycle_all_valid_transitions_succeed() {
             order_type: OrderType::Gtc,
             exit_price: dec!(0.89),
             submitted_at: t,
+            hedge_order_id: None,
+            hedge_price: None,
         },
         "GTC residual chase",
         t,
@@ -2860,6 +2865,8 @@ fn lifecycle_all_valid_transitions_succeed() {
             order_type: OrderType::Fok,
             exit_price: dec!(0.88),
             submitted_at: t,
+            hedge_order_id: None,
+            hedge_price: None,
         },
         "second trigger",
         t,
@@ -2870,17 +2877,32 @@ fn lifecycle_all_valid_transitions_succeed() {
     let result = lc.transition(PositionLifecycleState::Healthy, "order rejected", t);
     assert!(result.is_ok());
 
-    // Also test Cooldown -> Healthy (set state directly since RecoveryProbe
-    // is temporarily unreachable — will be re-enabled in Task 5 via proactive hedge)
-    let mut lc2 = PositionLifecycle::new();
-    lc2.state = PositionLifecycleState::Cooldown {
-        until: t + Duration::seconds(8),
-    };
-    let result = lc2.transition(PositionLifecycleState::Healthy, "cooldown elapsed", t);
+    // ExitExecuting -> Hedged (hedge fill)
+    let result = lc.transition(
+        PositionLifecycleState::ExitExecuting {
+            order_id: "order-4".to_string(),
+            order_type: OrderType::Fok,
+            exit_price: dec!(0.87),
+            submitted_at: t,
+            hedge_order_id: None,
+            hedge_price: None,
+        },
+        "third trigger",
+        t,
+    );
+    assert!(result.is_ok());
+    let result = lc.transition(
+        PositionLifecycleState::Hedged {
+            hedge_cost: dec!(5.0),
+            hedged_at: t,
+        },
+        "hedge filled",
+        t,
+    );
     assert!(result.is_ok());
 
-    // Verify transitions are logged (5 transitions in lc)
-    assert_eq!(lc.transition_log.len(), 5);
+    // Verify transitions are logged (7 transitions in lc)
+    assert_eq!(lc.transition_log.len(), 7);
 }
 
 #[test]
@@ -2893,6 +2915,8 @@ fn lifecycle_healthy_to_exit_executing() {
             order_type: OrderType::Fok,
             exit_price: dec!(0.92),
             submitted_at: t,
+            hedge_order_id: None,
+            hedge_price: None,
         },
         "hard crash trigger",
         t,
@@ -2905,29 +2929,36 @@ fn lifecycle_healthy_to_exit_executing() {
 }
 
 #[test]
-fn lifecycle_recovery_probe_to_exit_executing_is_invalid() {
+fn lifecycle_exit_executing_to_hedged_is_valid() {
     let t = now();
-    // Set state directly to RecoveryProbe (unreachable from normal flow
-    // after ResidualRisk removal, will be re-enabled in Task 5)
     let mut lc = PositionLifecycle::new();
-    lc.state = PositionLifecycleState::RecoveryProbe {
-        recovery_order_id: "r1".into(),
-        probe_side: OutcomeSide::Down,
-        submitted_at: t,
-    };
 
-    // RecoveryProbe -> ExitExecuting is not a valid transition
-    let result = lc.transition(
+    // First transition to ExitExecuting
+    lc.transition(
         PositionLifecycleState::ExitExecuting {
-            order_id: "o2".into(),
+            order_id: "o1".into(),
             order_type: OrderType::Fok,
-            exit_price: dec!(0.88),
+            exit_price: dec!(0.92),
             submitted_at: t,
+            hedge_order_id: None,
+            hedge_price: None,
         },
-        "recovery failed",
+        "exit trigger",
+        t,
+    )
+    .unwrap();
+
+    // ExitExecuting -> Hedged is a valid transition
+    let result = lc.transition(
+        PositionLifecycleState::Hedged {
+            hedge_cost: dec!(5.0),
+            hedged_at: t,
+        },
+        "hedge filled",
         t,
     );
-    assert!(result.is_err());
+    assert!(result.is_ok());
+    assert!(matches!(lc.state, PositionLifecycleState::Hedged { .. }));
 }
 
 #[test]
@@ -2941,47 +2972,19 @@ fn lifecycle_invalid_transitions_return_error() {
     let msg = result.unwrap_err();
     assert!(msg.contains("Healthy"));
 
-    // Healthy -> RecoveryProbe (invalid)
+    // Healthy -> Hedged (invalid: cannot skip ExitExecuting)
     let mut lc = PositionLifecycle::new();
     let result = lc.transition(
-        PositionLifecycleState::RecoveryProbe {
-            recovery_order_id: "r1".into(),
-            probe_side: OutcomeSide::Up,
-            submitted_at: t,
+        PositionLifecycleState::Hedged {
+            hedge_cost: dec!(5.0),
+            hedged_at: t,
         },
-        "skip to recovery",
-        t,
-    );
-    assert!(result.is_err());
-
-    // Healthy -> Cooldown (invalid)
-    let mut lc = PositionLifecycle::new();
-    let result = lc.transition(
-        PositionLifecycleState::Cooldown { until: t },
-        "skip to cooldown",
-        t,
-    );
-    assert!(result.is_err());
-
-    // Cooldown -> ExitExecuting (invalid: must go through Healthy)
-    let mut lc = PositionLifecycle::new();
-    // Set state directly to Cooldown (RecoveryProbe path is temporarily
-    // unreachable after ResidualRisk removal — will be re-enabled in Task 5)
-    lc.state = PositionLifecycleState::Cooldown { until: t };
-
-    let result = lc.transition(
-        PositionLifecycleState::ExitExecuting {
-            order_id: "o2".into(),
-            order_type: OrderType::Fok,
-            exit_price: dec!(0.85),
-            submitted_at: t,
-        },
-        "try exit from cooldown",
+        "skip to hedged",
         t,
     );
     assert!(result.is_err());
     let msg = result.unwrap_err();
-    assert!(msg.contains("Cooldown") && msg.contains("ExitExecuting"));
+    assert!(msg.contains("Healthy") && msg.contains("Hedged"));
 }
 
 #[test]
@@ -2998,6 +3001,8 @@ fn lifecycle_transition_log_caps_at_50() {
                     order_type: OrderType::Fok,
                     exit_price: dec!(0.90),
                     submitted_at: t,
+                    hedge_order_id: None,
+                    hedge_price: None,
                 },
                 &format!("transition {i}"),
                 t,
@@ -3027,7 +3032,10 @@ fn lifecycle_invalid_transition_preserves_state() {
 
     // Try invalid transition — state should remain Healthy
     let _ = lc.transition(
-        PositionLifecycleState::Cooldown { until: t },
+        PositionLifecycleState::Hedged {
+            hedge_cost: dec!(5.0),
+            hedged_at: t,
+        },
         "should fail",
         t,
     );
@@ -3067,6 +3075,8 @@ fn lifecycle_state_display() {
         order_type: OrderType::Fok,
         exit_price: dec!(0.92),
         submitted_at: now(),
+        hedge_order_id: None,
+        hedge_price: None,
     };
     let s = format!("{state}");
     assert!(s.contains("ExitExecuting"));
@@ -4285,4 +4295,183 @@ async fn recovery_exit_records_cooldown_for_market() {
         !base.is_recovery_exit_cooled_down(&m2).await,
         "Different market should not be affected"
     );
+}
+
+// ── Proactive Hedge Tests ──────────────────────────────────────────────
+
+/// Test hedge buy placed when set completion cost <= recovery_max_set_cost.
+/// Combined: entry_price(0.93) + opposite_ask(0.07) = 1.00 <= 1.01
+#[tokio::test]
+async fn hedge_placed_when_set_completion_cost_within_budget() {
+    let base = make_base_with_market("m1", 300).await;
+
+    // Create position
+    let pos = make_position(
+        "m1",
+        "token_up",
+        OutcomeSide::Up,
+        dec!(0.93),
+        dec!(10),
+        dec!(50000),
+        dec!(0.93),
+    );
+    {
+        let mut positions = base.positions.write().await;
+        positions
+            .entry("m1".to_string())
+            .or_default()
+            .push(pos.clone());
+    }
+    base.ensure_lifecycle("token_up").await;
+
+    // Seed opposite ask at 0.07 (combined 1.00 <= 1.01)
+    {
+        let mut asks = base.cached_asks.write().await;
+        asks.insert("token_down".to_string(), dec!(0.07));
+    }
+
+    let strategy = TailEndStrategy::new(base.clone());
+    let now = Utc::now();
+    let result = strategy.evaluate_hedge(&pos, false, now).await;
+
+    assert!(
+        result.is_some(),
+        "Hedge should be placed when combined cost {} <= {}",
+        pos.entry_price + dec!(0.07),
+        base.config.stop_loss.recovery_max_set_cost
+    );
+
+    let (action, hedge_oid, hedge_price) = result.unwrap();
+    assert!(matches!(action, Action::PlaceOrder(_)));
+    assert!(hedge_oid.starts_with("hedge-"));
+    assert_eq!(hedge_price, dec!(0.07));
+
+    // Verify exit order meta was stored for fill routing
+    let exit_orders = base.exit_orders_by_id.read().await;
+    let hedge_meta = exit_orders.get(&hedge_oid).unwrap();
+    assert!(hedge_meta.source_state.starts_with("Hedge"));
+    assert_eq!(hedge_meta.order_token_id, "token_down");
+    assert_eq!(hedge_meta.token_id, "token_up");
+}
+
+/// Test hedge skipped when combined cost > recovery_max_set_cost.
+/// Combined: entry_price(0.93) + opposite_ask(0.10) = 1.03 > 1.01
+#[tokio::test]
+async fn hedge_skipped_when_cost_exceeds_threshold() {
+    let base = make_base_with_market("m1", 300).await;
+
+    let pos = make_position(
+        "m1",
+        "token_up",
+        OutcomeSide::Up,
+        dec!(0.93),
+        dec!(10),
+        dec!(50000),
+        dec!(0.93),
+    );
+    {
+        let mut positions = base.positions.write().await;
+        positions
+            .entry("m1".to_string())
+            .or_default()
+            .push(pos.clone());
+    }
+
+    // Seed opposite ask at 0.10 (combined 1.03 > 1.01)
+    {
+        let mut asks = base.cached_asks.write().await;
+        asks.insert("token_down".to_string(), dec!(0.10));
+    }
+
+    let strategy = TailEndStrategy::new(base.clone());
+    let now = Utc::now();
+    let result = strategy.evaluate_hedge(&pos, false, now).await;
+
+    assert!(
+        result.is_none(),
+        "Hedge should be skipped when combined cost {} > {}",
+        pos.entry_price + dec!(0.10),
+        base.config.stop_loss.recovery_max_set_cost
+    );
+}
+
+/// Test hedge fill transitions to Hedged state.
+#[test]
+fn hedge_fill_transitions_to_hedged_state() {
+    let t = now();
+    let mut lc = PositionLifecycle::new();
+
+    // First transition to ExitExecuting with a hedge
+    lc.transition(
+        PositionLifecycleState::ExitExecuting {
+            order_id: "exit-1".to_string(),
+            order_type: OrderType::Fak,
+            exit_price: dec!(0.90),
+            submitted_at: t,
+            hedge_order_id: Some("hedge-1".to_string()),
+            hedge_price: Some(dec!(0.08)),
+        },
+        "trigger fired",
+        t,
+    )
+    .unwrap();
+
+    // Then transition to Hedged
+    lc.transition(
+        PositionLifecycleState::Hedged {
+            hedge_cost: dec!(0.082),
+            hedged_at: t,
+        },
+        "hedge filled",
+        t,
+    )
+    .unwrap();
+
+    assert!(matches!(lc.state, PositionLifecycleState::Hedged { .. }));
+    if let PositionLifecycleState::Hedged { hedge_cost, .. } = &lc.state {
+        assert_eq!(*hedge_cost, dec!(0.082));
+    }
+}
+
+/// Test sell fills before hedge: position resolved, hedge should be cancelled.
+/// This verifies the lifecycle allows sell-first resolution.
+#[test]
+fn sell_fills_before_hedge_position_resolved() {
+    let t = now();
+    let mut lc = PositionLifecycle::new();
+
+    // Transition to ExitExecuting with hedge pending
+    lc.transition(
+        PositionLifecycleState::ExitExecuting {
+            order_id: "exit-1".to_string(),
+            order_type: OrderType::Fak,
+            exit_price: dec!(0.90),
+            submitted_at: t,
+            hedge_order_id: Some("hedge-1".to_string()),
+            hedge_price: Some(dec!(0.08)),
+        },
+        "trigger fired",
+        t,
+    )
+    .unwrap();
+
+    // Verify ExitExecuting has hedge tracking
+    if let PositionLifecycleState::ExitExecuting {
+        hedge_order_id,
+        hedge_price,
+        ..
+    } = &lc.state
+    {
+        assert_eq!(hedge_order_id.as_deref(), Some("hedge-1"));
+        assert_eq!(*hedge_price, Some(dec!(0.08)));
+    } else {
+        panic!("Expected ExitExecuting state");
+    }
+
+    // When sell fills first, position is removed (lifecycle is cleaned up externally).
+    // The ExitExecuting -> Healthy transition is used for partial fills that
+    // cancel the hedge, while full fills just remove the lifecycle entirely.
+    // Test that ExitExecuting can transition to Healthy (for cancel-and-retry path):
+    let result = lc.transition(PositionLifecycleState::Healthy, "sell cancelled for retry", t);
+    assert!(result.is_ok());
 }

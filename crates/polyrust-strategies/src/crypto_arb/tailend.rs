@@ -390,50 +390,58 @@ impl TailEndStrategy {
 
                     if matches!(
                         lifecycle.state,
-                        PositionLifecycleState::RecoveryProbe { .. }
+                        PositionLifecycleState::ExitExecuting { .. }
                     ) {
-                        // Recovery order placement failed — resolve position with
-                        // loss (RecoveryProbe cannot transition to Healthy).
-                        let pos_info = {
-                            let positions = self.base.positions.read().await;
-                            positions
-                                .values()
-                                .flat_map(|v| v.iter())
-                                .find(|p| p.token_id == position_token)
-                                .map(|p| (p.size, p.market_id.clone()))
-                        };
-                        warn!(
-                            token_id = %position_token,
-                            message = %result.message,
-                            remaining = ?pos_info.as_ref().map(|(s, _)| s),
-                            "Recovery order placement failed — resolving position with loss"
-                        );
-                        if let Some((remaining, market_id)) = pos_info {
-                            self.base.record_recovery_exit_cooldown(&market_id).await;
-                            self.base
-                                .reduce_or_remove_position_by_token(&position_token, remaining)
-                                .await;
-                        }
-                        self.base.remove_lifecycle(&position_token).await;
-                    } else {
-                        // ExitExecuting placement failed — transition back to Healthy
-                        // so the system re-evaluates on the next orderbook update.
-                        if let Err(e) = lifecycle.transition(
-                            PositionLifecycleState::Healthy,
-                            "exit order placement failed",
-                            now,
-                        ) {
+                        // Check if this was a hedge order placement failure
+                        let is_hedge = meta
+                            .as_ref()
+                            .map(|m| m.source_state.starts_with("Hedge"))
+                            .unwrap_or(false);
+
+                        if is_hedge {
+                            // Hedge placement failed — clear hedge tracking, continue sell-only
+                            if let PositionLifecycleState::ExitExecuting {
+                                ref mut hedge_order_id,
+                                ref mut hedge_price,
+                                ..
+                            } = lifecycle.state
+                            {
+                                *hedge_order_id = None;
+                                *hedge_price = None;
+                            }
+                            self.write_lifecycle(&position_token, &lifecycle).await;
                             warn!(
                                 token_id = %position_token,
-                                error = %e,
-                                "Failed to transition to Healthy after placement failure"
+                                message = %result.message,
+                                "Hedge order placement failed — continuing sell-only exit"
+                            );
+                        } else {
+                            // Exit order placement failed — transition back to Healthy
+                            if let Err(e) = lifecycle.transition(
+                                PositionLifecycleState::Healthy,
+                                "exit order placement failed",
+                                now,
+                            ) {
+                                warn!(
+                                    token_id = %position_token,
+                                    error = %e,
+                                    "Failed to transition to Healthy after placement failure"
+                                );
+                            }
+                            self.write_lifecycle(&position_token, &lifecycle).await;
+                            warn!(
+                                token_id = %position_token,
+                                message = %result.message,
+                                "Exit order placement failed — back to Healthy for re-evaluation"
                             );
                         }
-                        self.write_lifecycle(&position_token, &lifecycle).await;
+                    } else {
+                        // Unknown state — log and ignore
                         warn!(
                             token_id = %position_token,
+                            state = %lifecycle.state,
                             message = %result.message,
-                            "Exit order placement failed — back to Healthy for re-evaluation"
+                            "Order placement failed in unexpected state"
                         );
                     }
                 }
@@ -995,7 +1003,7 @@ impl TailEndStrategy {
                     "Fast-path exit trigger on ExternalPrice"
                 );
 
-                if let Some(action) = self
+                if let Some(exit_actions) = self
                     .build_exit_order(
                         &pos,
                         current_bid,
@@ -1009,7 +1017,7 @@ impl TailEndStrategy {
                     .await
                 {
                     self.write_lifecycle(&pos.token_id, &lifecycle).await;
-                    actions.push(action);
+                    actions.extend(exit_actions);
                     continue;
                 }
             }
@@ -1084,21 +1092,8 @@ impl TailEndStrategy {
                 continue;
             }
 
-            // Handle Cooldown state: check if elapsed, transition back to Healthy
-            if let PositionLifecycleState::Cooldown { until } = lifecycle.state {
-                if self.handle_cooldown(&pos, &mut lifecycle, until, now).await {
-                    // Cooldown elapsed — fall through to normal trigger evaluation
-                } else {
-                    // Still in cooldown — skip
-                    continue;
-                }
-            }
-
-            // RecoveryProbe: order is in flight, wait for fill/reject events
-            if matches!(
-                lifecycle.state,
-                PositionLifecycleState::RecoveryProbe { .. }
-            ) {
+            // Hedged: set complete, waiting for expiry — skip evaluation
+            if matches!(lifecycle.state, PositionLifecycleState::Hedged { .. }) {
                 continue;
             }
 
@@ -1239,7 +1234,7 @@ impl TailEndStrategy {
                 }
 
                 // Trigger fired and exit allowed — execute exit
-                if let Some(action) = self
+                if let Some(exit_actions) = self
                     .build_exit_order(
                         &pos,
                         current_bid,
@@ -1253,7 +1248,7 @@ impl TailEndStrategy {
                     .await
                 {
                     self.write_lifecycle(&pos.token_id, &lifecycle).await;
-                    actions.push(action);
+                    actions.extend(exit_actions);
                     continue;
                 }
             }
@@ -1280,7 +1275,7 @@ impl TailEndStrategy {
         trigger_kind: &StopLossTriggerKind,
         lifecycle: &mut crate::crypto_arb::types::PositionLifecycle,
         now: DateTime<Utc>,
-    ) -> Option<Action> {
+    ) -> Option<Vec<Action>> {
         // Compute depth-capped clip size
         let bid_depth =
             snapshot.bid_depth_down_to(current_bid - pos.tick_size * Decimal::from(3u32));
@@ -1316,6 +1311,14 @@ impl TailEndStrategy {
         // (real order ID comes back from PlaceOrder result, but we need to track intent now)
         let exit_order_id = format!("exit-{}-{}", pos.token_id, now.timestamp_millis());
 
+        // Evaluate hedge profitability: can we buy the opposite token to complete the set?
+        let hedge_action = self.evaluate_hedge(pos, neg_risk, now).await;
+        let (hedge_order_id, hedge_price) = if let Some((ref _action, ref h_oid, h_price)) = hedge_action {
+            (Some(h_oid.clone()), Some(h_price))
+        } else {
+            (None, None)
+        };
+
         // Transition lifecycle to ExitExecuting
         if let Err(e) = lifecycle.transition(
             PositionLifecycleState::ExitExecuting {
@@ -1323,6 +1326,8 @@ impl TailEndStrategy {
                 order_type: OrderType::Fak,
                 exit_price: current_bid,
                 submitted_at: now,
+                hedge_order_id: hedge_order_id.clone(),
+                hedge_price,
             },
             &format!("trigger fired: {trigger_kind}"),
             now,
@@ -1349,6 +1354,7 @@ impl TailEndStrategy {
             );
         }
 
+        let has_hedge = hedge_action.is_some();
         info!(
             market = %pos.market_id,
             token_id = %pos.token_id,
@@ -1357,10 +1363,15 @@ impl TailEndStrategy {
             clip = %clip,
             side = ?pos.side,
             trigger = %trigger_kind,
+            hedge = has_hedge,
             "TailEnd lifecycle stop-loss triggered"
         );
 
-        Some(Action::PlaceOrder(order))
+        let mut result = vec![Action::PlaceOrder(order)];
+        if let Some((hedge_act, _, _)) = hedge_action {
+            result.push(hedge_act);
+        }
+        Some(result)
     }
 
     /// Write a lifecycle back to the shared store.
@@ -1369,33 +1380,87 @@ impl TailEndStrategy {
         lifecycles.insert(token_id.to_string(), lifecycle.clone());
     }
 
-    /// Handle a position in Cooldown state during an orderbook update.
+    /// Evaluate hedge profitability for a position being exited.
     ///
-    /// When cooldown has elapsed, transitions back to Healthy so the position
-    /// can be re-evaluated by the trigger hierarchy.
-    async fn handle_cooldown(
+    /// Checks if buying the opposite token completes the set within the
+    /// `recovery_max_set_cost` budget. Returns the hedge action, order ID,
+    /// and price if profitable.
+    pub(crate) async fn evaluate_hedge(
         &self,
         pos: &ArbitragePosition,
-        lifecycle: &mut PositionLifecycle,
-        until: DateTime<Utc>,
+        neg_risk: bool,
         now: DateTime<Utc>,
-    ) -> bool {
-        if now >= until {
-            if let Err(e) =
-                lifecycle.transition(PositionLifecycleState::Healthy, "cooldown elapsed", now)
-            {
-                warn!(token_id = %pos.token_id, error = %e, "Cooldown→Healthy transition failed");
-                return false;
-            }
+    ) -> Option<(Action, OrderId, Decimal)> {
+        let sl_config = &self.base.config.stop_loss;
+        if !sl_config.recovery_enabled {
+            return None;
+        }
+
+        // Get opposite token
+        let opposite_token = self
+            .base
+            .get_opposite_token(&pos.market_id, &pos.token_id)
+            .await?;
+
+        // Get opposite ask price
+        let opposite_ask = {
+            let asks = self.base.cached_asks.read().await;
+            asks.get(&opposite_token).copied()?
+        };
+
+        // Check set completion cost: entry_price + opposite_ask <= recovery_max_set_cost
+        let combined_cost = pos.entry_price + opposite_ask;
+        if combined_cost > sl_config.recovery_max_set_cost {
             info!(
                 token_id = %pos.token_id,
-                "Cooldown elapsed, position back to Healthy"
+                entry = %pos.entry_price,
+                opposite_ask = %opposite_ask,
+                combined = %combined_cost,
+                max = %sl_config.recovery_max_set_cost,
+                "Hedge skipped: combined cost exceeds budget"
             );
-            self.write_lifecycle(&pos.token_id, lifecycle).await;
-            true // Caller should continue to normal evaluation
-        } else {
-            false // Still in cooldown
+            return None;
         }
+
+        // Build GTC buy order for opposite token
+        let hedge_order_id = format!("hedge-{}-{}", pos.token_id, now.timestamp_millis());
+        let hedge_order = OrderRequest::new(
+            opposite_token.clone(),
+            opposite_ask,
+            pos.size,
+            OrderSide::Buy,
+            OrderType::Gtc,
+            neg_risk,
+        )
+        .with_tick_size(pos.tick_size)
+        .with_fee_rate_bps(pos.fee_rate_bps);
+
+        // Store hedge order meta for fill routing
+        {
+            let mut exit_orders = self.base.exit_orders_by_id.write().await;
+            exit_orders.insert(
+                hedge_order_id.clone(),
+                ExitOrderMeta {
+                    token_id: pos.token_id.clone(),
+                    order_token_id: opposite_token,
+                    order_type: OrderType::Gtc,
+                    source_state: "Hedge(set completion)".to_string(),
+                    retry_count: 0,
+                    exit_price: opposite_ask,
+                    clip_size: pos.size,
+                },
+            );
+        }
+
+        info!(
+            token_id = %pos.token_id,
+            opposite_ask = %opposite_ask,
+            combined_cost = %combined_cost,
+            size = %pos.size,
+            "Hedge order placed: simultaneous opposite-side buy for set completion"
+        );
+
+        Some((Action::PlaceOrder(hedge_order), hedge_order_id, opposite_ask))
     }
 
     /// Handle a fully filled order event (GTC entry fills, stop-loss sells, GTC SL fills).
@@ -1414,96 +1479,65 @@ impl TailEndStrategy {
             };
             if let Some(meta) = exit_meta {
                 let now = self.base.event_time().await;
-                let sl_config = &self.base.config.stop_loss;
 
-                if meta.source_state.starts_with("RecoveryProbe") {
-                    // Recovery order fill
-                    let remaining_after = {
-                        let positions = self.base.positions.read().await;
-                        positions
-                            .values()
-                            .flat_map(|v| v.iter())
-                            .find(|p| p.token_id == meta.token_id)
-                            .map(|p| p.size)
-                    };
-
-                    let is_partial = remaining_after
-                        .map(|pos_size| size < pos_size)
-                        .unwrap_or(false);
+                if meta.source_state.starts_with("Hedge") {
+                    // Hedge order filled — record cost and transition to Hedged
+                    let hedge_fee = taker_fee(price, self.base.config.fee.taker_fee_rate);
+                    let hedge_cost = (price + hedge_fee) * size;
+                    self.base
+                        .add_recovery_cost(&meta.token_id, -hedge_cost)
+                        .await;
 
                     let mut lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
 
-                    if is_partial {
-                        warn!(
-                            order_id = %order_id,
-                            token_id = %meta.token_id,
-                            fill_size = %size,
-                            remaining = ?remaining_after,
-                            "Recovery order partially filled — resolving remaining with loss"
-                        );
-
-                        let pos_info = {
-                            let positions = self.base.positions.read().await;
-                            positions
-                                .values()
-                                .flat_map(|v| v.iter())
-                                .find(|p| p.token_id == meta.token_id)
-                                .map(|p| p.market_id.clone())
-                        };
-                        if let Some(market_id) = pos_info {
-                            self.base.record_recovery_exit_cooldown(&market_id).await;
-                        }
-
-                        if let Some(remaining) = remaining_after {
-                            self.base
-                                .reduce_or_remove_position_by_token(&meta.token_id, remaining)
-                                .await;
-                        }
-
-                        self.base.remove_lifecycle(&meta.token_id).await;
+                    // Cancel the sell order if it hasn't filled yet
+                    let cancel_sell = if let PositionLifecycleState::ExitExecuting {
+                        ref order_id,
+                        ..
+                    } = lifecycle.state
+                    {
+                        Some(order_id.clone())
                     } else {
-                        // Record the cost of the opposite-side buy on the position.
-                        // Set completion redeems for $1.00/share at expiry; the net
-                        // recovery P&L is (1.0 - entry_price - recovery_price) * size
-                        // minus fees. We store recovery cost on the position so the
-                        // expiry handler's settlement P&L includes it for correct
-                        // win/loss classification and recent_pnl tracking.
-                        let recovery_fee = taker_fee(price, self.base.config.fee.taker_fee_rate);
-                        let recovery_cost = -(price + recovery_fee) * size;
-                        self.base
-                            .add_recovery_cost(&meta.token_id, recovery_cost)
-                            .await;
+                        None
+                    };
 
-                        let cooldown_until =
-                            now + chrono::Duration::seconds(sl_config.reentry_cooldown_secs);
-
-                        if let Err(e) = lifecycle.transition(
-                            PositionLifecycleState::Cooldown {
-                                until: cooldown_until,
-                            },
-                            &format!("recovery fill: {} at {}", meta.source_state, price),
-                            now,
-                        ) {
-                            warn!(
-                                token_id = %meta.token_id,
-                                error = %e,
-                                "RecoveryProbe→Cooldown transition failed"
-                            );
-                        }
-                        lifecycle.pending_exit_order_id = None;
-                        self.write_lifecycle(&meta.token_id, &lifecycle).await;
-
-                        info!(
-                            order_id = %order_id,
+                    if let Err(e) = lifecycle.transition(
+                        PositionLifecycleState::Hedged {
+                            hedge_cost,
+                            hedged_at: now,
+                        },
+                        &format!("hedge filled at {price}"),
+                        now,
+                    ) {
+                        warn!(
                             token_id = %meta.token_id,
-                            source = %meta.source_state,
-                            fill_price = %price,
-                            fill_size = %size,
-                            recovery_cost = %recovery_cost,
-                            cooldown_secs = sl_config.reentry_cooldown_secs,
-                            "Recovery order filled — transitioning to Cooldown"
+                            error = %e,
+                            "ExitExecuting→Hedged transition failed"
                         );
                     }
+                    lifecycle.pending_exit_order_id = None;
+                    self.write_lifecycle(&meta.token_id, &lifecycle).await;
+
+                    info!(
+                        order_id = %order_id,
+                        token_id = %meta.token_id,
+                        fill_price = %price,
+                        fill_size = %size,
+                        hedge_cost = %hedge_cost,
+                        "Hedge order filled — set complete, transitioning to Hedged"
+                    );
+
+                    // Clean up exit order tracking
+                    {
+                        let mut exit_orders = self.base.exit_orders_by_id.write().await;
+                        exit_orders.remove(order_id);
+                    }
+
+                    // Cancel the sell order (best-effort)
+                    if let Some(sell_oid) = cancel_sell {
+                        return vec![Action::CancelOrder(sell_oid)];
+                    }
+                    return vec![];
                 } else {
                     // Exit order fill (ExitExecuting state)
                     let exit_price = price; // Use actual CLOB fill price
@@ -1577,6 +1611,8 @@ impl TailEndStrategy {
                                         order_type: OrderType::Gtc,
                                         exit_price: gtc_price,
                                         submitted_at: now,
+                                        hedge_order_id: None,
+                                        hedge_price: None,
                                     },
                                     &format!("FAK partial fill, GTC residual for {remaining}"),
                                     now,
@@ -1619,14 +1655,56 @@ impl TailEndStrategy {
                             }
                         }
 
+                        // If sell fully closed the position, cancel any pending hedge
+                        if fully_closed {
+                            let hedge_to_cancel = {
+                                let exit_orders = self.base.exit_orders_by_id.read().await;
+                                exit_orders
+                                    .iter()
+                                    .find(|(_, m)| {
+                                        m.token_id == meta.token_id
+                                            && m.source_state.starts_with("Hedge")
+                                    })
+                                    .map(|(oid, _)| oid.clone())
+                            };
+
+                            // Clean up exit order tracking
+                            {
+                                let mut exit_orders =
+                                    self.base.exit_orders_by_id.write().await;
+                                exit_orders.remove(order_id);
+                                if let Some(ref h_oid) = hedge_to_cancel {
+                                    exit_orders.remove(h_oid);
+                                }
+                            }
+
+                            info!(
+                                token_id = %meta.token_id,
+                                order_id = %order_id,
+                                pnl = %pnl,
+                                fill_size = %size,
+                                exit_type = if is_gtc_exit { "GTC (0% fee)" } else { "FAK (taker fee)" },
+                                "Exit order filled — position fully closed"
+                            );
+
+                            if let Some(h_oid) = hedge_to_cancel {
+                                info!(
+                                    token_id = %meta.token_id,
+                                    hedge_order_id = %h_oid,
+                                    "Sell filled before hedge — cancelling pending hedge"
+                                );
+                                return vec![Action::CancelOrder(h_oid)];
+                            }
+                            return vec![];
+                        }
+
                         info!(
                             token_id = %meta.token_id,
                             order_id = %order_id,
                             pnl = %pnl,
                             fill_size = %size,
-                            fully_closed,
                             exit_type = if is_gtc_exit { "GTC (0% fee)" } else { "FAK (taker fee)" },
-                            "Exit order filled"
+                            "Exit order partially filled"
                         );
                     } else {
                         warn!(
@@ -1756,17 +1834,17 @@ impl Strategy for TailEndStrategy {
                     exit_orders.get(order_id).cloned()
                 };
                 if let Some(meta) = exit_meta {
-                    let is_recovery = meta.source_state.starts_with("RecoveryProbe");
+                    let is_hedge = meta.source_state.starts_with("Hedge");
 
-                    if is_recovery {
-                        // Recovery orders buy the opposite side for set completion.
+                    if is_hedge {
+                        // Hedge orders buy the opposite side for set completion.
                         // Do NOT reduce the original position — it still holds its tokens.
                         info!(
                             order_id = %order_id,
                             token_id = %meta.token_id,
                             filled = %filled_size,
                             remaining = %remaining_size,
-                            "Recovery order partially filled — position unchanged"
+                            "Hedge order partially filled — position unchanged"
                         );
                     } else {
                         // Normal exit: reduce position by the filled amount so subsequent
@@ -1914,45 +1992,41 @@ impl Strategy for TailEndStrategy {
                             return Ok(vec![]);
                         }
 
-                        if matches!(
-                            lifecycle.state,
-                            PositionLifecycleState::RecoveryProbe { .. }
-                        ) {
-                            // Recovery failed — accept loss, resolve position
-                            let pos_info = {
-                                let positions = self.base.positions.read().await;
-                                positions
-                                    .values()
-                                    .flat_map(|v| v.iter())
-                                    .find(|p| p.token_id == position_token)
-                                    .map(|p| (p.size, p.market_id.clone()))
-                            };
+                        // Check if this is a hedge order rejection
+                        if let Some(ref em) = exit_meta {
+                            if em.source_state.starts_with("Hedge") {
+                                // Hedge rejected — clear hedge tracking, continue sell-only
+                                let mut lifecycle =
+                                    self.base.ensure_lifecycle(position_token).await;
+                                if let PositionLifecycleState::ExitExecuting {
+                                    ref mut hedge_order_id,
+                                    ref mut hedge_price,
+                                    ..
+                                } = lifecycle.state
+                                {
+                                    *hedge_order_id = None;
+                                    *hedge_price = None;
+                                }
+                                self.write_lifecycle(position_token, &lifecycle).await;
 
-                            warn!(
-                                token_id = %position_token,
-                                reason = %reason,
-                                remaining = ?pos_info.as_ref().map(|(s, _)| s),
-                                "Recovery order rejected — accepting loss, resolving position"
-                            );
+                                // Clean up hedge order tracking
+                                {
+                                    let mut exit_orders =
+                                        self.base.exit_orders_by_id.write().await;
+                                    exit_orders.retain(|_, m| {
+                                        !(m.token_id == position_token
+                                            && m.source_state.starts_with("Hedge"))
+                                    });
+                                }
 
-                            if let Some((remaining, market_id)) = pos_info {
-                                // Record recovery exit cooldown for re-entry gating
-                                self.base.record_recovery_exit_cooldown(&market_id).await;
-                                self.base
-                                    .reduce_or_remove_position_by_token(position_token, remaining)
-                                    .await;
+                                warn!(
+                                    token_id = %position_token,
+                                    reason = %reason,
+                                    "Hedge order rejected — continuing sell-only exit"
+                                );
+
+                                return Ok(vec![]);
                             }
-
-                            // Clean up
-                            {
-                                let mut exit_orders = self.base.exit_orders_by_id.write().await;
-                                exit_orders.retain(|_, meta| meta.token_id != position_token);
-                            }
-                            // Lifecycle was already cleaned up by reduce_or_remove_position_by_token
-                            // if fully closed. If not, force-remove lifecycle.
-                            self.base.remove_lifecycle(position_token).await;
-
-                            return Ok(vec![]);
                         }
                     }
                 }
@@ -2027,39 +2101,47 @@ impl Strategy for TailEndStrategy {
                         let fill_price = meta.exit_price;
                         let now = self.base.event_time().await;
 
-                        if meta.source_state.starts_with("RecoveryProbe") {
-                            // Recovery order matched — handle like recovery fill
-                            // Use clip_size from order meta (recovery orders use full
-                            // remaining size, stored at placement time)
+                        if meta.source_state.starts_with("Hedge") {
+                            // Hedge order cancel-matched — treat as hedge fill
                             let fill_size = meta.clip_size;
-                            let sl_config = &self.base.config.stop_loss;
 
                             if fill_size > Decimal::ZERO {
-                                let recovery_fee =
+                                let hedge_fee =
                                     taker_fee(fill_price, self.base.config.fee.taker_fee_rate);
-                                let recovery_cost = -(fill_price + recovery_fee) * fill_size;
+                                let hedge_cost = (fill_price + hedge_fee) * fill_size;
                                 self.base
-                                    .add_recovery_cost(&meta.token_id, recovery_cost)
+                                    .add_recovery_cost(&meta.token_id, -hedge_cost)
                                     .await;
 
                                 let mut lifecycle =
                                     self.base.ensure_lifecycle(&meta.token_id).await;
-                                let cooldown_until = now
-                                    + chrono::Duration::seconds(sl_config.reentry_cooldown_secs);
+
+                                // Cancel the sell order
+                                let cancel_sell =
+                                    if let PositionLifecycleState::ExitExecuting {
+                                        ref order_id, ..
+                                    } = lifecycle.state
+                                    {
+                                        Some(order_id.clone())
+                                    } else {
+                                        None
+                                    };
+
                                 if let Err(e) = lifecycle.transition(
-                                    PositionLifecycleState::Cooldown {
-                                        until: cooldown_until,
+                                    PositionLifecycleState::Hedged {
+                                        hedge_cost,
+                                        hedged_at: now,
                                     },
                                     &format!(
-                                        "cancel-matched recovery: {} at {}",
-                                        meta.source_state, fill_price
+                                        "cancel-matched hedge at {}",
+                                        fill_price
                                     ),
                                     now,
                                 ) {
                                     warn!(
                                         token_id = %meta.token_id,
                                         error = %e,
-                                        "RecoveryProbe→Cooldown transition failed (cancel-matched)"
+                                        "ExitExecuting→Hedged transition failed (cancel-matched)"
                                     );
                                 }
                                 lifecycle.pending_exit_order_id = None;
@@ -2070,13 +2152,23 @@ impl Strategy for TailEndStrategy {
                                     token_id = %meta.token_id,
                                     fill_price = %fill_price,
                                     clip_size = %fill_size,
-                                    "Recovery order cancel-failed (matched) — treated as fill, transitioning to Cooldown"
+                                    "Hedge cancel-matched — treated as fill, transitioning to Hedged"
                                 );
+
+                                // Cancel the sell order
+                                {
+                                    let mut exit_orders =
+                                        self.base.exit_orders_by_id.write().await;
+                                    exit_orders.remove(order_id);
+                                }
+                                if let Some(sell_oid) = cancel_sell {
+                                    return Ok(vec![Action::CancelOrder(sell_oid)]);
+                                }
                             } else {
                                 warn!(
                                     order_id = %order_id,
                                     token_id = %meta.token_id,
-                                    "Recovery cancel-matched but clip_size is zero — cleaning up lifecycle"
+                                    "Hedge cancel-matched but clip_size is zero — cleaning up"
                                 );
                                 let mut lifecycle =
                                     self.base.ensure_lifecycle(&meta.token_id).await;
@@ -3180,6 +3272,8 @@ mod tests {
                         order_type: OrderType::Gtc,
                         exit_price: dec!(0.81),
                         submitted_at: now - Duration::seconds(3), // 3s old (> 2s refresh)
+                        hedge_order_id: None,
+                        hedge_price: None,
                     },
                     "test setup",
                     now,
@@ -3372,6 +3466,8 @@ mod tests {
                         order_type: exit_order_type,
                         exit_price: dec!(0.85),
                         submitted_at: now,
+                        hedge_order_id: None,
+                        hedge_price: None,
                     },
                     "test setup: trigger fired",
                     now,
@@ -3568,6 +3664,8 @@ mod tests {
                         order_type: OrderType::Fak,
                         exit_price: dec!(0.85),
                         submitted_at: now,
+                        hedge_order_id: None,
+                        hedge_price: None,
                     },
                     "test trigger",
                     now,
@@ -3698,6 +3796,8 @@ mod tests {
                         order_type: OrderType::Fak,
                         exit_price: dec!(0.85),
                         submitted_at: now,
+                        hedge_order_id: None,
+                        hedge_price: None,
                     },
                     "test trigger",
                     now,
@@ -3928,6 +4028,8 @@ mod tests {
                         order_type: OrderType::Fak,
                         exit_price: dec!(0.85),
                         submitted_at: now,
+                        hedge_order_id: None,
+                        hedge_price: None,
                     },
                     "test pre-existing exit",
                     now,

@@ -511,30 +511,30 @@ impl fmt::Display for StopLossTriggerKind {
 /// - Healthy -> ExitExecuting (trigger fires; hard crash bypasses sell delay)
 /// - ExitExecuting -> ExitExecuting (GTC residual after FAK partial fill)
 /// - ExitExecuting -> Healthy (GTC cancelled for chase, rejection, or FAK zero fill)
+/// - ExitExecuting -> Hedged (hedge fill completes set)
 /// - ExitExecuting -> (resolved) (fully filled — position removed)
-/// - RecoveryProbe -> Cooldown (recovery neutralized position)
-/// - RecoveryProbe -> (resolved) (recovery fails — position resolved with loss)
-/// - Cooldown -> Healthy (cooldown elapsed)
+/// - Hedged -> (resolved) (position resolved at expiry)
 #[derive(Debug, Clone, PartialEq)]
 pub enum PositionLifecycleState {
     /// Position is active and being monitored. No exit trigger has fired.
     Healthy,
     /// An exit order has been submitted and is in flight.
     /// FAK for initial clip, GTC for residual chase.
+    /// Optional hedge order tracks simultaneous opposite-side buy.
     ExitExecuting {
         order_id: OrderId,
         order_type: OrderType,
         exit_price: Decimal,
         submitted_at: DateTime<Utc>,
+        hedge_order_id: Option<OrderId>,
+        hedge_price: Option<Decimal>,
     },
-    /// Attempting recovery: opposite-side set completion or re-entry.
-    RecoveryProbe {
-        recovery_order_id: OrderId,
-        probe_side: OutcomeSide,
-        submitted_at: DateTime<Utc>,
+    /// Set complete: both YES and NO tokens held, waiting for expiry.
+    /// Guaranteed $1.00 redemption per share.
+    Hedged {
+        hedge_cost: Decimal,
+        hedged_at: DateTime<Utc>,
     },
-    /// Post-recovery cooldown before position can be re-evaluated.
-    Cooldown { until: DateTime<Utc> },
 }
 
 impl fmt::Display for PositionLifecycleState {
@@ -544,14 +544,18 @@ impl fmt::Display for PositionLifecycleState {
             Self::ExitExecuting {
                 order_type,
                 exit_price,
+                hedge_order_id,
                 ..
             } => {
-                write!(f, "ExitExecuting({order_type:?}@{exit_price})")
+                if hedge_order_id.is_some() {
+                    write!(f, "ExitExecuting({order_type:?}@{exit_price}+hedge)")
+                } else {
+                    write!(f, "ExitExecuting({order_type:?}@{exit_price})")
+                }
             }
-            Self::RecoveryProbe { probe_side, .. } => {
-                write!(f, "RecoveryProbe({probe_side:?})")
+            Self::Hedged { hedge_cost, .. } => {
+                write!(f, "Hedged(cost={hedge_cost})")
             }
-            Self::Cooldown { until } => write!(f, "Cooldown(until={until})"),
         }
     }
 }
@@ -562,8 +566,7 @@ impl PositionLifecycleState {
         match self {
             Self::Healthy => "Healthy",
             Self::ExitExecuting { .. } => "ExitExecuting",
-            Self::RecoveryProbe { .. } => "RecoveryProbe",
-            Self::Cooldown { .. } => "Cooldown",
+            Self::Hedged { .. } => "Hedged",
         }
     }
 
@@ -578,8 +581,7 @@ impl PositionLifecycleState {
             (Healthy, ExitExecuting { .. })
                 | (ExitExecuting { .. }, ExitExecuting { .. }) // GTC residual after FAK partial fill
                 | (ExitExecuting { .. }, Healthy) // GTC cancelled for chase or rejection
-                | (RecoveryProbe { .. }, Cooldown { .. })
-                | (Cooldown { .. }, Healthy)
+                | (ExitExecuting { .. }, Hedged { .. }) // Hedge fill completes set
         )
     }
 }
