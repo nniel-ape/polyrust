@@ -23,7 +23,7 @@ fn truncate_id(id: &str, max_len: usize) -> String {
     }
 }
 
-use crate::crypto_arb::escape_html;
+use crate::shared::escape_html;
 
 use super::types::{DutchBookState, ExecutionState};
 
