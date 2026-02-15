@@ -3409,9 +3409,11 @@ async fn cancel_on_placed_tracks_orphaned_sell_for_late_fill() {
     );
 
     // Order tracked in orphaned_sells
-    assert_eq!(
-        strategy.orphaned_sells.get("orphan_sell_late"),
-        Some(&"m1".to_string()),
+    assert!(
+        matches!(
+            strategy.orphaned_sells.get("orphan_sell_late"),
+            Some((mid, _)) if mid == "m1"
+        ),
         "Cancelled order must be tracked in orphaned_sells"
     );
 
@@ -3519,9 +3521,11 @@ async fn cancel_on_placed_redispatch_tracks_orphaned_sell() {
     assert!(actions.iter().any(|a| matches!(a, Action::PlaceOrder(_))));
 
     // Orphaned sell tracked
-    assert_eq!(
-        strategy.orphaned_sells.get("ambiguous_sell"),
-        Some(&"m1".to_string()),
+    assert!(
+        matches!(
+            strategy.orphaned_sells.get("ambiguous_sell"),
+            Some((mid, _)) if mid == "m1"
+        ),
         "Ambiguous SELL must be tracked in orphaned_sells after cancel"
     );
 
@@ -3620,9 +3624,11 @@ async fn stale_fill_tracks_active_sell_in_orphaned_sells() {
     assert!(!strategy.active_executions.contains_key("m1"));
 
     // The cancelled "sell_retry" must be tracked in orphaned_sells
-    assert_eq!(
-        strategy.orphaned_sells.get("sell_retry"),
-        Some(&"m1".to_string()),
+    assert!(
+        matches!(
+            strategy.orphaned_sells.get("sell_retry"),
+            Some((mid, _)) if mid == "m1"
+        ),
         "Active sell cancelled by stale fill must be tracked in orphaned_sells"
     );
 
@@ -3746,9 +3752,10 @@ async fn orphaned_sell_cleaned_up_on_successful_cancel() {
         setup_strategy_with_market(dec!(0.40), dec!(200), dec!(0.40), dec!(150)).await;
 
     // Manually insert an orphaned sell
-    strategy
-        .orphaned_sells
-        .insert("orphan_123".to_string(), "m1".to_string());
+    strategy.orphaned_sells.insert(
+        "orphan_123".to_string(),
+        ("m1".to_string(), chrono::Utc::now()),
+    );
 
     // Cancel event for the orphaned sell → should clean up
     strategy.handle_order_cancelled("orphan_123").await;

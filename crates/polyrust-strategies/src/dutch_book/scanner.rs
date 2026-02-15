@@ -235,14 +235,16 @@ impl GammaScanner {
             return None;
         }
 
-        // Parse optional fields with defaults
+        // Parse optional fields with defaults.
+        // Convert via string to avoid f64→Decimal precision artifacts
+        // (e.g. 0.01 as f64 becoming 0.01000000000000000020...).
         let min_order_size = raw
             .order_min_size
-            .and_then(|f| Decimal::try_from(f).ok())
+            .and_then(|f| f.to_string().parse::<Decimal>().ok())
             .unwrap_or(Decimal::new(5, 0));
         let tick_size = raw
             .order_price_min_tick_size
-            .and_then(|f| Decimal::try_from(f).ok())
+            .and_then(|f| f.to_string().parse::<Decimal>().ok())
             .unwrap_or(Decimal::new(1, 2));
         let fee_rate_bps = raw.maker_base_fee.map(|f| f.round() as u32).unwrap_or(0);
 

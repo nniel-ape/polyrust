@@ -15,6 +15,10 @@ const EXECUTION_TIMEOUT_SECS: i64 = 120;
 /// Minimum interval between stale execution cleanup runs (seconds).
 const CLEANUP_INTERVAL_SECS: i64 = 30;
 
+/// Time-to-live for orphaned sell entries (seconds). Entries older than this
+/// are purged to prevent unbounded growth of the `orphaned_sells` HashMap.
+const ORPHANED_SELL_TTL_SECS: i64 = 600;
+
 use polyrust_core::prelude::*;
 
 use super::analyzer::ArbitrageAnalyzer;
@@ -52,10 +56,11 @@ pub struct DutchBookStrategy {
     /// preserves the mapping so handle_order_placed can still resolve the market_id.
     pub(crate) cancel_token_to_market: HashMap<TokenId, MarketId>,
     /// Sell orders that were cancelled but may still fill (cancel could race with fill).
-    /// Maps order_id → market_id so late fills can be detected and accounted for rather
-    /// than silently dropped. Populated when cancel_on_placed cancels a SELL, or when
-    /// a stale-fill cleanup cancels the active unwind order.
-    pub(crate) orphaned_sells: HashMap<OrderId, MarketId>,
+    /// Maps order_id → (market_id, tracked_at) so late fills can be detected and accounted
+    /// for rather than silently dropped. Populated when cancel_on_placed cancels a SELL,
+    /// or when a stale-fill cleanup cancels the active unwind order.
+    /// Entries older than `ORPHANED_SELL_TTL_SECS` are purged by `cleanup_stale_executions`.
+    pub(crate) orphaned_sells: HashMap<OrderId, (MarketId, DateTime<Utc>)>,
     /// Handle to the background scanner task.
     scanner_handle: Option<JoinHandle<()>>,
     /// Last time cleanup_stale_executions was run (rate-limited to avoid hot-path overhead).
@@ -283,7 +288,7 @@ impl DutchBookStrategy {
             // Track the cancelled order so late fills (if cancel races with fill) are
             // detected and accounted for rather than silently dropped.
             self.orphaned_sells
-                .insert(order_id.clone(), market_id.clone());
+                .insert(order_id.clone(), (market_id.clone(), Utc::now()));
 
             let mut actions = vec![Action::CancelOrder(order_id.clone())];
 
@@ -425,7 +430,7 @@ impl DutchBookStrategy {
 
         // Check if this is a late fill from an orphaned sell (cancel raced with fill).
         // Log the double-sell for accounting — we can't undo the fill, but we can track it.
-        if let Some(market_id) = self.orphaned_sells.remove(order_id) {
+        if let Some((market_id, _tracked_at)) = self.orphaned_sells.remove(order_id) {
             warn!(
                 %market_id, %order_id, %price, %size,
                 "Late fill from orphaned sell order (cancel failed) — double-sell detected"
@@ -445,7 +450,12 @@ impl DutchBookStrategy {
 
         let entry = match self.analyzer.market_for_token(token_id) {
             Some(e) => e.clone(),
-            None => return vec![],
+            None => {
+                // Market was removed (e.g., expired) but fill arrived late.
+                // Clean up the order_to_market entry to prevent a leak.
+                self.order_to_market.remove(order_id);
+                return vec![];
+            }
         };
 
         let exec = match self.active_executions.get_mut(&market_id) {
@@ -636,7 +646,7 @@ impl DutchBookStrategy {
                 })
             {
                 self.orphaned_sells
-                    .insert(order_id.to_string(), market_id);
+                    .insert(order_id.to_string(), (market_id, Utc::now()));
             }
         } else {
             // Order not tracked by us -- likely already cleaned up
@@ -752,6 +762,9 @@ impl DutchBookStrategy {
         exec.state = ExecutionState::Unwinding {
             sell_order_id: String::new(),
         };
+        // Reset submitted_at so the extended unwind timeout (EXECUTION_TIMEOUT_SECS * 3)
+        // is measured from when the unwind started, not from the original batch submission.
+        exec.submitted_at = Utc::now();
 
         // Initialize remaining_unwind_size on the first unwind; subsequent retries
         // use the already-decremented value (reduced by partial fills).
@@ -822,7 +835,7 @@ impl DutchBookStrategy {
                     // Track in orphaned_sells: if the cancel races with a fill,
                     // the late fill will be detected rather than silently dropped.
                     self.orphaned_sells
-                        .insert(sell_order_id.clone(), market_id.clone());
+                        .insert(sell_order_id.clone(), (market_id.clone(), Utc::now()));
                     actions.push(Action::CancelOrder(sell_order_id.clone()));
                 } else {
                     // PlaceOrder dispatched but Placed event pending — cancel on arrival
@@ -1037,7 +1050,7 @@ impl DutchBookStrategy {
                         self.order_to_market.remove(sell_order_id);
                         // Track in orphaned_sells for late-fill detection
                         self.orphaned_sells
-                            .insert(sell_order_id.clone(), market_id.to_string());
+                            .insert(sell_order_id.clone(), (market_id.to_string(), Utc::now()));
                         cleanup_actions.push(Action::CancelOrder(sell_order_id.clone()));
                     } else {
                         // PlaceOrder SELL was dispatched but Placed event hasn't arrived.
@@ -1122,7 +1135,7 @@ impl DutchBookStrategy {
                         self.order_to_market.remove(&sell_id);
                         // Track in orphaned_sells for late-fill detection
                         self.orphaned_sells
-                            .insert(sell_id.clone(), market_id.clone());
+                            .insert(sell_id.clone(), (market_id.clone(), Utc::now()));
                         actions.push(Action::CancelOrder(sell_id));
                     } else {
                         // PlaceOrder was dispatched but Placed event never arrived (or is
@@ -1199,6 +1212,13 @@ impl DutchBookStrategy {
                 self.order_to_market.remove(&exec.no_order_id);
             }
         }
+
+        // Purge orphaned_sells entries older than ORPHANED_SELL_TTL_SECS to prevent
+        // unbounded growth when neither a Cancelled nor Filled event arrives.
+        let ttl = Duration::seconds(ORPHANED_SELL_TTL_SECS);
+        self.orphaned_sells
+            .retain(|_, (_, tracked_at)| now - *tracked_at < ttl);
+
         actions
     }
 
