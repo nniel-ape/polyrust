@@ -1359,9 +1359,7 @@ impl CryptoArbBase {
                         + pos.recovery_cost
                 } else {
                     let won = match (&pos.side, settlement_price) {
-                        (OutcomeSide::Up | OutcomeSide::Yes, Some(cp)) => {
-                            cp > pos.reference_price
-                        }
+                        (OutcomeSide::Up | OutcomeSide::Yes, Some(cp)) => cp > pos.reference_price,
                         (OutcomeSide::Down | OutcomeSide::No, Some(cp)) => {
                             cp <= pos.reference_price
                         }

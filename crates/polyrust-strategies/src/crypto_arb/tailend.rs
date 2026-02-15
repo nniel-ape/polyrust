@@ -309,27 +309,39 @@ impl TailEndStrategy {
                         // Re-key exit_orders_by_id: synthetic → real CLOB order ID.
                         // Extract position token from meta (differs from result.token_id
                         // for recovery orders which use the opposite token).
-                        let position_token = {
+                        let (position_token, is_hedge) = {
                             let mut exit_orders = self.base.exit_orders_by_id.write().await;
                             if let Some(meta) = exit_orders.remove(&syn_key) {
                                 let pt = meta.token_id.clone();
+                                let hedge = meta.source_state.starts_with("Hedge");
                                 exit_orders.insert(real_oid.clone(), meta);
-                                pt
+                                (pt, hedge)
                             } else {
-                                result.token_id.clone()
+                                (result.token_id.clone(), false)
                             }
                         };
-                        // Update lifecycle state with real order ID
+                        // Update lifecycle state with real order ID.
+                        // Hedge orders update hedge_order_id; sell orders update order_id.
                         {
                             let mut lifecycles = self.base.position_lifecycle.write().await;
                             if let Some(lc) = lifecycles.get_mut(&position_token) {
-                                lc.pending_exit_order_id = Some(real_oid.clone());
-                                if let PositionLifecycleState::ExitExecuting {
-                                    ref mut order_id,
-                                    ..
-                                } = lc.state
-                                {
-                                    *order_id = real_oid.clone();
+                                if is_hedge {
+                                    if let PositionLifecycleState::ExitExecuting {
+                                        ref mut hedge_order_id,
+                                        ..
+                                    } = lc.state
+                                    {
+                                        *hedge_order_id = Some(real_oid.clone());
+                                    }
+                                } else {
+                                    lc.pending_exit_order_id = Some(real_oid.clone());
+                                    if let PositionLifecycleState::ExitExecuting {
+                                        ref mut order_id,
+                                        ..
+                                    } = lc.state
+                                    {
+                                        *order_id = real_oid.clone();
+                                    }
                                 }
                             }
                         }
@@ -337,6 +349,7 @@ impl TailEndStrategy {
                             token_id = %position_token,
                             real_order_id = %real_oid,
                             synthetic_id = %syn_key,
+                            kind = if is_hedge { "hedge" } else { "sell" },
                             "TailEnd exit order placed, re-keyed to real CLOB ID"
                         );
                     } else {
@@ -1502,9 +1515,9 @@ impl TailEndStrategy {
                 let now = self.base.event_time().await;
 
                 if meta.source_state.starts_with("Hedge") {
-                    // Hedge order filled — record cost and transition to Hedged
-                    let hedge_fee = taker_fee(price, self.base.config.fee.taker_fee_rate);
-                    let hedge_cost = (price + hedge_fee) * size;
+                    // Hedge order filled — record cost and transition to Hedged.
+                    // Hedge is GTC (maker) so fee is 0%.
+                    let hedge_cost = price * size;
                     self.base
                         .add_recovery_cost(&meta.token_id, -hedge_cost)
                         .await;
@@ -1621,9 +1634,22 @@ impl TailEndStrategy {
                                 let gtc_oid =
                                     format!("exit-gtc-{}-{}", pos.token_id, now.timestamp_millis());
 
-                                // Transition to ExitExecuting with GTC for residual
+                                // Transition to ExitExecuting with GTC for residual.
+                                // Preserve hedge tracking from prior state so the
+                                // fully_closed path can still cancel the hedge.
                                 let mut lifecycle =
                                     self.base.ensure_lifecycle(&meta.token_id).await;
+                                let (prev_hedge_oid, prev_hedge_price) =
+                                    if let PositionLifecycleState::ExitExecuting {
+                                        ref hedge_order_id,
+                                        hedge_price,
+                                        ..
+                                    } = lifecycle.state
+                                    {
+                                        (hedge_order_id.clone(), hedge_price)
+                                    } else {
+                                        (None, None)
+                                    };
                                 lifecycle.pending_exit_order_id = None;
                                 if let Err(e) = lifecycle.transition(
                                     PositionLifecycleState::ExitExecuting {
@@ -1631,8 +1657,8 @@ impl TailEndStrategy {
                                         order_type: OrderType::Gtc,
                                         exit_price: gtc_price,
                                         submitted_at: now,
-                                        hedge_order_id: None,
-                                        hedge_price: None,
+                                        hedge_order_id: prev_hedge_oid,
+                                        hedge_price: prev_hedge_price,
                                     },
                                     &format!("FAK partial fill, GTC residual for {remaining}"),
                                     now,
@@ -1662,24 +1688,23 @@ impl TailEndStrategy {
                                                 order_type: OrderType::Gtc,
                                                 source_state: "ExitActive(GTC residual)"
                                                     .to_string(),
-                            
+
                                                 exit_price: gtc_price,
                                                 clip_size: remaining,
                                             },
                                         );
                                     }
 
+                                    info!(
+                                        token_id = %meta.token_id,
+                                        order_id = %order_id,
+                                        fill_size = %size,
+                                        remaining = %remaining,
+                                        gtc_price = %gtc_price,
+                                        "FAK partial fill: placing GTC residual order"
+                                    );
                                     return vec![Action::PlaceOrder(gtc_order)];
                                 }
-
-                                info!(
-                                    token_id = %meta.token_id,
-                                    order_id = %order_id,
-                                    fill_size = %size,
-                                    remaining = %remaining,
-                                    gtc_price = %gtc_price,
-                                    "FAK partial fill: placing GTC residual order"
-                                );
                             }
                         }
 
@@ -2176,9 +2201,8 @@ impl Strategy for TailEndStrategy {
                             let fill_size = meta.clip_size;
 
                             if fill_size > Decimal::ZERO {
-                                let hedge_fee =
-                                    taker_fee(fill_price, self.base.config.fee.taker_fee_rate);
-                                let hedge_cost = (fill_price + hedge_fee) * fill_size;
+                                // Hedge is GTC (maker) so fee is 0%
+                                let hedge_cost = fill_price * fill_size;
                                 self.base
                                     .add_recovery_cost(&meta.token_id, -hedge_cost)
                                     .await;
