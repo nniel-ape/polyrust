@@ -1319,7 +1319,20 @@ impl Strategy for DutchBookStrategy {
             Event::OrderUpdate(OrderEvent::Rejected { order_id, reason, token_id }) => {
                 if let Some(oid) = order_id {
                     debug!(%oid, %reason, "Dutch Book order rejected");
-                    self.handle_order_cancelled(oid).await
+                    let actions = self.handle_order_cancelled(oid).await;
+                    // If the order_id wasn't in order_to_market (e.g., Rejected arrived
+                    // before Placed), fall through to token_id-based routing so the
+                    // execution doesn't sit stuck until the 120s stale cleanup.
+                    if actions.is_empty() && !self.order_to_market.contains_key(oid.as_str()) {
+                        if let Some(tid) = token_id {
+                            debug!(%tid, %reason, "Rejected order_id not tracked — falling through to token_id routing");
+                            self.handle_batch_rejection(tid).await
+                        } else {
+                            actions
+                        }
+                    } else {
+                        actions
+                    }
                 } else if let Some(tid) = token_id {
                     // Batch failure: order_id is None but token_id is available.
                     // Use token_id to find the active execution and clean it up.
