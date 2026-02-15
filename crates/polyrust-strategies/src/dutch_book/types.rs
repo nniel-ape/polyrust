@@ -52,6 +52,10 @@ pub struct PairedOrder {
     /// Tracked to handle late fills that arrive after an unwind order was cancelled
     /// but before the cancellation was fully settled at the exchange.
     pub stale_unwind_ids: Vec<OrderId>,
+    /// Remaining size to sell in an unwind. Decremented on partial fills of the
+    /// GTC sell order so retries use the correct (reduced) amount. Initialized to
+    /// `size` when the first unwind is triggered.
+    pub remaining_unwind_size: Option<Decimal>,
 }
 
 /// A fully filled paired position awaiting market resolution.

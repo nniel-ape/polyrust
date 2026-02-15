@@ -2426,6 +2426,7 @@ fn make_test_state() -> DutchBookState {
         no_fill_price: None,
         unwind_retries: 0,
         stale_unwind_ids: Vec::new(),
+        remaining_unwind_size: None,
     });
 
     state
@@ -2548,6 +2549,7 @@ async fn dashboard_renders_unwinding_execution_state() {
         no_fill_price: None,
         unwind_retries: 0,
         stale_unwind_ids: Vec::new(),
+        remaining_unwind_size: None,
     });
     let state = Arc::new(RwLock::new(test_state));
     let dashboard = DutchBookDashboard::new(state);

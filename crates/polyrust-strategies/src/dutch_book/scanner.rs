@@ -89,8 +89,17 @@ impl GammaScanner {
         let max_end = now + chrono::Duration::days(self.config.max_days_until_resolution as i64);
         let mut all_markets = Vec::new();
         let mut offset = 0u64;
+        // Guard against infinite pagination if the API misbehaves
+        const MAX_PAGES: u64 = 100;
+        let mut pages = 0u64;
 
         loop {
+            pages += 1;
+            if pages > MAX_PAGES {
+                warn!("Gamma scanner reached max page limit ({MAX_PAGES}) — stopping pagination");
+                break;
+            }
+
             let page = self.fetch_page(offset).await?;
             let page_len = page.len();
 

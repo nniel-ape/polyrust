@@ -234,6 +234,7 @@ impl DutchBookStrategy {
             no_fill_price: None,
             unwind_retries: 0,
             stale_unwind_ids: Vec::new(),
+            remaining_unwind_size: None,
         };
 
         self.active_executions.insert(opp.market_id.clone(), paired);
@@ -716,14 +717,16 @@ impl DutchBookStrategy {
                 filled_order_id: _,
             } => {
                 let (token_id, price) = match filled_side {
-                    FilledSide::Yes => (
-                        entry.token_a.clone(),
-                        exec.yes_fill_price.unwrap_or(Decimal::ZERO),
-                    ),
-                    FilledSide::No => (
-                        entry.token_b.clone(),
-                        exec.no_fill_price.unwrap_or(Decimal::ZERO),
-                    ),
+                    FilledSide::Yes => (entry.token_a.clone(), exec.yes_fill_price),
+                    FilledSide::No => (entry.token_b.clone(), exec.no_fill_price),
+                };
+                let Some(price) = price else {
+                    warn!(
+                        %market_id,
+                        ?filled_side,
+                        "PartialFill without fill price — cannot unwind safely"
+                    );
+                    return vec![];
                 };
                 (filled_side.clone(), token_id, price)
             }
@@ -750,11 +753,18 @@ impl DutchBookStrategy {
             sell_order_id: String::new(),
         };
 
+        // Initialize remaining_unwind_size on the first unwind; subsequent retries
+        // use the already-decremented value (reduced by partial fills).
+        let unwind_size = exec.remaining_unwind_size.unwrap_or(exec.size);
+        if exec.remaining_unwind_size.is_none() {
+            exec.remaining_unwind_size = Some(exec.size);
+        }
+
         // Build GTC SELL order for the filled side
         let sell_order = OrderRequest::new(
             filled_token_id,
             sell_price,
-            exec.size,
+            unwind_size,
             OrderSide::Sell,
             OrderType::Gtc,
             entry.neg_risk,
@@ -981,6 +991,9 @@ impl DutchBookStrategy {
                     filled_side,
                     filled_order_id,
                 };
+                // Reset submitted_at so the retry gets a fresh timeout window
+                // instead of being immediately detected as stale.
+                exec.submitted_at = Utc::now();
 
                 let actions = self.start_emergency_unwind(&market_id);
                 Some(actions)
@@ -1265,14 +1278,16 @@ impl Strategy for DutchBookStrategy {
                 filled_size,
                 remaining_size,
             }) => {
-                // GTC unwind orders can receive partial fills. Log for accounting
-                // awareness — the unwind will complete when the remaining size fills
-                // or when the order is cancelled (triggering retry/cleanup).
-                if self.order_to_market.contains_key(order_id.as_str()) {
+                // GTC unwind orders can receive partial fills. Track remaining size
+                // so retries use the correct (reduced) amount instead of the original.
+                if let Some(market_id) = self.order_to_market.get(order_id.as_str()).cloned() {
                     warn!(
-                        %order_id, %filled_size, %remaining_size,
+                        %order_id, %filled_size, %remaining_size, %market_id,
                         "Dutch Book unwind order partially filled"
                     );
+                    if let Some(exec) = self.active_executions.get_mut(&market_id) {
+                        exec.remaining_unwind_size = Some(*remaining_size);
+                    }
                 }
                 vec![]
             }
