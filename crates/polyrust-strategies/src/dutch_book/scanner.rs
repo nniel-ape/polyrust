@@ -235,7 +235,7 @@ impl GammaScanner {
             .order_price_min_tick_size
             .and_then(|f| Decimal::try_from(f).ok())
             .unwrap_or(Decimal::new(1, 2));
-        let fee_rate_bps = raw.maker_base_fee.map(|f| f as u32).unwrap_or(0);
+        let fee_rate_bps = raw.maker_base_fee.map(|f| f.round() as u32).unwrap_or(0);
 
         debug!(
             condition_id,

@@ -1208,7 +1208,7 @@ impl Strategy for DutchBookStrategy {
         "Dutch Book arbitrage: buys both sides when combined ask < $1.00"
     }
 
-    async fn on_start(&mut self, _ctx: &StrategyContext) -> Result<()> {
+    async fn on_start(&mut self, ctx: &StrategyContext) -> Result<()> {
         info!(
             max_combined_cost = %self.config.max_combined_cost,
             min_profit = %self.config.min_profit_threshold,
@@ -1217,13 +1217,19 @@ impl Strategy for DutchBookStrategy {
             "Dutch Book strategy started"
         );
 
-        // Spawn background market scanner
-        let handle = GammaScanner::start_scanner(
-            self.config.clone(),
-            Arc::clone(&self.pending_subscriptions),
-            Arc::clone(&self.known_market_ids),
-        );
-        self.scanner_handle = Some(handle);
+        // Skip live Gamma API scanner in backtest mode (simulated_clock is set).
+        // In backtest, markets are pre-loaded by the engine — no live discovery needed.
+        let is_backtest = ctx.simulated_clock.read().await.is_some();
+        if !is_backtest {
+            let handle = GammaScanner::start_scanner(
+                self.config.clone(),
+                Arc::clone(&self.pending_subscriptions),
+                Arc::clone(&self.known_market_ids),
+            );
+            self.scanner_handle = Some(handle);
+        } else {
+            info!("Backtest mode — skipping live Gamma scanner");
+        }
 
         Ok(())
     }
@@ -1252,6 +1258,23 @@ impl Strategy for DutchBookStrategy {
 
             Event::OrderUpdate(OrderEvent::Cancelled(order_id)) => {
                 self.handle_order_cancelled(order_id).await
+            }
+
+            Event::OrderUpdate(OrderEvent::PartiallyFilled {
+                order_id,
+                filled_size,
+                remaining_size,
+            }) => {
+                // GTC unwind orders can receive partial fills. Log for accounting
+                // awareness — the unwind will complete when the remaining size fills
+                // or when the order is cancelled (triggering retry/cleanup).
+                if self.order_to_market.contains_key(order_id.as_str()) {
+                    warn!(
+                        %order_id, %filled_size, %remaining_size,
+                        "Dutch Book unwind order partially filled"
+                    );
+                }
+                vec![]
             }
 
             Event::OrderUpdate(OrderEvent::CancelFailed { order_id, reason }) => {
@@ -1296,12 +1319,27 @@ impl Strategy for DutchBookStrategy {
             info!("Dutch Book scanner stopped");
         }
 
+        // Cancel any live unwind sell orders to prevent orphaned orders on the exchange
+        let mut actions = Vec::new();
+        for (market_id, exec) in &self.active_executions {
+            if let ExecutionState::Unwinding { sell_order_id } = &exec.state
+                && !sell_order_id.is_empty()
+            {
+                warn!(
+                    %market_id, %sell_order_id,
+                    "Cancelling live unwind order on strategy stop"
+                );
+                actions.push(Action::CancelOrder(sell_order_id.clone()));
+            }
+        }
+
         info!(
             open_positions = self.open_positions.len(),
             active_executions = self.active_executions.len(),
+            cancelled_unwinds = actions.len(),
             "Dutch Book strategy stopped"
         );
 
-        Ok(vec![])
+        Ok(actions)
     }
 }

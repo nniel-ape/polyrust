@@ -23,6 +23,8 @@ fn truncate_id(id: &str, max_len: usize) -> String {
     }
 }
 
+use crate::crypto_arb::escape_html;
+
 use super::types::{DutchBookState, ExecutionState};
 
 /// Dashboard view for the Dutch Book arbitrage strategy.
@@ -165,8 +167,8 @@ fn render_positions(state: &DutchBookState, html: &mut String) {
             let _ = write!(
                 html,
                 r#"<tr><td title="{full_id}">{short}</td><td class="text-right">{yes}</td><td class="text-right">{no}</td><td class="text-right">${cost:.4}</td><td class="text-right bp-profit">${profit:.4}</td><td class="text-right">{size}</td><td class="text-right">{age}</td></tr>"#,
-                full_id = pos.market_id,
-                short = market_short,
+                full_id = escape_html(&pos.market_id),
+                short = escape_html(&market_short),
                 yes = pos.yes_entry_price,
                 no = pos.no_entry_price,
                 cost = pos.combined_cost,
@@ -220,8 +222,8 @@ fn render_opportunities(state: &DutchBookState, html: &mut String) {
             let _ = write!(
                 html,
                 r#"<tr><td title="{full_id}">{short}</td><td class="text-right">{yes}</td><td class="text-right">{no}</td><td class="text-right">{combined}</td><td class="text-right bp-profit">{profit:.2}%</td><td class="text-right">{size}</td><td class="text-right">{when}</td></tr>"#,
-                full_id = opp.market_id,
-                short = market_short,
+                full_id = escape_html(&opp.market_id),
+                short = escape_html(&market_short),
                 yes = opp.yes_ask,
                 no = opp.no_ask,
                 combined = opp.combined_cost,
@@ -286,8 +288,8 @@ fn render_executions(state: &DutchBookState, html: &mut String) {
         let _ = write!(
             html,
             r#"<tr><td title="{full_id}">{short}</td><td>{state}</td><td class="text-right">{size}</td><td class="text-right">{age}</td></tr>"#,
-            full_id = exec.market_id,
-            short = market_short,
+            full_id = escape_html(&exec.market_id),
+            short = escape_html(&market_short),
             state = state_str,
             size = exec.size,
             age = age_str,
