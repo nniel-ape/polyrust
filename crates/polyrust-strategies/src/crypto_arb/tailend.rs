@@ -1710,6 +1710,10 @@ impl TailEndStrategy {
 
                         // If sell fully closed the position, cancel any pending hedge
                         if fully_closed {
+                            // Clean up lifecycle to prevent stale entries blocking
+                            // future positions on the same token_id.
+                            self.base.remove_lifecycle(&meta.token_id).await;
+
                             let hedge_to_cancel = {
                                 let exit_orders = self.base.exit_orders_by_id.read().await;
                                 exit_orders

@@ -600,6 +600,44 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
             Err(e) => return Err(e),
         };
 
+        // For FAK orders with Matched status, query the actual fill size since
+        // PostOrderResponse only carries the signed order amounts, not the fill.
+        let actual_fill_size = if order.order_type == OrderType::Fak
+            && response.status == OrderStatusType::Matched
+            && !response.order_id.is_empty()
+        {
+            match self.client.order(&response.order_id).await {
+                Ok(order_detail) => {
+                    let matched = order_detail.size_matched;
+                    if matched.is_zero() {
+                        warn!(
+                            order_id = %response.order_id,
+                            "FAK matched but size_matched=0, using request size"
+                        );
+                        None
+                    } else {
+                        info!(
+                            order_id = %response.order_id,
+                            request_size = %size,
+                            fill_size = %matched,
+                            "FAK partial fill detected"
+                        );
+                        Some(matched)
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        order_id = %response.order_id,
+                        error = %e,
+                        "Failed to query FAK fill size, using request size"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let result = OrderResult {
             success: response.success,
             order_id: if response.order_id.is_empty() {
@@ -609,7 +647,7 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
             },
             token_id: order.token_id.clone(),
             price,
-            size,
+            size: actual_fill_size.unwrap_or(size),
             side: order.side,
             status: Some(match response.status {
                 OrderStatusType::Matched => "Filled".to_string(),

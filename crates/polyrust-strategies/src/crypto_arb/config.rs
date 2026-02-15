@@ -364,6 +364,9 @@ pub struct StopLossConfig {
     pub recovery_max_set_cost: Decimal,
     /// Maximum extra risk fraction for recovery alpha trades. Default: 0.15 (15%).
     pub recovery_max_extra_frac: Decimal,
+    /// Cooldown in seconds after a recovery exit before allowing same-market re-entry.
+    /// Prevents immediate re-entry loops after stop-loss exits. Default: 15.
+    pub recovery_cooldown_secs: u64,
 }
 
 impl Default for StopLossConfig {
@@ -397,6 +400,7 @@ impl Default for StopLossConfig {
             recovery_enabled: true,
             recovery_max_set_cost: Decimal::new(101, 2), // 1.01
             recovery_max_extra_frac: Decimal::new(15, 2), // 0.15
+            recovery_cooldown_secs: 15,
         }
     }
 }
