@@ -141,14 +141,14 @@ crypto_arb/
 - [x] Run `cargo build --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 6: Split `dashboard.rs` into `dashboard/`
-- [ ] Create `crypto_arb/dashboard/` directory
-- [ ] Create `dashboard/mod.rs` — move `CryptoArbDashboard` struct, `DashboardViewProvider` impl, `render_view` orchestrator
-- [ ] Create `dashboard/render.rs` — move `render_reference_prices()`, `render_positions()`, `render_performance()`, `render_skip_stats()`
-- [ ] Create `dashboard/updates.rs` — move `try_emit_dashboard_updates()`, `fmt_usd()`, `fmt_market_price()`
-- [ ] Update `crypto_arb/mod.rs`: `mod dashboard` now resolves to `dashboard/mod.rs` (automatic)
-- [ ] Update dashboard imports from `base::` to `runtime::` / `services::` / `shared::`
-- [ ] Delete old `dashboard.rs`
-- [ ] Run `cargo build --workspace && cargo clippy --workspace -- -D warnings`
+- [x] Create `crypto_arb/dashboard/` directory
+- [x] Create `dashboard/mod.rs` — move `CryptoArbDashboard` struct, `DashboardViewProvider` impl, `render_view` orchestrator
+- [x] Create `dashboard/render.rs` — move `render_reference_prices()`, `render_positions()`, `render_performance()`, `render_skip_stats()`
+- [x] Create `dashboard/updates.rs` — move `try_emit_dashboard_updates()`, `fmt_usd()`, `fmt_market_price()`
+- [x] Update `crypto_arb/mod.rs`: `mod dashboard` now resolves to `dashboard/mod.rs` (automatic)
+- [x] Update dashboard imports from `base::` to `runtime::` / `services::` / `shared::`
+- [x] Delete old `dashboard.rs`
+- [x] Run `cargo build --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 7: Reorganize tests into `tests/`
 - [ ] Create `crypto_arb/tests/` directory
