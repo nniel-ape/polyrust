@@ -1576,6 +1576,21 @@ impl TailEndStrategy {
                     let exit_price = price; // Use actual CLOB fill price
                     let is_gtc_exit = meta.order_type == OrderType::Gtc;
 
+                    // Capture hedge order_id BEFORE reduce_or_remove cleans up
+                    // exit_orders_by_id on full close (via remove_lifecycle).
+                    let pre_hedge_oid = {
+                        let lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
+                        if let PositionLifecycleState::ExitExecuting {
+                            hedge_order_id: Some(ref h_oid),
+                            ..
+                        } = lifecycle.state
+                        {
+                            Some(h_oid.clone())
+                        } else {
+                            None
+                        }
+                    };
+
                     if let Some((pos, fully_closed)) = self
                         .base
                         .reduce_or_remove_position_by_token(&meta.token_id, size)
@@ -1608,11 +1623,26 @@ impl TailEndStrategy {
                                 self.base
                                     .reduce_or_remove_position_by_token(&meta.token_id, remaining)
                                     .await;
+                                // Record cooldown to prevent rapid re-entry
+                                self.base
+                                    .record_recovery_exit_cooldown(&pos.market_id)
+                                    .await;
                                 warn!(
                                     token_id = %meta.token_id,
                                     dust_size = %remaining,
                                     "Removed unsellable dust after partial fill — will resolve at expiry"
                                 );
+                                // Dust removal fully closes the position (via
+                                // remove_lifecycle inside reduce_or_remove).
+                                // Cancel hedge if one was in flight.
+                                if let Some(h_oid) = pre_hedge_oid {
+                                    info!(
+                                        token_id = %meta.token_id,
+                                        hedge_order_id = %h_oid,
+                                        "Dust removal — cancelling pending hedge"
+                                    );
+                                    return vec![Action::CancelOrder(h_oid)];
+                                }
                             } else {
                                 // Place GTC residual order at bid - tick_offset
                                 let sl_config = &self.base.config.stop_loss;
@@ -1708,30 +1738,22 @@ impl TailEndStrategy {
                             }
                         }
 
-                        // If sell fully closed the position, cancel any pending hedge
+                        // If sell fully closed the position, cancel any pending hedge.
+                        // Note: reduce_or_remove_position_by_token already called
+                        // remove_lifecycle on full close, which cleaned up
+                        // exit_orders_by_id. We use pre_hedge_oid (captured before
+                        // the reduce call) to cancel the hedge on the CLOB.
                         if fully_closed {
-                            // Clean up lifecycle to prevent stale entries blocking
-                            // future positions on the same token_id.
-                            self.base.remove_lifecycle(&meta.token_id).await;
+                            // Record cooldown to prevent rapid re-entry after stop-loss exit
+                            self.base
+                                .record_recovery_exit_cooldown(&pos.market_id)
+                                .await;
 
-                            let hedge_to_cancel = {
-                                let exit_orders = self.base.exit_orders_by_id.read().await;
-                                exit_orders
-                                    .iter()
-                                    .find(|(_, m)| {
-                                        m.token_id == meta.token_id
-                                            && m.source_state.starts_with("Hedge")
-                                    })
-                                    .map(|(oid, _)| oid.clone())
-                            };
-
-                            // Clean up exit order tracking
+                            // Clean up current exit order tracking (may already
+                            // be gone from remove_lifecycle, but safe to call)
                             {
                                 let mut exit_orders = self.base.exit_orders_by_id.write().await;
                                 exit_orders.remove(order_id);
-                                if let Some(ref h_oid) = hedge_to_cancel {
-                                    exit_orders.remove(h_oid);
-                                }
                             }
 
                             info!(
@@ -1743,7 +1765,7 @@ impl TailEndStrategy {
                                 "Exit order filled — position fully closed"
                             );
 
-                            if let Some(h_oid) = hedge_to_cancel {
+                            if let Some(h_oid) = pre_hedge_oid {
                                 info!(
                                     token_id = %meta.token_id,
                                     hedge_order_id = %h_oid,
@@ -2109,17 +2131,48 @@ impl Strategy for TailEndStrategy {
             }
 
             Event::OrderUpdate(OrderEvent::Cancelled(order_id)) => {
-                // Check if this is a lifecycle-driven exit order cancel (GTC chase refresh)
+                // Check if this is a lifecycle-driven exit order cancel
                 {
                     let exit_meta = {
                         let exit_orders = self.base.exit_orders_by_id.read().await;
                         exit_orders.get(order_id).cloned()
                     };
                     if let Some(meta) = exit_meta {
+                        let is_hedge = meta.source_state.starts_with("Hedge");
                         let now = self.base.event_time().await;
 
-                        // Before transitioning to Healthy, cancel any associated hedge
-                        // order to avoid orphaning it.
+                        if is_hedge {
+                            // Hedge order cancelled — clear hedge tracking but keep
+                            // the sell order active in ExitExecuting state.
+                            let mut lifecycle =
+                                self.base.ensure_lifecycle(&meta.token_id).await;
+                            if let PositionLifecycleState::ExitExecuting {
+                                ref mut hedge_order_id,
+                                ref mut hedge_price,
+                                ..
+                            } = lifecycle.state
+                            {
+                                *hedge_order_id = None;
+                                *hedge_price = None;
+                            }
+                            self.write_lifecycle(&meta.token_id, &lifecycle).await;
+
+                            {
+                                let mut exit_orders =
+                                    self.base.exit_orders_by_id.write().await;
+                                exit_orders.remove(order_id);
+                            }
+
+                            info!(
+                                order_id = %order_id,
+                                token_id = %meta.token_id,
+                                "Hedge order cancelled — sell exit continues"
+                            );
+                            return Ok(vec![]);
+                        }
+
+                        // Sell order cancel (GTC chase refresh): transition back
+                        // to Healthy and cancel any associated hedge order.
                         let mut cancel_actions = Vec::new();
                         let mut lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
                         if let PositionLifecycleState::ExitExecuting {
