@@ -190,7 +190,7 @@ pub struct ExitOrderMeta {
     /// Token ID the order was actually placed for (differs from `token_id`
     /// for recovery orders which buy the opposite side).
     pub order_token_id: TokenId,
-    /// Order type (GTC or FOK) for fee model selection.
+    /// Order type (GTC, FOK, or FAK) for fee model selection.
     pub order_type: OrderType,
     /// Lifecycle state that spawned this order (for context in logs).
     pub source_state: String,
