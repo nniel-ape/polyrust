@@ -110,7 +110,7 @@ pub struct TailEndConfig {
     pub min_sell_delay_secs: i64,
     /// Minimum distance from strike as percentage of reference price.
     /// Rejects entries when crypto price is too close to strike (high flip risk).
-    /// Default: 0.0008 (0.08% ≈ $1.60 at $2000 ETH).
+    /// Default: 0.005 (0.5% ≈ $10 at $2000 ETH).
     pub min_strike_distance_pct: Decimal,
 
     // ── Fast-path exit on ExternalPrice events ──────────────────────────
