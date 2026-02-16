@@ -186,7 +186,6 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # Recovery — proactive hedge (simultaneous opposite-side buy)
 # recovery_enabled = true       # Enable recovery logic (hedge on exit)
 # recovery_max_set_cost = 1.01  # Max combined cost for set completion (entry + other ask)
-# recovery_max_extra_frac = 0.15 # Max extra risk fraction for alpha trades (15%)
 # recovery_cooldown_secs = 15   # Cooldown after recovery exit before re-entry (seconds)
 
 # ─────────────────────────────────────────────────────────────────────────────

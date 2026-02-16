@@ -38,17 +38,56 @@ impl TailEndStrategy {
                         // Re-key exit_orders_by_id: synthetic → real CLOB order ID.
                         // Extract position token from meta (differs from result.token_id
                         // for recovery orders which use the opposite token).
-                        let (position_token, is_hedge) = {
+                        let (position_token, is_hedge, meta_order_type) = {
                             let mut exit_orders = self.base.exit_orders_by_id.write().await;
                             if let Some(meta) = exit_orders.remove(&syn_key) {
                                 let pt = meta.token_id.clone();
                                 let hedge = meta.source_state.starts_with("Hedge");
+                                let ot = meta.order_type;
                                 exit_orders.insert(real_oid.clone(), meta);
-                                (pt, hedge)
+                                (pt, hedge, ot)
                             } else {
-                                (result.token_id.clone(), false)
+                                (result.token_id.clone(), false, OrderType::Gtc)
                             }
                         };
+
+                        // FAK/FOK orders are immediate — if the CLOB status is not
+                        // "Filled", the order terminated with zero fill. Clean up
+                        // the re-keyed entry and transition back to Healthy to
+                        // prevent the lifecycle from getting permanently stuck.
+                        let is_immediate =
+                            matches!(meta_order_type, OrderType::Fak | OrderType::Fok);
+                        let is_filled = result.status.as_deref() == Some("Filled");
+                        if is_immediate && !is_filled && !is_hedge {
+                            {
+                                let mut exit_orders =
+                                    self.base.exit_orders_by_id.write().await;
+                                exit_orders.remove(real_oid);
+                            }
+                            let now = self.base.event_time().await;
+                            let mut lifecycle =
+                                self.base.ensure_lifecycle(&position_token).await;
+                            lifecycle.pending_exit_order_id = None;
+                            let _ = lifecycle.transition(
+                                PositionLifecycleState::Healthy,
+                                &format!(
+                                    "{:?} zero fill (status: {})",
+                                    meta_order_type,
+                                    result.status.as_deref().unwrap_or("unknown")
+                                ),
+                                now,
+                            );
+                            self.write_lifecycle(&position_token, &lifecycle).await;
+                            warn!(
+                                token_id = %position_token,
+                                order_id = %real_oid,
+                                status = ?result.status,
+                                order_type = ?meta_order_type,
+                                "Exit order got zero fill — back to Healthy for re-evaluation"
+                            );
+                            return vec![];
+                        }
+
                         // Update lifecycle state with real order ID.
                         // Hedge orders update hedge_order_id; sell orders update order_id.
                         {
@@ -492,10 +531,14 @@ impl TailEndStrategy {
                                     lifecycle.pending_exit_order_id = Some(gtc_oid.clone());
                                     self.write_lifecycle(&meta.token_id, &lifecycle).await;
 
-                                    // Track residual GTC order
+                                    // Replace original FAK exit entry with GTC residual.
+                                    // Must remove the stale FAK entry to prevent
+                                    // on_order_placed from matching it instead of
+                                    // the GTC when the Placed event arrives.
                                     {
                                         let mut exit_orders =
                                             self.base.exit_orders_by_id.write().await;
+                                        exit_orders.remove(order_id);
                                         exit_orders.insert(
                                             gtc_oid,
                                             ExitOrderMeta {
