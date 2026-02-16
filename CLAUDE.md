@@ -225,17 +225,6 @@ Strategy is disabled by default; set `enabled = true` in `[arbitrage]` to activa
 - **Proactive hedge**: Simultaneous opposite-side GTC buy on exit trigger when set completion cost <= `recovery_max_set_cost`. Replaces reactive 5-retry recovery with instant hedge attempt.
 - **Performance tracking**: Statistics with optional auto-disable when underperforming
 
-### Stop-Loss Research Findings (Backtest)
-
-- Only `hard_drop_abs` and `post_entry_exit_drop` fire in backtest — all other SL params dead (dual-trigger, trailing, reversal, reentry)
-- The two active params are **NOT symmetric** (max $22 PnL diff): `hard_drop` is global, `exit_drop` is window-gated
-- `exit_window=20s` dominates 30/45/60 — fewer false-positive exits, +$25 PnL with flat Sharpe
-- With `exit_window=20`, SL is net positive at `eff_threshold >= 0.08` (vs only 0.50 at ew=60)
-- `hard_drop=0.50` confirmed best across all windows (both PnL and Sharpe)
-- **Current config**: `hard_drop=0.50, exit_drop=0.12, sell_delay=4, window=20` (Pareto-optimal: $366.80 PnL, Sharpe 0.2249, Net SL +$20.63)
-- `reentry_cooldown_secs` confirmed dead in backtest (removed in fast-exit v2). `recovery_max_set_cost` had no backtest signal but is now used for proactive hedge profitability gating.
-- Full research report: `docs/research/stoploss-aggressiveness.md`
-
 ## Dutch Book Arbitrage Strategy
 
 Market-neutral arbitrage: buys both YES and NO tokens when their combined ask price is below $1.00, locking in guaranteed profit upon market resolution. Works across all active Polymarket markets, not limited to 15-min crypto markets.
@@ -387,11 +376,5 @@ All outbound traffic from the polyrust container is routed through a proxy VPS (
 - `docs/plans/arb-strategy-improvements.md` — arbitrage strategy improvement plan
 - `docs/plans/tailend-position-lifecycle-sm.md` — position lifecycle state machine design and implementation plan
 - `docs/plans/20260215-fast-exit-v2.md` — fast-exit v2 implementation plan (FAK exits, price-feed frontrunning, proactive hedge)
-- `docs/research/polymarket-price-discovery.md` — reference price discovery (CLOB midpoint, RTDS feeds, Chainlink/Binance oracles)
-- `docs/research/crypto-arb-reference-price.md` — crypto arb reference price mechanics for 15-min markets
-- `docs/research/arb-strategy-improvements.md` — arbitrage strategy improvement research
-- `docs/research/polymarket-modern-strategies.md` — modern Polymarket trading strategies research
-- `docs/research/stoploss-aggressiveness.md` — stop-loss aggressiveness sweep analysis and Pareto-optimal configs
-- `docs/research/fast-exit-architecture.md` — fast-exit v2 architecture: FAK+GTC hybrid, price-feed frontrunning, proactive hedge, lifecycle simplification
 - `docs/plans/dutch-book-strategy.md` — Dutch Book arbitrage strategy design and implementation plan
 - `docs/plans/2026-02-16-crypto-arb-refactor.md` — crypto_arb service-structured refactor plan (7 flat files → domain/services/strategy subfolders)

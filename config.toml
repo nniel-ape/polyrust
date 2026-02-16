@@ -77,30 +77,9 @@ base_size = 5                   # Base USDC position size per trade
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAILEND STRATEGY — high-confidence trades near market expiration
-# Calibrated via 12 sweeps / 2,081 combos (2026-02-14/15)
-# See docs/research/stoploss-aggressiveness.md for SL calibration details
 # ─────────────────────────────────────────────────────────────────────────────
 
 [arbitrage.tailend]
-# Entry gate: min ask price by time remaining [secs, threshold]
-# Only the 60s bucket showed sensitivity; 120/90/30 are dead in backtest
-dynamic_thresholds = [[120, "0.90"], [90, "0.92"], [60, "0.95"], [30, "0.95"]]
-# Max bid-ask spread in basis points to enter (200 bps = 2 cents)
-max_spread_bps = "200"
-# Max recent price volatility to enter; filters noisy markets (0.10 = 10%)
-max_recent_volatility = "0.10"
-# Min distance between strike and current price; filters near-ATM entries
-min_strike_distance_pct = "0.001"
-# Min seconds price must sustain above threshold (0 = no wait; dead param)
-min_sustained_secs = 0
-# Bid drop from entry that triggers early exit within post_entry_window
-# Calibrated: 0.12 is Pareto-optimal balanced (Sharpe 0.2249, PnL $366.80)
-post_entry_exit_drop = "0.12"
-# Seconds after entry during which post_entry_exit_drop is active
-# Calibrated: 20s dominates 30/45/60 — fewer false positives, +$25 PnL
-post_entry_window_secs = 20
-# Min seconds after entry before selling is allowed (anti-churn)
-min_sell_delay_secs = 4
 # Cooldown after FOK rejection before retrying (secs)
 fok_cooldown_secs = 15
 # Max orderbook age before considering it stale (secs)
@@ -113,26 +92,10 @@ max_source_stale_secs = 5
 # ─────────────────────────────────────────────────────────────────────────────
 # STOP-LOSS — 4-level trigger hierarchy
 # Priority: HardCrash > DualTrigger > TrailingStop > PostEntryExit
-# In backtest, only hard_drop_abs + post_entry_exit_drop fire.
-# All other params are dead in 15-min tail-end regime (positions converge
-# to 1.0 monotonically). They exist for live trading protection.
-# See docs/research/stoploss-aggressiveness.md for full calibration.
 # ─────────────────────────────────────────────────────────────────────────────
 
 [arbitrage.stop_loss]
-# Level 1 — HardCrash (EITHER leg triggers independently)
-# Calibrated: 0.50 is optimal — wins both PnL and Sharpe across all windows
-hard_drop_abs = 0.50            # Bid drop from entry to trigger (e.g., 0.95→0.45)
-hard_reversal_pct = 0.006       # External crypto reversal % (0.6%)
-# Level 2 — DualTrigger (BOTH must hold for N consecutive ticks)
-reversal_pct = 0.003            # Crypto reversal % for dual trigger (0.3%)
-min_drop = 0.05                 # Min bid drop from entry for dual trigger (5 cents)
-dual_trigger_consecutive_ticks = 2  # Ticks both conditions must persist
-# Level 3 — TrailingStop
 trailing_enabled = true         # Enable trailing stop-loss
-trailing_distance = 0.05        # Distance from peak bid to trigger
-trailing_arm_distance = 0.015   # Price must rise this much above entry to arm
-trailing_min_distance = 0.015   # Floor after time decay (prevents noise triggers)
 time_decay = true               # Tighten trailing distance as expiry approaches
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -160,202 +123,10 @@ taker_fee_rate = "0.0315"  # Polymarket taker fee at 50/50 probability
 # ─────────────────────────────────────────────────────────────────────────────
 # PARAMETER SWEEP (cargo run -- --backtest-sweep)
 # ─────────────────────────────────────────────────────────────────────────────
-#
-# ┌─────────────────────────────────────────────────────────────────────────────┐
-# │ PARAMETER REFERENCE — defaults / min / max for sweep calibration           │
-# ├───────────────────────────────────────┬─────────┬─────────┬────────────────┤
-# │ Parameter                             │ Default │ Min     │ Max            │
-# ├───────────────────────────────────────┼─────────┼─────────┼────────────────┤
-# │ ENTRY FILTERS                         │         │         │                │
-# │ tailend.max_spread_bps                │ 200     │ 50      │ 500            │
-# │ tailend.min_sustained_secs            │ 5       │ 0       │ 15             │
-# │ tailend.max_recent_volatility         │ 0.02    │ 0.005   │ 0.10           │
-# │ tailend.min_strike_distance_pct       │ 0.005   │ 0.001   │ 0.010          │
-# │                                       │         │         │                │
-# │ DYNAMIC THRESHOLDS (ask min by time)  │         │         │                │
-# │ dynamic_thresholds.120                │ 0.90    │ 0.86    │ 0.94           │
-# │ dynamic_thresholds.90                 │ 0.92    │ 0.88    │ 0.95           │
-# │ dynamic_thresholds.60                 │ 0.93    │ 0.90    │ 0.96           │
-# │ dynamic_thresholds.30                 │ 0.95    │ 0.92    │ 0.97           │
-# │                                       │         │         │                │
-# │ STOP-LOSS TRIGGERS                    │         │         │                │
-# │ stop_loss.hard_drop_abs               │ 0.08    │ 0.04    │ 0.15           │
-# │ stop_loss.hard_reversal_pct           │ 0.006   │ 0.003   │ 0.012          │
-# │ stop_loss.reversal_pct                │ 0.003   │ 0.001   │ 0.008          │
-# │ stop_loss.min_drop                    │ 0.05    │ 0.02    │ 0.10           │
-# │ stop_loss.dual_trigger_consecutive    │ 2       │ 1       │ 4              │
-# │                                       │         │         │                │
-# │ TRAILING STOP & LIFECYCLE             │         │         │                │
-# │ stop_loss.trailing_distance           │ 0.05    │ 0.02    │ 0.08           │
-# │ stop_loss.trailing_arm_distance       │ 0.015   │ 0.008   │ 0.030          │
-# │ stop_loss.trailing_min_distance       │ 0.015   │ 0.008   │ 0.025          │
-# │ tailend.post_entry_exit_drop          │ 0.05    │ 0.02    │ 0.10           │
-# │ tailend.post_entry_window_secs        │ 20      │ 12      │ 35             │
-# │ tailend.min_sell_delay_secs           │ 10      │ 5       │ 12             │
-# │                                       │         │         │                │
-# │ RECOVERY                              │         │         │                │
-# │ stop_loss.recovery_max_set_cost       │ 1.01    │ 0.99    │ 1.04           │
-# │                                       │         │         │                │
-# │ EXCLUDED (backtest runner overrides):                                      │
-# │ stop_loss.min_remaining_secs → forced to 0                                │
-# │ tailend.stale_ob_secs → forced to MAX                                     │
-# │ tailend.rejection_cooldown_secs → no effect (immediate fills)             │
-# │ sizing.* → TailEnd uses fixed base_size/price, not Kelly                  │
-# └────────────────────────────────────────────────────────────────────────────┘
+# See config.example.toml for sweep profile examples.
 
-[backtest.sweep]
-parallelism = 10
-output_dir = "sweep_results"
-rank_by = "sharpe"
-top_n = 25
-force = true
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# MASSIVE SL + REENTRY SWEEP (1,296 combos — ~3h at parallelism=10)
-# Goals:
-#   1. Fine-grain the Pareto sweet spot (exit_drop 0.06-0.50, hard_drop 0.30-0.80)
-#   2. Narrow the exit_window optimum (20-45s bracket)
-#   3. Validate sell_delay=0 vs 4
-#   4. Test recovery_max_set_cost
-# Previous: 72-combo sweep established Pareto front, 0.50 as best eff_threshold
-# ═══════════════════════════════════════════════════════════════════════════════
-
-[backtest.sweep.stop_loss]
-hard_drop_abs = ["0.30", "0.50", "0.80"]
-recovery_max_set_cost = ["1.00", "1.02", "1.05"]
-
-[backtest.sweep.tailend]
-post_entry_exit_drop = ["0.06", "0.12", "0.50"]
-post_entry_window_secs = [20, 30, 45]
-min_sell_delay_secs = [4]
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PREVIOUS SWEEPS (archived)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# VOLATILITY CEILING TEST (5 combos — ~1 min)
-# Winners from Phase 1 pinned; test if vol>0.10 adds signal or noise.
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# [backtest.sweep.tailend]
-# max_recent_volatility = ["0.05", "0.10", "0.15", "0.20", "0.30"]
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# STOP-LOSS MICRO-THRESHOLD TEST (48 combos)
-# Tests if ultra-low thresholds can trigger on normal market noise.
-# Only params that CAN fire in backtest (immediate fills = no recovery/cooldown).
-# hard_drop/trailing/dual_trigger are dead code at normal thresholds since
-# winning 15-min markets converge 0.90→1.00 monotonically.
-# ═══════════════════════════════════════════════════════════════════════════════
-#
-# ═══════════════════════════════════════════════════════════════════════════════
-# STOP-LOSS MICRO-THRESHOLD — DONE (results: 2026-02-14_22-31-38)
-# hard_drop_abs=0.03 is a real winner (Sharpe 0.237). min_drop/trailing: dead.
-# ═══════════════════════════════════════════════════════════════════════════════
-#
-# [backtest.sweep.stop_loss]
-# hard_drop_abs = ["0.01", "0.03", "0.06"]
-# min_drop = ["0.01", "0.03", "0.06"]
-# trailing_distance = ["0.01", "0.03", "0.06"]
-# trailing_arm_distance = ["0.005", "0.010"]
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# FULL STOP-LOSS CALIBRATION + WINDOW CEILING (3600 combos)
-# Extreme ranges on all stop-loss params. Trailing was "dead" because we
-# never varied trailing_min_distance — the time-decay floor dominated.
-# With ultra-low min_distance + arm, trailing CAN fire near expiry.
-# Dead params excluded: recovery_*, reentry_* (no FOK rejections in backtest),
-#   min_remaining_secs (forced to 0), dual_trigger_consecutive (1=3).
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# [backtest.sweep.stop_loss]
-# # HardCrash — two independent legs (EITHER can trigger)
-# hard_drop_abs = ["0.005", "0.01", "0.02", "0.05", "0.10"]
-# hard_reversal_pct = ["0.001", "0.003", "0.015", "0.030"]
-# # DualTrigger — both must hold simultaneously
-# reversal_pct = ["0.0005", "0.001", "0.003", "0.008", "0.015"]
-# min_drop = ["0.005", "0.01", "0.03", "0.08"]
-# # Trailing — ultra-low min_distance bypasses the time-decay floor
-# trailing_arm_distance = ["0.002", "0.010"]
-# trailing_min_distance = ["0.003", "0.015"]
-
-# FULL STOP-LOSS — DONE (results: 2026-02-15_01-16-28)
-# Only hard_drop_abs=0.03 matters. All other SL params dead.
-#
-# [backtest.sweep.stop_loss]
-# hard_drop_abs = ["0.005", "0.01",  "0.10"]
-# hard_reversal_pct = ["0.001", "0.003",  "0.030"]
-# reversal_pct = ["0.0005", "0.001",  "0.015"]
-# min_drop = ["0.005", "0.01", "0.03", "0.08"]
-# trailing_arm_distance = ["0.002", "0.010"]
-# trailing_min_distance = ["0.003", "0.015"]
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# WINDOW CEILING TEST (5 combos — ~1 min)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# WINDOW CEILING — DONE (results: 2026-02-15_01-30-56)
-# 60+ all identical. Pin to 60.
-#
-# [backtest.sweep.tailend]
-# post_entry_window_secs = [45, 60, 75, 90, 120]
-
-# EXIT TIMING — DONE (results: 2026-02-14_22-17-39)
-# Winner: window=45, delay=8, drop=0.03 (Sharpe 0.235)
-#
-# [backtest.sweep.tailend]
-# post_entry_exit_drop = ["0.02", "0.03", "0.04", "0.05", "0.07", "0.10"]
-# post_entry_window_secs = [12, 20, 30, 45]
-# min_sell_delay_secs = [5, 8, 12]
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PHASE 2: Dynamic Thresholds (256 combos)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# [backtest.sweep.tailend.dynamic_thresholds]
-# 120 = ["0.86", "0.88", "0.90", "0.92"]
-# 90 = ["0.88", "0.90", "0.92", "0.94"]
-# 60 = ["0.90", "0.92", "0.93", "0.95"]
-# 30 = ["0.92", "0.94", "0.95", "0.97"]
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PHASE 5: Winner Validation (fill after all phases)
-# ═══════════════════════════════════════════════════════════════════════════════
-#
-# [backtest.sweep.tailend]
-# max_spread_bps = ["<winner>", "<runner_up>"]
-# max_recent_volatility = ["<winner>", "<runner_up>"]
-# min_strike_distance_pct = ["<winner>", "<runner_up>"]
-# post_entry_exit_drop = ["<winner>", "<runner_up>"]
-# post_entry_window_secs = [<winner>, <runner_up>]
-# min_sell_delay_secs = [<winner>, <runner_up>]
-#
-# [backtest.sweep.tailend.dynamic_thresholds]
-# 120 = ["<winner>", "<runner_up>"]
-# 90 = ["<winner>", "<runner_up>"]
-# 60 = ["<winner>", "<runner_up>"]
-# 30 = ["<winner>", "<runner_up>"]
-#
-# [backtest.sweep.stop_loss]
-# hard_drop_abs = ["<winner>", "<runner_up>"]
-# reversal_pct = ["<winner>", "<runner_up>"]
-# ═══════════════════════════════════════════════════════════════════════════════
-# STOP-LOSS DEEP RESEARCH (396 combos — ~18 min)
-#
-# Goals:
-# 1. Fine-grained SL thresholds (11 values) to find precise optimal point
-# 2. Decouple hard_drop_abs vs post_entry_exit_drop (verify if truly symmetric)
-# 3. Cross with timing params (min_sell_delay × post_entry_window) for interactions
-# 4. New economic metrics: premature_exit_cost, correct_stop_savings in CSV
-#
-# Grid: 3 × 6 × 2 × 2 = 72 combinations (~3 min)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# [backtest.sweep.stop_loss]
-# hard_drop_abs = ["0.03", "0.50", "1.0"]
-#
-# [backtest.sweep.tailend]
-# post_entry_exit_drop = ["0.03", "0.05", "0.10", "0.20", "0.50", "1.0"]
-# min_sell_delay_secs = [0, 8]
-# post_entry_window_secs = [30, 60]
+# [backtest.sweep]
+# parallelism = 10
+# output_dir = "sweep_results"
+# rank_by = "sharpe"
+# top_n = 25
