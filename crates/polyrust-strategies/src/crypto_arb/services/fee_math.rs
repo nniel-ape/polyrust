@@ -56,7 +56,6 @@ pub fn kelly_position_size(confidence: Decimal, price: Decimal, config: &SizingC
 
 /// Parse a unix timestamp from a slug suffix (e.g. `btc-updown-15m-1706000000` → timestamp).
 /// Returns `None` if the slug doesn't end with a valid unix timestamp.
-#[allow(dead_code)] // Used by tests
 pub fn parse_slug_timestamp(slug: &str) -> Option<i64> {
     let last_segment = slug.rsplit('-').next()?;
     let ts: i64 = last_segment.parse().ok()?;
