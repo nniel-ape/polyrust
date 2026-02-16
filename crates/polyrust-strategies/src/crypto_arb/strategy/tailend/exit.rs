@@ -22,7 +22,7 @@ impl TailEndStrategy {
     /// - `fast_path_enabled` is false
     /// - No cached orderbook snapshot exists for the position's token
     /// - Cached snapshot is older than `fast_path_max_book_age_ms`
-    pub(super) async fn evaluate_exits_on_price_change(
+    pub(crate) async fn evaluate_exits_on_price_change(
         &self,
         coin: &str,
         ctx: &StrategyContext,
@@ -181,7 +181,7 @@ impl TailEndStrategy {
     /// lifecycle-driven stop-loss triggers on our positions.
     ///
     /// Uses the 4-level trigger hierarchy (evaluate_triggers) and lifecycle state machine.
-    pub(super) async fn handle_orderbook_update(&self, snapshot: &OrderbookSnapshot) -> Vec<Action> {
+    pub(crate) async fn handle_orderbook_update(&self, snapshot: &OrderbookSnapshot) -> Vec<Action> {
         // Update cached asks
         if let Some(best_ask) = snapshot.asks.first() {
             let mut cached = self.base.cached_asks.write().await;

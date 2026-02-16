@@ -285,7 +285,7 @@ impl TailEndStrategy {
     }
 
     /// Handle a fully filled order event (GTC entry fills, stop-loss sells, GTC SL fills).
-    pub(super) async fn on_order_filled(
+    pub(crate) async fn on_order_filled(
         &self,
         order_id: &str,
         _token_id: &str,

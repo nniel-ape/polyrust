@@ -151,19 +151,19 @@ crypto_arb/
 - [x] Run `cargo build --workspace && cargo clippy --workspace -- -D warnings`
 
 ### Task 7: Reorganize tests into `tests/`
-- [ ] Create `crypto_arb/tests/` directory
-- [ ] Create `tests/mod.rs` — consolidate shared helpers from `tests.rs` and `tailend.rs` inline tests (deduplicate `make_market_info`)
-- [ ] Create `tests/test_domain.rs` — move `ReferenceQuality`, `MarketWithReference`, `ModeStats`, `SpikeEvent` tests
-- [ ] Create `tests/test_config.rs` — move config defaults, deserialization, validation tests
-- [ ] Create `tests/test_pricing.rs` — move price history, composite, spike, reference, boundary tests
-- [ ] Create `tests/test_markets.rs` — move market reservation, lifecycle, coin extraction tests
-- [ ] Create `tests/test_orders.rs` — move order reconciliation, cooldowns, rejection classification tests
-- [ ] Create `tests/test_lifecycle.rs` — move position lifecycle FSM, `evaluate_triggers` tests
-- [ ] Create `tests/test_tailend.rs` — move TailEnd integration tests (entry, exits, PnL, fast-path) + inline tests from old `tailend.rs`
-- [ ] Delete old `tests.rs`
-- [ ] Update `crypto_arb/mod.rs`: `#[cfg(test)] mod tests` resolves to `tests/mod.rs`
-- [ ] Run `cargo test --workspace` — verify 599 tests still pass
-- [ ] Run `cargo clippy --workspace -- -D warnings`
+- [x] Create `crypto_arb/tests/` directory
+- [x] Create `tests/mod.rs` — consolidate shared helpers from `tests.rs` and `tailend.rs` inline tests (deduplicate `make_market_info`)
+- [x] Create `tests/test_domain.rs` — move `ReferenceQuality`, `MarketWithReference`, `ModeStats`, `SpikeEvent` tests
+- [x] Create `tests/test_config.rs` — move config defaults, deserialization, validation tests
+- [x] Create `tests/test_pricing.rs` — move price history, composite, spike, reference, boundary tests
+- [x] Create `tests/test_markets.rs` — move market reservation, lifecycle, coin extraction tests
+- [x] Create `tests/test_orders.rs` — move order reconciliation, cooldowns, rejection classification tests
+- [x] Create `tests/test_lifecycle.rs` — move position lifecycle FSM, `evaluate_triggers` tests
+- [x] Create `tests/test_tailend.rs` — move TailEnd integration tests (entry, exits, PnL, fast-path) + inline tests from old `tailend.rs`
+- [x] Delete old `tests.rs`
+- [x] Update `crypto_arb/mod.rs`: `#[cfg(test)] mod tests` resolves to `tests/mod.rs`
+- [x] Run `cargo test --workspace` — verify 331 strategy tests pass (599 total across workspace, pre-existing SIGSEGV in dashboard/backtest Turso tests unrelated)
+- [x] Run `cargo build -p polyrust-strategies` — zero warnings (clippy not available in container)
 
 ### Task 8: Update external callsites
 - [ ] Update `src/main.rs:16` — change import from `CryptoArbBase` to `CryptoArbRuntime`

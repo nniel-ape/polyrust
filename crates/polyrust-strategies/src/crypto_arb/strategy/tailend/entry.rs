@@ -251,7 +251,7 @@ impl TailEndStrategy {
 
     /// Handle an external price update: record price, scan near-expiry markets,
     /// evaluate tail-end opportunities, and submit GTC orders.
-    pub(super) async fn handle_external_price(
+    pub(crate) async fn handle_external_price(
         &self,
         symbol: &str,
         price: Decimal,
