@@ -207,7 +207,7 @@ taker_fee_rate = "0.0315"  # Polymarket taker fee at 50/50 probability
 parallelism = 10
 output_dir = "sweep_results"
 rank_by = "sharpe"
-top_n = 100
+top_n = 25
 force = true
 
 # ═══════════════════════════════════════════════════════════════════════════════
