@@ -166,12 +166,13 @@ crypto_arb/
 - [x] Run `cargo build -p polyrust-strategies` — zero warnings (clippy not available in container)
 
 ### Task 8: Update external callsites
-- [ ] Update `src/main.rs:16` — change import from `CryptoArbBase` to `CryptoArbRuntime`
-- [ ] Update `src/main.rs:191,747` — `CryptoArbBase::new(` → `CryptoArbRuntime::new(`
-- [ ] Update `crates/polyrust-backtest/src/sweep/runner.rs:7` — change import
-- [ ] Update `crates/polyrust-backtest/src/sweep/runner.rs:240` — change construction call
-- [ ] Update `crates/polyrust-strategies/src/lib.rs:6` — re-export `CryptoArbRuntime` (keep `CryptoArbBase` as deprecated type alias if needed, or remove cleanly)
-- [ ] Run `cargo build --workspace && cargo clippy --workspace -- -D warnings`
+- [x] Update `src/main.rs:16` — change import from `CryptoArbBase` to `CryptoArbRuntime` (already done in Task 4)
+- [x] Update `src/main.rs:191,747` — `CryptoArbBase::new(` → `CryptoArbRuntime::new(` (already done in Task 4)
+- [x] Update `crates/polyrust-backtest/src/sweep/runner.rs:7` — change import (already done in Task 4)
+- [x] Update `crates/polyrust-backtest/src/sweep/runner.rs:240` — change construction call (already done in Task 4)
+- [x] Update `crates/polyrust-strategies/src/lib.rs:6` — re-export `CryptoArbRuntime` (already done in Task 4, no deprecated alias needed)
+- [x] Update CLAUDE.md reference from `CryptoArbBase` to `CryptoArbRuntime`
+- [x] Run `cargo build --workspace` — zero warnings (clippy not available in container)
 
 ### Task 9: Final verification and cleanup
 - [ ] Verify no production file in `crypto_arb/` exceeds 900 LOC (check with `wc -l`)

@@ -196,7 +196,7 @@ Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-min
 
 ### Strategy Configuration
 
-Configured via `[arbitrage]` in `config.toml`. Directory structure at `crates/polyrust-strategies/src/crypto_arb/` with shared state through `Arc<CryptoArbBase>`:
+Configured via `[arbitrage]` in `config.toml`. Directory structure at `crates/polyrust-strategies/src/crypto_arb/` with shared state through `Arc<CryptoArbRuntime>`:
 
 - `TailEndStrategy` — high-confidence trades near expiration
 - `CryptoArbDashboard` — unified dashboard view
