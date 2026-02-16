@@ -11,10 +11,10 @@ mod position;
 mod pricing;
 
 // Re-export free functions for external use
-pub use fee_math::{kelly_position_size, net_profit_margin, taker_fee};
 #[cfg(test)]
 pub use fee_math::parse_slug_timestamp;
+pub use fee_math::{kelly_position_size, net_profit_margin, taker_fee};
 
 // Re-export formatting helpers used by dashboard
-pub use fee_math::{fmt_market_price, fmt_usd};
 pub use crate::shared::escape_html;
+pub use fee_math::{fmt_market_price, fmt_usd};

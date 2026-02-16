@@ -8,9 +8,7 @@ use tracing::{debug, info};
 
 use polyrust_core::prelude::*;
 
-use crate::crypto_arb::domain::{
-    MarketWithReference, PositionLifecycleState,
-};
+use crate::crypto_arb::domain::{MarketWithReference, PositionLifecycleState};
 use crate::crypto_arb::runtime::{CryptoArbRuntime, WINDOW_SECS};
 use crate::crypto_arb::services::fee_math::parse_slug_timestamp;
 

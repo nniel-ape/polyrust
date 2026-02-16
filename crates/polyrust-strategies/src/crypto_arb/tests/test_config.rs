@@ -92,7 +92,10 @@ fn dynamic_ask_threshold_tightens_as_expiry_approaches() {
         (30, dec!(0.95)),  // 0.95 at 30s
     ];
 
-    let base = Arc::new(crate::crypto_arb::runtime::CryptoArbRuntime::new(config, vec![]));
+    let base = Arc::new(crate::crypto_arb::runtime::CryptoArbRuntime::new(
+        config,
+        vec![],
+    ));
     let strategy = TailEndStrategy::new(base);
 
     // At 120s, should use 0.90 (120s bucket)
@@ -128,7 +131,10 @@ fn dynamic_ask_threshold_fallback_to_legacy() {
     config.tailend.dynamic_thresholds = vec![]; // Empty - should fallback
     config.tailend.ask_threshold = dec!(0.88); // Legacy threshold
 
-    let base = Arc::new(crate::crypto_arb::runtime::CryptoArbRuntime::new(config, vec![]));
+    let base = Arc::new(crate::crypto_arb::runtime::CryptoArbRuntime::new(
+        config,
+        vec![],
+    ));
     let strategy = TailEndStrategy::new(base);
 
     // Should fallback to legacy threshold when dynamic thresholds is empty

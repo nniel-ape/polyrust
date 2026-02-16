@@ -30,9 +30,7 @@ use rust_decimal_macros::dec;
 use polyrust_core::prelude::*;
 
 use super::config::ArbitrageConfig;
-use super::domain::{
-    ArbitragePosition, MarketWithReference, OpenLimitOrder, ReferenceQuality,
-};
+use super::domain::{ArbitragePosition, MarketWithReference, OpenLimitOrder, ReferenceQuality};
 use super::runtime::CryptoArbRuntime;
 
 pub(super) fn make_market_info(id: &str, end_date: DateTime<Utc>) -> MarketInfo {
@@ -108,7 +106,10 @@ pub(super) fn make_position(
 }
 
 /// Helper to set up a base with an active market having a known end_date.
-pub(super) async fn make_base_with_market(market_id: &str, time_remaining_secs: i64) -> Arc<CryptoArbRuntime> {
+pub(super) async fn make_base_with_market(
+    market_id: &str,
+    time_remaining_secs: i64,
+) -> Arc<CryptoArbRuntime> {
     let mut config = ArbitrageConfig::default();
     config.use_chainlink = false;
     config.stop_loss.reversal_pct = dec!(0.005); // 0.5%
@@ -140,7 +141,11 @@ pub(super) async fn make_base_with_market(market_id: &str, time_remaining_secs: 
     base
 }
 
-pub(super) fn make_open_limit_order(order_id: &str, market_id: &str, token_id: &str) -> OpenLimitOrder {
+pub(super) fn make_open_limit_order(
+    order_id: &str,
+    market_id: &str,
+    token_id: &str,
+) -> OpenLimitOrder {
     OpenLimitOrder {
         order_id: order_id.to_string(),
         market_id: market_id.to_string(),

@@ -10,7 +10,7 @@ use crate::crypto_arb::domain::{
     BoundarySnapshot, CompositePriceResult, ReferenceQuality, SpikeEvent,
 };
 use crate::crypto_arb::runtime::{
-    CryptoArbRuntime, BOUNDARY_TOLERANCE_SECS, PRICE_HISTORY_SIZE, WINDOW_SECS,
+    BOUNDARY_TOLERANCE_SECS, CryptoArbRuntime, PRICE_HISTORY_SIZE, WINDOW_SECS,
 };
 
 impl CryptoArbRuntime {

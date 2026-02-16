@@ -4,7 +4,9 @@ use std::time::Instant;
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{info, warn};
 
-use polyrust_strategies::{ArbitrageConfig, CryptoArbRuntime, ReferenceQualityLevel, TailEndStrategy};
+use polyrust_strategies::{
+    ArbitrageConfig, CryptoArbRuntime, ReferenceQualityLevel, TailEndStrategy,
+};
 
 use crate::config::BacktestConfig;
 use crate::data::store::HistoricalDataStore;

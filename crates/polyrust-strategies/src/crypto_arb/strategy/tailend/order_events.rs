@@ -6,8 +6,7 @@ use tracing::{info, warn};
 use polyrust_core::prelude::*;
 
 use crate::crypto_arb::domain::{
-    ArbitragePosition, ExitOrderMeta, OpenLimitOrder, PositionLifecycleState,
-    StopLossRejectionKind,
+    ArbitragePosition, ExitOrderMeta, OpenLimitOrder, PositionLifecycleState, StopLossRejectionKind,
 };
 use crate::crypto_arb::services::taker_fee;
 
@@ -764,15 +763,11 @@ impl TailEndStrategy {
                                 "Exit order rejected (InvalidSize) — removing dust position"
                             );
                             self.base
-                                .reduce_or_remove_position_by_token(
-                                    position_token,
-                                    remaining,
-                                )
+                                .reduce_or_remove_position_by_token(position_token, remaining)
                                 .await;
                         } else {
                             // Transition back to Healthy for re-evaluation on next tick
-                            let mut lifecycle =
-                                self.base.ensure_lifecycle(position_token).await;
+                            let mut lifecycle = self.base.ensure_lifecycle(position_token).await;
                             lifecycle.pending_exit_order_id = None;
                             if let Err(e) = lifecycle.transition(
                                 PositionLifecycleState::Healthy,
@@ -801,8 +796,7 @@ impl TailEndStrategy {
                         exit_orders
                             .iter()
                             .find(|(_, m)| {
-                                m.token_id == position_token
-                                    && m.source_state.starts_with("Hedge")
+                                m.token_id == position_token && m.source_state.starts_with("Hedge")
                             })
                             .map(|(oid, _)| oid.clone())
                     };
@@ -829,8 +823,7 @@ impl TailEndStrategy {
                     && em.source_state.starts_with("Hedge")
                 {
                     // Hedge rejected — clear hedge tracking, continue sell-only
-                    let mut lifecycle =
-                        self.base.ensure_lifecycle(position_token).await;
+                    let mut lifecycle = self.base.ensure_lifecycle(position_token).await;
                     if let PositionLifecycleState::ExitExecuting {
                         ref mut hedge_order_id,
                         ref mut hedge_price,
@@ -846,8 +839,7 @@ impl TailEndStrategy {
                     {
                         let mut exit_orders = self.base.exit_orders_by_id.write().await;
                         exit_orders.retain(|_, m| {
-                            !(m.token_id == position_token
-                                && m.source_state.starts_with("Hedge"))
+                            !(m.token_id == position_token && m.source_state.starts_with("Hedge"))
                         });
                     }
 
@@ -969,11 +961,7 @@ impl TailEndStrategy {
     }
 
     /// Handle a cancel-failed order event.
-    pub(super) async fn handle_cancel_failed(
-        &self,
-        order_id: &str,
-        reason: &str,
-    ) -> Vec<Action> {
+    pub(super) async fn handle_cancel_failed(&self, order_id: &str, reason: &str) -> Vec<Action> {
         // First check if this is a lifecycle exit/recovery order
         let exit_meta = {
             let exit_orders = self.base.exit_orders_by_id.read().await;
@@ -982,6 +970,7 @@ impl TailEndStrategy {
         if let Some(meta) = exit_meta {
             let is_matched = reason.contains("matched");
             let is_gone = reason.contains("canceled") || reason.contains("not found");
+            let mut exit_fill_actions: Vec<Action> = Vec::new();
 
             if is_matched {
                 // Order was filled on the CLOB before our cancel arrived.
@@ -1002,19 +991,17 @@ impl TailEndStrategy {
                             .add_recovery_cost(&meta.token_id, -hedge_cost)
                             .await;
 
-                        let mut lifecycle =
-                            self.base.ensure_lifecycle(&meta.token_id).await;
+                        let mut lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
 
                         // Cancel the sell order
-                        let cancel_sell = if let PositionLifecycleState::ExitExecuting {
-                            ref order_id,
-                            ..
-                        } = lifecycle.state
-                        {
-                            Some(order_id.clone())
-                        } else {
-                            None
-                        };
+                        let cancel_sell =
+                            if let PositionLifecycleState::ExitExecuting { ref order_id, .. } =
+                                lifecycle.state
+                            {
+                                Some(order_id.clone())
+                            } else {
+                                None
+                            };
 
                         if let Err(e) = lifecycle.transition(
                             PositionLifecycleState::Hedged {
@@ -1055,8 +1042,7 @@ impl TailEndStrategy {
                             token_id = %meta.token_id,
                             "Hedge cancel-matched but clip_size is zero — cleaning up"
                         );
-                        let mut lifecycle =
-                            self.base.ensure_lifecycle(&meta.token_id).await;
+                        let mut lifecycle = self.base.ensure_lifecycle(&meta.token_id).await;
                         lifecycle.pending_exit_order_id = None;
                         self.write_lifecycle(&meta.token_id, &lifecycle).await;
                     }
@@ -1083,9 +1069,21 @@ impl TailEndStrategy {
                             - (exit_fee * size);
                         self.base.record_trade_pnl(pnl).await;
 
-                        if fully_closed {
-                            self.base.remove_lifecycle(&meta.token_id).await;
-                        } else {
+                        // Persist the cancel-matched exit fill so it survives restarts.
+                        exit_fill_actions.push(Action::RecordFill {
+                            order_id: order_id.to_string(),
+                            market_id: pos.market_id.clone(),
+                            token_id: meta.token_id.clone(),
+                            side: OrderSide::Sell,
+                            price: fill_price,
+                            size,
+                            realized_pnl: Some(pnl),
+                            fee: Some(exit_fee * size),
+                            order_type: Some(format!("{:?}", meta.order_type)),
+                            orderbook_snapshot: None,
+                        });
+
+                        if !fully_closed {
                             // Partial exit matched — transition back to Healthy for re-evaluation
                             let remaining = pos.size - size;
                             let is_dust = {
@@ -1097,10 +1095,7 @@ impl TailEndStrategy {
                             };
                             if is_dust {
                                 self.base
-                                    .reduce_or_remove_position_by_token(
-                                        &meta.token_id,
-                                        remaining,
-                                    )
+                                    .reduce_or_remove_position_by_token(&meta.token_id, remaining)
                                     .await;
                                 warn!(
                                     token_id = %meta.token_id,
@@ -1187,11 +1182,10 @@ impl TailEndStrategy {
                     "Exit order cancel failed (transient), will retry"
                 );
             }
-            vec![]
+            exit_fill_actions
         } else {
             // Not an exit order — check entry limit orders
-            let (_found, fill_actions) =
-                self.base.handle_cancel_failed(order_id, reason).await;
+            let (_found, fill_actions) = self.base.handle_cancel_failed(order_id, reason).await;
             fill_actions
         }
     }

@@ -225,7 +225,7 @@ hard_drop_abs = ["0.30", "0.50", "0.80"]
 recovery_max_set_cost = ["1.00", "1.02", "1.05"]
 
 [backtest.sweep.tailend]
-post_entry_exit_drop = ["0.06", "0.08", "0.10", "0.12", "0.15", "0.20", "0.35", "0.50"]
+post_entry_exit_drop = ["0.06", "0.12", "0.50"]
 post_entry_window_secs = [20, 30, 45]
 min_sell_delay_secs = [4]
 

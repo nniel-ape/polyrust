@@ -10,9 +10,8 @@ use polyrust_core::prelude::*;
 use super::*;
 use crate::crypto_arb::config::ArbitrageConfig;
 use crate::crypto_arb::domain::{
-    ArbitragePosition, CompositePriceResult, ExitOrderMeta,
-    MarketWithReference, ModeStats, OpenLimitOrder, PendingOrder,
-    PositionLifecycleState, ReferenceQuality,
+    ArbitragePosition, CompositePriceResult, ExitOrderMeta, MarketWithReference, ModeStats,
+    OpenLimitOrder, PendingOrder, PositionLifecycleState, ReferenceQuality,
 };
 use crate::crypto_arb::runtime::CryptoArbRuntime;
 use crate::crypto_arb::strategy::tailend::TailEndStrategy;
@@ -830,10 +829,7 @@ async fn hedge_skipped_when_cost_exceeds_threshold() {
 // TailEnd-specific test helpers
 // ---------------------------------------------------------------------------
 
-fn make_tailend_market_info(
-    id: &str,
-    end_date: chrono::DateTime<Utc>,
-) -> MarketInfo {
+fn make_tailend_market_info(id: &str, end_date: chrono::DateTime<Utc>) -> MarketInfo {
     MarketInfo {
         id: id.to_string(),
         slug: "btc-up-down".to_string(),
@@ -1173,8 +1169,7 @@ fn pnl_gtc_entry_fok_exit_entry_fee_is_zero() {
     let entry_fee_per_share = Decimal::ZERO;
     let exit_fee = taker_fee(exit_price, fee_rate);
 
-    let pnl =
-        (exit_price - entry_price) * size - (entry_fee_per_share * size) - (exit_fee * size);
+    let pnl = (exit_price - entry_price) * size - (entry_fee_per_share * size) - (exit_fee * size);
 
     let expected_exit_fee = taker_fee(dec!(0.85), fee_rate);
     let expected = (dec!(0.85) - dec!(0.92)) * dec!(100) - expected_exit_fee * dec!(100);
@@ -1210,8 +1205,7 @@ fn pnl_fok_entry_fok_exit_both_fees_deducted() {
     let entry_fee_per_share = taker_fee(entry_price, fee_rate);
     let exit_fee = taker_fee(exit_price, fee_rate);
 
-    let pnl =
-        (exit_price - entry_price) * size - (entry_fee_per_share * size) - (exit_fee * size);
+    let pnl = (exit_price - entry_price) * size - (entry_fee_per_share * size) - (exit_fee * size);
 
     let expected_entry = taker_fee(dec!(0.94), fee_rate);
     let expected_exit = taker_fee(dec!(0.90), fee_rate);
@@ -1277,14 +1271,12 @@ fn pnl_fok_exit_uses_actual_fill_price_not_trigger_bid() {
     let entry_fee_per_share = Decimal::ZERO;
 
     let exit_fee = taker_fee(actual_fill_price, fee_rate);
-    let correct_pnl = (actual_fill_price - entry_price) * size
-        - (entry_fee_per_share * size)
-        - (exit_fee * size);
+    let correct_pnl =
+        (actual_fill_price - entry_price) * size - (entry_fee_per_share * size) - (exit_fee * size);
 
     let wrong_exit_fee = taker_fee(dec!(0.92), fee_rate);
-    let wrong_pnl = (dec!(0.92) - entry_price) * size
-        - (entry_fee_per_share * size)
-        - (wrong_exit_fee * size);
+    let wrong_pnl =
+        (dec!(0.92) - entry_price) * size - (entry_fee_per_share * size) - (wrong_exit_fee * size);
 
     assert!(correct_pnl > wrong_pnl);
     assert!(correct_pnl - wrong_pnl > dec!(0.5));
@@ -1303,8 +1295,7 @@ fn pnl_fok_exit_same_trigger_and_fill_price() {
     let entry_fee_per_share = Decimal::ZERO;
 
     let exit_fee = taker_fee(fill_price, fee_rate);
-    let pnl =
-        (fill_price - entry_price) * size - (entry_fee_per_share * size) - (exit_fee * size);
+    let pnl = (fill_price - entry_price) * size - (entry_fee_per_share * size) - (exit_fee * size);
 
     let expected =
         (dec!(0.90) - dec!(0.95)) * dec!(50) - taker_fee(dec!(0.90), fee_rate) * dec!(50);
@@ -1882,7 +1873,10 @@ async fn lifecycle_exit_fill_routes_through_lifecycle_fak() {
         .values()
         .flat_map(|v| v.iter())
         .any(|p| p.token_id == "token_up");
-    assert!(!has_position, "Position should be removed after full exit fill");
+    assert!(
+        !has_position,
+        "Position should be removed after full exit fill"
+    );
 
     let lifecycles = strategy.base.position_lifecycle.read().await;
     assert!(
@@ -1892,7 +1886,10 @@ async fn lifecycle_exit_fill_routes_through_lifecycle_fak() {
 
     let exit_orders = strategy.base.exit_orders_by_id.read().await;
     let has_token = exit_orders.values().any(|m| m.token_id == "token_up");
-    assert!(!has_token, "exit_orders_by_id should be cleaned up after full fill");
+    assert!(
+        !has_token,
+        "exit_orders_by_id should be cleaned up after full fill"
+    );
 }
 
 #[tokio::test]
@@ -1910,7 +1907,10 @@ async fn lifecycle_exit_fill_routes_through_lifecycle_gtc() {
         .values()
         .flat_map(|v| v.iter())
         .any(|p| p.token_id == "token_up");
-    assert!(!has_position, "Position should be removed after GTC exit fill");
+    assert!(
+        !has_position,
+        "Position should be removed after GTC exit fill"
+    );
 
     let lifecycles = strategy.base.position_lifecycle.read().await;
     assert!(
@@ -2031,7 +2031,10 @@ async fn lifecycle_partial_exit_fill_above_min_places_gtc_residual() {
 
     let lifecycles = strategy.base.position_lifecycle.read().await;
     let lc = lifecycles.get("token_up");
-    assert!(lc.is_some(), "Lifecycle should exist for remaining position");
+    assert!(
+        lc.is_some(),
+        "Lifecycle should exist for remaining position"
+    );
     match &lc.unwrap().state {
         PositionLifecycleState::ExitExecuting { order_type, .. } => {
             assert_eq!(

@@ -7,9 +7,8 @@ use polyrust_core::prelude::*;
 use super::*;
 use crate::crypto_arb::config::{StopLossConfig, TailEndConfig};
 use crate::crypto_arb::domain::{
-    ArbitragePosition, ExitOrderMeta,
-    OpenLimitOrder, PositionLifecycle, PositionLifecycleState, StopLossTriggerKind,
-    TriggerEvalContext, compute_exit_clip,
+    ArbitragePosition, ExitOrderMeta, OpenLimitOrder, PositionLifecycle, PositionLifecycleState,
+    StopLossTriggerKind, TriggerEvalContext, compute_exit_clip,
 };
 use crate::crypto_arb::services::taker_fee;
 

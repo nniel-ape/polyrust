@@ -63,7 +63,6 @@ pub fn parse_slug_timestamp(slug: &str) -> Option<i64> {
     if ts > 1_577_836_800 { Some(ts) } else { None }
 }
 
-
 /// Format a USD price with 2 decimal places and thousands separators (e.g. `$88,959.37`).
 pub fn fmt_usd(price: Decimal) -> String {
     let rounded = price.round_dp(2);

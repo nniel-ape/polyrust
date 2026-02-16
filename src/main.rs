@@ -13,7 +13,7 @@ use polyrust_market::{
 };
 use polyrust_store::Store;
 use polyrust_strategies::{
-    ArbitrageConfig, CryptoArbRuntime, CryptoArbDashboard, DutchBookConfig, DutchBookDashboard,
+    ArbitrageConfig, CryptoArbDashboard, CryptoArbRuntime, DutchBookConfig, DutchBookDashboard,
     DutchBookState, DutchBookStrategy, ReferenceQualityLevel, TailEndStrategy,
 };
 use serde::Deserialize;

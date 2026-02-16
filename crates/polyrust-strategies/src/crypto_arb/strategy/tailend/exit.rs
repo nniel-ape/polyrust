@@ -181,7 +181,10 @@ impl TailEndStrategy {
     /// lifecycle-driven stop-loss triggers on our positions.
     ///
     /// Uses the 4-level trigger hierarchy (evaluate_triggers) and lifecycle state machine.
-    pub(crate) async fn handle_orderbook_update(&self, snapshot: &OrderbookSnapshot) -> Vec<Action> {
+    pub(crate) async fn handle_orderbook_update(
+        &self,
+        snapshot: &OrderbookSnapshot,
+    ) -> Vec<Action> {
         // Update cached asks
         if let Some(best_ask) = snapshot.asks.first() {
             let mut cached = self.base.cached_asks.write().await;
@@ -592,18 +595,12 @@ impl TailEndStrategy {
         drop(cache);
 
         // Composite missing or stale — fall back to single fresh source
-        if let Some(single) = self
-            .base
-            .get_sl_single_fresh(coin, max_age, now)
-            .await
-        {
+        if let Some(single) = self.base.get_sl_single_fresh(coin, max_age, now).await {
             let history = self.base.price_history.read().await;
             let age = history
                 .get(coin)
                 .and_then(|h| h.back())
-                .map(|(.., source_ts)| {
-                    now.signed_duration_since(*source_ts).num_milliseconds()
-                })
+                .map(|(.., source_ts)| now.signed_duration_since(*source_ts).num_milliseconds())
                 .unwrap_or(sl_config.sl_max_external_age_ms * 3);
             return (Some(single), Some(age), None);
         }
