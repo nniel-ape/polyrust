@@ -635,19 +635,17 @@ async fn recovery_opposite_alpha_momentum_confirmed() {
         assert!(all_reversed, "All recent ticks should show reversal");
     }
 
-    // Verify the other side ask is within risk budget
+    // Verify the other side ask is within set-completion budget
     {
         let mut asks = base.cached_asks.write().await;
-        asks.insert("token_down".to_string(), dec!(0.12));
+        asks.insert("token_down".to_string(), dec!(0.10));
     }
-    let position_value = pos.entry_price * pos.size;
-    let extra_risk = dec!(0.12) * pos.size;
-    let risk_frac = extra_risk / position_value;
+    let set_cost = pos.entry_price + dec!(0.10);
     assert!(
-        risk_frac <= sl_config.recovery_max_extra_frac,
-        "Extra risk fraction {} should be within budget {}",
-        risk_frac,
-        sl_config.recovery_max_extra_frac
+        set_cost <= sl_config.recovery_max_set_cost,
+        "Set completion cost {} should be within budget {}",
+        set_cost,
+        sl_config.recovery_max_set_cost
     );
 }
 

@@ -232,7 +232,6 @@ fn stop_loss_config_lifecycle_field_defaults() {
     // Recovery
     assert!(config.recovery_enabled);
     assert_eq!(config.recovery_max_set_cost, dec!(1.01));
-    assert_eq!(config.recovery_max_extra_frac, dec!(0.15));
 }
 
 #[test]
@@ -278,11 +277,6 @@ fn stop_loss_config_lifecycle_defaults_are_sane() {
         config.recovery_max_set_cost > Decimal::ZERO,
         "recovery_max_set_cost must be positive"
     );
-    assert!(
-        config.recovery_max_extra_frac > Decimal::ZERO
-            && config.recovery_max_extra_frac < Decimal::ONE,
-        "recovery_max_extra_frac must be in (0, 1)"
-    );
 }
 
 #[test]
@@ -304,7 +298,6 @@ fn stop_loss_config_deserialize_with_lifecycle_fields() {
         exit_depth_cap_factor = "0.70"
         recovery_enabled = false
         recovery_max_set_cost = "1.02"
-        recovery_max_extra_frac = "0.20"
     "#;
     let config: crate::crypto_arb::config::StopLossConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.hard_drop_abs, dec!(0.10));
@@ -318,7 +311,6 @@ fn stop_loss_config_deserialize_with_lifecycle_fields() {
     assert_eq!(config.exit_depth_cap_factor, dec!(0.70));
     assert!(!config.recovery_enabled);
     assert_eq!(config.recovery_max_set_cost, dec!(1.02));
-    assert_eq!(config.recovery_max_extra_frac, dec!(0.20));
 }
 
 #[test]
@@ -344,7 +336,6 @@ fn stop_loss_config_deserialize_missing_lifecycle_fields_uses_defaults() {
     assert_eq!(config.exit_depth_cap_factor, dec!(0.80));
     assert!(config.recovery_enabled);
     assert_eq!(config.recovery_max_set_cost, dec!(1.01));
-    assert_eq!(config.recovery_max_extra_frac, dec!(0.15));
 }
 
 /// Backward compatibility: old configs with removed params still parse.
@@ -376,8 +367,7 @@ fn stop_loss_config_old_config_with_removed_params_still_parses() {
     assert_eq!(config.exit_depth_cap_factor, dec!(0.80));
     assert!(config.recovery_enabled);
     assert_eq!(config.recovery_max_set_cost, dec!(1.01));
-    assert_eq!(config.recovery_max_extra_frac, dec!(0.15));
-    // Removed fields are silently ignored — no parse error
+    // Removed fields (including recovery_max_extra_frac) are silently ignored — no parse error
 }
 
 // ---------------------------------------------------------------------------

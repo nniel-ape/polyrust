@@ -362,8 +362,6 @@ pub struct StopLossConfig {
     pub recovery_enabled: bool,
     /// Maximum combined cost for set completion (entry + other side ask). Default: 1.01.
     pub recovery_max_set_cost: Decimal,
-    /// Maximum extra risk fraction for recovery alpha trades. Default: 0.15 (15%).
-    pub recovery_max_extra_frac: Decimal,
     /// Cooldown in seconds after a recovery exit before allowing same-market re-entry.
     /// Prevents immediate re-entry loops after stop-loss exits. Default: 15.
     pub recovery_cooldown_secs: u64,
@@ -399,7 +397,6 @@ impl Default for StopLossConfig {
             // Recovery
             recovery_enabled: true,
             recovery_max_set_cost: Decimal::new(101, 2), // 1.01
-            recovery_max_extra_frac: Decimal::new(15, 2), // 0.15
             recovery_cooldown_secs: 15,
         }
     }
@@ -458,14 +455,6 @@ impl StopLossConfig {
             return Err(format!(
                 "recovery_max_set_cost must be positive, got {}",
                 self.recovery_max_set_cost
-            ));
-        }
-        if self.recovery_max_extra_frac < Decimal::ZERO
-            || self.recovery_max_extra_frac > Decimal::ONE
-        {
-            return Err(format!(
-                "recovery_max_extra_frac must be in [0, 1], got {}",
-                self.recovery_max_extra_frac
             ));
         }
         Ok(())
@@ -598,11 +587,6 @@ impl Default for ArbitrageConfig {
 }
 
 impl ArbitrageConfig {
-    /// Returns true if the strategy is enabled.
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
     /// Validate the full arbitrage configuration, including sub-configs.
     ///
     /// Returns `Err` for fatal misconfigurations, emits `tracing::warn` for

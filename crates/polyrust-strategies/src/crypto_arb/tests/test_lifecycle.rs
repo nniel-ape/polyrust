@@ -7,7 +7,7 @@ use polyrust_core::prelude::*;
 use super::*;
 use crate::crypto_arb::config::{StopLossConfig, TailEndConfig};
 use crate::crypto_arb::domain::{
-    ArbitragePosition, CompositePriceSnapshot, ExitOrderMeta,
+    ArbitragePosition, ExitOrderMeta,
     OpenLimitOrder, PositionLifecycle, PositionLifecycleState, StopLossTriggerKind,
     TriggerEvalContext, compute_exit_clip,
 };
@@ -298,21 +298,6 @@ fn lifecycle_state_display() {
     assert!(s.contains("0.92"));
 }
 
-#[test]
-fn exit_order_meta_fields() {
-    let meta = ExitOrderMeta {
-        token_id: "token-123".to_string(),
-        order_token_id: "token-123".to_string(),
-        order_type: OrderType::Fok,
-        source_state: "ExitExecuting".to_string(),
-        exit_price: dec!(0.85),
-        clip_size: dec!(10),
-    };
-    assert_eq!(meta.token_id, "token-123");
-    assert_eq!(meta.order_type, OrderType::Fok);
-    assert_eq!(meta.source_state, "ExitExecuting");
-}
-
 // ---------------------------------------------------------------------------
 // ArbitragePosition entry fee/order metadata tests
 // ---------------------------------------------------------------------------
@@ -382,19 +367,6 @@ fn fok_entry_has_computed_taker_fee_per_share() {
     assert!(pos.entry_fee_per_share > Decimal::ZERO);
     // At p=0.92: fee = 2 * 0.92 * 0.08 * 0.0315 = 0.0046368
     assert_eq!(pos.entry_fee_per_share, dec!(0.0046368));
-}
-
-#[test]
-fn composite_price_snapshot_clone() {
-    let snap = CompositePriceSnapshot {
-        price: dec!(50000.50),
-        sources_used: 3,
-        max_lag_ms: 800,
-        dispersion_bps: dec!(12.5),
-    };
-    let cloned = snap.clone();
-    assert_eq!(cloned.price, dec!(50000.50));
-    assert_eq!(cloned.sources_used, 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -936,7 +908,7 @@ fn evaluate_triggers_trailing_time_decay() {
 }
 
 #[test]
-fn evaluate_triggers_post_entry_deferred() {
+fn evaluate_triggers_post_entry_exit_during_sell_delay() {
     // Post-entry deferred triggers within sell delay window when bid drops
     let sl = StopLossConfig::default();
     let te = TailEndConfig::default();

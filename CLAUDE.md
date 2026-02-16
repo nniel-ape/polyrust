@@ -210,12 +210,12 @@ Configured via `[arbitrage]` in `config.toml`. Directory structure at `crates/po
 
 Strategy is disabled by default; set `enabled = true` in `[arbitrage]` to activate.
 
-`ArbitrageConfig` has core settings (coins, max_positions, min_profit_margin) plus `TailEndConfig` and shared sub-configs: `FeeConfig` (taker fee model), `SpikeConfig` (price spike detection), `OrderConfig` (GTC/FOK), `SizingConfig` (Kelly criterion), `StopLossConfig` (lifecycle state machine + dual-trigger + trailing), `PerformanceConfig` (tracking + auto-disable). See `crypto_arb/config.rs` for field details.
+`ArbitrageConfig` has core settings (coins, max_positions, min_profit_margin) plus `TailEndConfig` and shared sub-configs: `FeeConfig` (taker fee model), `SpikeConfig` (price spike detection), `OrderConfig` (GTC/FOK/FAK), `SizingConfig` (Kelly criterion), `StopLossConfig` (lifecycle state machine + dual-trigger + trailing), `PerformanceConfig` (tracking + auto-disable). See `crypto_arb/config.rs` for field details.
 
 ### Key Features
 
 - **Fee-aware profit margins**: Net profit calculation accounts for Polymarket's dynamic taker fees (3.15% at 50/50, ~0% near 0/1)
-- **Hybrid order execution**: GTC maker orders (0% fee) for most trades, FOK taker orders only for tail-end urgency. FOK has stricter USDC precision (see `rounding.rs`)
+- **Hybrid order execution**: GTC maker orders (0% fee) for entries, FAK taker orders for fast exits. FOK/FAK have stricter USDC precision (see `rounding.rs`)
 - **Kelly criterion sizing**: Position size scales with confidence and edge, clamped to [min_size, max_size]
 - **Spike detection**: Pre-filters small moves, triggers evaluation only on significant price changes or when delta exceeds fee+margin threshold
 - **Position lifecycle state machine**: Per-position 3-state lifecycle (Healthy → ExitExecuting → Hedged) with 4-level trigger hierarchy: hard crash → dual-trigger + hysteresis → trailing stop → post-entry exit. Hard crashes bypass sell delay for immediate exit.

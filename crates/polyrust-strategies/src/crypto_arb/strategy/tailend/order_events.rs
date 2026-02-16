@@ -825,39 +825,39 @@ impl TailEndStrategy {
                 }
 
                 // Check if this is a hedge order rejection
-                if let Some(ref em) = exit_meta {
-                    if em.source_state.starts_with("Hedge") {
-                        // Hedge rejected — clear hedge tracking, continue sell-only
-                        let mut lifecycle =
-                            self.base.ensure_lifecycle(position_token).await;
-                        if let PositionLifecycleState::ExitExecuting {
-                            ref mut hedge_order_id,
-                            ref mut hedge_price,
-                            ..
-                        } = lifecycle.state
-                        {
-                            *hedge_order_id = None;
-                            *hedge_price = None;
-                        }
-                        self.write_lifecycle(position_token, &lifecycle).await;
-
-                        // Clean up hedge order tracking
-                        {
-                            let mut exit_orders = self.base.exit_orders_by_id.write().await;
-                            exit_orders.retain(|_, m| {
-                                !(m.token_id == position_token
-                                    && m.source_state.starts_with("Hedge"))
-                            });
-                        }
-
-                        warn!(
-                            token_id = %position_token,
-                            reason = %reason,
-                            "Hedge order rejected — continuing sell-only exit"
-                        );
-
-                        return Ok(vec![]);
+                if let Some(ref em) = exit_meta
+                    && em.source_state.starts_with("Hedge")
+                {
+                    // Hedge rejected — clear hedge tracking, continue sell-only
+                    let mut lifecycle =
+                        self.base.ensure_lifecycle(position_token).await;
+                    if let PositionLifecycleState::ExitExecuting {
+                        ref mut hedge_order_id,
+                        ref mut hedge_price,
+                        ..
+                    } = lifecycle.state
+                    {
+                        *hedge_order_id = None;
+                        *hedge_price = None;
                     }
+                    self.write_lifecycle(position_token, &lifecycle).await;
+
+                    // Clean up hedge order tracking
+                    {
+                        let mut exit_orders = self.base.exit_orders_by_id.write().await;
+                        exit_orders.retain(|_, m| {
+                            !(m.token_id == position_token
+                                && m.source_state.starts_with("Hedge"))
+                        });
+                    }
+
+                    warn!(
+                        token_id = %position_token,
+                        reason = %reason,
+                        "Hedge order rejected — continuing sell-only exit"
+                    );
+
+                    return Ok(vec![]);
                 }
             }
         }

@@ -575,40 +575,26 @@ impl TailEndStrategy {
         sl_config: &crate::crypto_arb::config::StopLossConfig,
         now: DateTime<Utc>,
     ) -> (Option<Decimal>, Option<i64>, Option<usize>) {
+        let max_age = sl_config.sl_max_external_age_ms * 2;
+
+        // Try composite cache first
         let cache = self.base.sl_composite_cache.read().await;
         if let Some((composite, cached_at)) = cache.get(coin) {
             let age = now.signed_duration_since(*cached_at).num_milliseconds();
-            if age <= sl_config.sl_max_external_age_ms * 2 {
+            if age <= max_age {
                 return (
                     Some(composite.price),
                     Some(age),
                     Some(composite.sources_used),
                 );
             }
-            drop(cache);
-            // Composite too stale, try single fresh source
-            if let Some(single) = self
-                .base
-                .get_sl_single_fresh(coin, sl_config.sl_max_external_age_ms * 2, now)
-                .await
-            {
-                let history = self.base.price_history.read().await;
-                let age = history
-                    .get(coin)
-                    .and_then(|h| h.back())
-                    .map(|(.., source_ts)| {
-                        now.signed_duration_since(*source_ts).num_milliseconds()
-                    })
-                    .unwrap_or(sl_config.sl_max_external_age_ms * 3);
-                return (Some(single), Some(age), None);
-            }
-            return (None, None, None);
         }
         drop(cache);
-        // No composite cached, try single fresh source
+
+        // Composite missing or stale — fall back to single fresh source
         if let Some(single) = self
             .base
-            .get_sl_single_fresh(coin, sl_config.sl_max_external_age_ms * 2, now)
+            .get_sl_single_fresh(coin, max_age, now)
             .await
         {
             let history = self.base.price_history.read().await;

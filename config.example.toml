@@ -159,8 +159,7 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # trailing_distance = 0.05    # $0.05 from peak bid
 # trailing_min_distance = 0.015 # Floor on effective trailing distance (prevents noise triggers)
 # time_decay = true           # Tighten stops near expiration
-# gtc_fallback = true         # Fall back to GTC after FOK liquidity rejection
-# gtc_fallback_tick_offset = 1 # Ticks below bid for GTC stop-loss (e.g. bid=0.91 → 0.90)
+# gtc_fallback_tick_offset = 1 # Ticks below bid for GTC residual exit (e.g. bid=0.91 → 0.90)
 # gtc_stop_loss_max_age_secs = 2   # Cancel stale GTC stop-loss orders after this (seconds)
 # stale_market_cooldown_secs = 120 # Cooldown after removing stale position before re-entry
 # min_remaining_secs = 45          # Suppress stop-loss below this many seconds remaining

@@ -143,14 +143,14 @@ async fn release_reservation_makes_market_available() {
 }
 
 #[tokio::test]
-async fn consume_reservation_then_pending_preserves_exposure() {
+async fn release_reservation_then_pending_preserves_exposure() {
     let base = make_base_no_chainlink();
 
     // Reserve market
     assert!(base.try_reserve_market(&"market1".to_string(), 1).await);
 
     // Consume reservation and insert pending order
-    base.consume_reservation(&"market1".to_string()).await;
+    base.release_reservation(&"market1".to_string()).await;
     {
         let mut pending = base.pending_orders.write().await;
         pending.insert(

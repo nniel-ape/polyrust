@@ -338,11 +338,6 @@ impl CryptoArbRuntime {
         *cache = nearest;
     }
 
-    /// Check if this coin is tracked by the strategy.
-    pub fn is_tracked_coin(&self, coin: &str) -> bool {
-        self.coins.contains(coin)
-    }
-
     /// Extract coin symbol from market question string.
     pub fn extract_coin(&self, question: &str) -> Option<String> {
         const COIN_NAMES: &[(&str, &str)] = &[

@@ -48,15 +48,9 @@ impl CryptoArbRuntime {
         true
     }
 
-    /// Release a market reservation (called on early-exit paths before order placement).
+    /// Release a market reservation (called on early-exit paths before order placement,
+    /// or when consuming the reservation on successful order insertion).
     pub async fn release_reservation(&self, market_id: &MarketId) {
-        let mut reservations = self.market_reservations.write().await;
-        reservations.remove(market_id);
-    }
-
-    /// Consume a market reservation (called just before inserting into pending_orders).
-    /// This transfers the "slot" from reservations to pending_orders atomically.
-    pub async fn consume_reservation(&self, market_id: &MarketId) {
         let mut reservations = self.market_reservations.write().await;
         reservations.remove(market_id);
     }

@@ -496,7 +496,7 @@ impl TailEndStrategy {
             );
 
             // Consume reservation and track pending order
-            self.base.consume_reservation(&market_id).await;
+            self.base.release_reservation(&market_id).await;
             {
                 let mut pending = self.base.pending_orders.write().await;
                 pending.insert(
