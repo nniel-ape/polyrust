@@ -64,7 +64,7 @@ async fn base_can_open_position() {
                 order_id: None,
                 entry_time: Utc::now(),
                 kelly_fraction: None,
-                peak_bid: dec!(0.60),
+                peak_price: dec!(0.60),
 
                 estimated_fee: Decimal::ZERO,
                 entry_market_price: dec!(0.60),

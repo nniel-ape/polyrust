@@ -295,6 +295,32 @@ impl SizingConfig {
     }
 }
 
+/// Unified stop-loss price blending configuration.
+///
+/// Computes a blended price from CLOB best bid and external-implied fair value.
+/// At `external_weight = 0.0`, degrades to pure CLOB behavior (safe rollback).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UnifiedPriceConfig {
+    /// Weight given to external-implied price vs CLOB bid.
+    /// `unified = (1 - weight) * bid + weight * implied_price`.
+    /// 0.0 = pure CLOB, 1.0 = pure external. Default: 0.7.
+    pub external_weight: Decimal,
+    /// Sensitivity of crypto reversal to CLOB price drop.
+    /// 1% crypto reversal ≈ `sensitivity` cents CLOB drop.
+    /// Default: 12.0.
+    pub sensitivity: Decimal,
+}
+
+impl Default for UnifiedPriceConfig {
+    fn default() -> Self {
+        Self {
+            external_weight: Decimal::new(7, 1), // 0.7
+            sensitivity: Decimal::new(12, 0),    // 12.0
+        }
+    }
+}
+
 /// Stop-loss configuration (dual-trigger + trailing + lifecycle).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -357,6 +383,11 @@ pub struct StopLossConfig {
     /// Exit clip = min(remaining, bid_depth * exit_depth_cap_factor).
     pub exit_depth_cap_factor: Decimal,
 
+    // ── Unified stop-loss price ─────────────────────────────────────────
+    /// Blending configuration for unified stop-loss price.
+    #[serde(default)]
+    pub unified_price: UnifiedPriceConfig,
+
     // ── Recovery ────────────────────────────────────────────────────────
     /// Enable recovery logic (opposite-side set completion + re-entry). Default: true.
     pub recovery_enabled: bool,
@@ -394,6 +425,8 @@ impl Default for StopLossConfig {
             trailing_arm_distance: Decimal::new(15, 3), // 0.015
             // Execution ladder
             exit_depth_cap_factor: Decimal::new(80, 2), // 0.80
+            // Unified price
+            unified_price: UnifiedPriceConfig::default(),
             // Recovery
             recovery_enabled: true,
             recovery_max_set_cost: Decimal::new(101, 2), // 1.01
@@ -455,6 +488,20 @@ impl StopLossConfig {
             return Err(format!(
                 "recovery_max_set_cost must be positive, got {}",
                 self.recovery_max_set_cost
+            ));
+        }
+        if self.unified_price.external_weight < Decimal::ZERO
+            || self.unified_price.external_weight > Decimal::ONE
+        {
+            return Err(format!(
+                "unified_price.external_weight must be in [0, 1], got {}",
+                self.unified_price.external_weight
+            ));
+        }
+        if self.unified_price.sensitivity <= Decimal::ZERO {
+            return Err(format!(
+                "unified_price.sensitivity must be positive, got {}",
+                self.unified_price.sensitivity
             ));
         }
         Ok(())

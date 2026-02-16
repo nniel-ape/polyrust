@@ -25,12 +25,25 @@ pub struct SweepResult {
     pub settled_worthless: usize,
     pub prediction_correct: usize,
     pub prediction_wrong: usize,
+    pub prediction_unknown: usize,
     pub prediction_accuracy: Decimal,
     pub premature_exits: usize,
     pub correct_stops: usize,
     pub premature_exit_cost: Decimal,
     pub correct_stop_savings: Decimal,
+    pub hedge_attempts: usize,
+    pub hedge_pnl: Decimal,
     pub reentry_count: usize,
+    // --- Per-trigger breakdown ---
+    pub premature_hard_crash: usize,
+    pub premature_trailing: usize,
+    pub premature_post_entry: usize,
+    pub correct_hard_crash: usize,
+    pub correct_trailing: usize,
+    pub correct_post_entry: usize,
+    pub start_balance: Decimal,
+    pub net_stop_value: Decimal,
+    pub composite_score: Option<Decimal>,
     pub duration_secs: f64,
 }
 
@@ -40,6 +53,8 @@ pub struct SweepReport {
     pub results: Vec<SweepResult>,
     pub total_combinations: usize,
     pub total_wall_time_secs: f64,
+    /// Axes that were detected as inert and removed from the grid.
+    pub ignored_axes: Vec<String>,
 }
 
 impl SweepReport {
@@ -62,6 +77,17 @@ impl SweepReport {
             "drawdown" => {
                 self.results
                     .sort_by(|a, b| a.max_drawdown.cmp(&b.max_drawdown)); // Ascending (less is better)
+            }
+            "composite" => {
+                self.results.sort_by(|a, b| {
+                    let sa = a.composite_score.unwrap_or(Decimal::MIN);
+                    let sb = b.composite_score.unwrap_or(Decimal::MIN);
+                    sb.cmp(&sa) // Descending
+                });
+            }
+            "net_stop_value" => {
+                self.results
+                    .sort_by(|a, b| b.net_stop_value.cmp(&a.net_stop_value)); // Descending
             }
             _ => {
                 // Default to sharpe
@@ -218,12 +244,23 @@ impl SweepReport {
             "settled_worthless".to_string(),
             "prediction_correct".to_string(),
             "prediction_wrong".to_string(),
+            "prediction_unknown".to_string(),
             "prediction_accuracy".to_string(),
             "premature_exits".to_string(),
             "correct_stops".to_string(),
             "premature_exit_cost".to_string(),
             "correct_stop_savings".to_string(),
+            "hedge_attempts".to_string(),
+            "hedge_pnl".to_string(),
             "reentry_count".to_string(),
+            "premature_hard_crash".to_string(),
+            "premature_trailing".to_string(),
+            "premature_post_entry".to_string(),
+            "correct_hard_crash".to_string(),
+            "correct_trailing".to_string(),
+            "correct_post_entry".to_string(),
+            "net_stop_value".to_string(),
+            "composite_score".to_string(),
             "duration_secs".to_string(),
         ]);
         writeln!(file, "{}", headers.join(","))
@@ -250,12 +287,25 @@ impl SweepReport {
                 result.settled_worthless.to_string(),
                 result.prediction_correct.to_string(),
                 result.prediction_wrong.to_string(),
+                result.prediction_unknown.to_string(),
                 result.prediction_accuracy.to_string(),
                 result.premature_exits.to_string(),
                 result.correct_stops.to_string(),
                 result.premature_exit_cost.to_string(),
                 result.correct_stop_savings.to_string(),
+                result.hedge_attempts.to_string(),
+                result.hedge_pnl.to_string(),
                 result.reentry_count.to_string(),
+                result.premature_hard_crash.to_string(),
+                result.premature_trailing.to_string(),
+                result.premature_post_entry.to_string(),
+                result.correct_hard_crash.to_string(),
+                result.correct_trailing.to_string(),
+                result.correct_post_entry.to_string(),
+                result.net_stop_value.to_string(),
+                result
+                    .composite_score
+                    .map_or(String::new(), |s| s.to_string()),
                 format!("{:.2}", result.duration_secs),
             ]);
             writeln!(file, "{}", row.join(",")).map_err(|e| {
@@ -517,6 +567,13 @@ mod tests {
     use rust_decimal_macros::dec;
 
     fn make_result(pnl: Decimal, sharpe: Option<Decimal>, win_rate: Decimal) -> SweepResult {
+        let start_balance = dec!(1000);
+        let net_stop_value = Decimal::ZERO;
+        let composite_score = if 5 >= 3 {
+            Some(pnl * (Decimal::ONE - dec!(0.05) / start_balance))
+        } else {
+            None
+        };
         SweepResult {
             combination_index: 0,
             params: BTreeMap::new(),
@@ -526,7 +583,7 @@ mod tests {
             max_drawdown: dec!(0.05),
             total_trades: 10,
             closing_trades: 5,
-            end_balance: dec!(1000) + pnl,
+            end_balance: start_balance + pnl,
             winning_trades: 0,
             losing_trades: 0,
             strategy_exits: 0,
@@ -534,12 +591,24 @@ mod tests {
             settled_worthless: 0,
             prediction_correct: 0,
             prediction_wrong: 0,
+            prediction_unknown: 0,
             prediction_accuracy: Decimal::ZERO,
             premature_exits: 0,
             correct_stops: 0,
             premature_exit_cost: Decimal::ZERO,
             correct_stop_savings: Decimal::ZERO,
+            hedge_attempts: 0,
+            hedge_pnl: Decimal::ZERO,
             reentry_count: 0,
+            premature_hard_crash: 0,
+            premature_trailing: 0,
+            premature_post_entry: 0,
+            correct_hard_crash: 0,
+            correct_trailing: 0,
+            correct_post_entry: 0,
+            start_balance,
+            net_stop_value,
+            composite_score,
             duration_secs: 1.0,
         }
     }
@@ -554,6 +623,7 @@ mod tests {
             ],
             total_combinations: 3,
             total_wall_time_secs: 3.0,
+            ignored_axes: vec![],
         };
         report.sort_by("sharpe");
         assert_eq!(report.results[0].sharpe_ratio, Some(dec!(1.5)));
@@ -570,6 +640,7 @@ mod tests {
             ],
             total_combinations: 3,
             total_wall_time_secs: 3.0,
+            ignored_axes: vec![],
         };
         report.sort_by("pnl");
         assert_eq!(report.results[0].total_pnl, dec!(30));
@@ -616,6 +687,7 @@ mod tests {
             ],
             total_combinations: 4,
             total_wall_time_secs: 4.0,
+            ignored_axes: vec![],
         };
 
         let analysis = report.sensitivity_analysis();
@@ -653,6 +725,7 @@ mod tests {
             ],
             total_combinations: 2,
             total_wall_time_secs: 2.0,
+            ignored_axes: vec![],
         };
         let analysis = report.sensitivity_analysis();
         assert_eq!(analysis.parameters.len(), 1);
@@ -673,6 +746,7 @@ mod tests {
             ],
             total_combinations: 2,
             total_wall_time_secs: 2.0,
+            ignored_axes: vec![],
         };
         let analysis = report.sensitivity_analysis();
         // Only 1 Sharpe value available → mean = 2.0
@@ -688,6 +762,7 @@ mod tests {
             ],
             total_combinations: 2,
             total_wall_time_secs: 2.0,
+            ignored_axes: vec![],
         };
         let analysis = report.sensitivity_analysis();
         assert_eq!(analysis.parameters[0].stats[0].mean_sharpe, None);
@@ -703,6 +778,7 @@ mod tests {
             ],
             total_combinations: 3,
             total_wall_time_secs: 3.0,
+            ignored_axes: vec![],
         };
         let analysis = report.sensitivity_analysis();
         let values: Vec<&str> = analysis.parameters[0]
@@ -719,6 +795,7 @@ mod tests {
             results: vec![],
             total_combinations: 0,
             total_wall_time_secs: 0.0,
+            ignored_axes: vec![],
         };
         let analysis = report.sensitivity_analysis();
         assert!(analysis.parameters.is_empty());
@@ -759,8 +836,156 @@ mod tests {
             ],
             total_combinations: 2,
             total_wall_time_secs: 2.0,
+            ignored_axes: vec![],
         };
         report.sort_by("drawdown");
         assert_eq!(report.results[0].max_drawdown, dec!(0.02));
+    }
+
+    #[test]
+    fn net_stop_value_computed_correctly() {
+        let mut r = make_result(dec!(10), Some(dec!(1.0)), dec!(0.6));
+        r.correct_stop_savings = dec!(5.00);
+        r.premature_exit_cost = dec!(2.00);
+        r.net_stop_value = r.correct_stop_savings - r.premature_exit_cost;
+        assert_eq!(r.net_stop_value, dec!(3.00));
+
+        // Negative case: premature exits cost more than stops save
+        let mut r2 = make_result(dec!(10), Some(dec!(1.0)), dec!(0.6));
+        r2.correct_stop_savings = dec!(1.00);
+        r2.premature_exit_cost = dec!(4.00);
+        r2.net_stop_value = r2.correct_stop_savings - r2.premature_exit_cost;
+        assert_eq!(r2.net_stop_value, dec!(-3.00));
+    }
+
+    #[test]
+    fn composite_score_with_sufficient_trades() {
+        let start_balance = dec!(1000);
+        let total_pnl = dec!(50);
+        let max_drawdown = dec!(0.05);
+        let closing_trades = 5;
+
+        let score = if closing_trades >= 3 && start_balance > Decimal::ZERO {
+            Some(total_pnl * (Decimal::ONE - max_drawdown / start_balance))
+        } else {
+            None
+        };
+
+        assert!(score.is_some());
+        // 50 * (1 - 0.05/1000) = 50 * (1 - 0.00005) = 50 * 0.99995 = 49.9975
+        let s = score.unwrap();
+        assert!(s > dec!(49.99) && s < dec!(50.00));
+    }
+
+    #[test]
+    fn composite_score_none_with_few_trades() {
+        let start_balance = dec!(1000);
+        let total_pnl = dec!(50);
+        let max_drawdown = dec!(0.05);
+        let closing_trades = 2;
+
+        let score = if closing_trades >= 3 && start_balance > Decimal::ZERO {
+            Some(total_pnl * (Decimal::ONE - max_drawdown / start_balance))
+        } else {
+            None
+        };
+
+        assert!(score.is_none());
+    }
+
+    #[test]
+    fn sort_by_composite() {
+        let mut r1 = make_result(dec!(10), None, dec!(0.6));
+        r1.composite_score = Some(dec!(9.5));
+        let mut r2 = make_result(dec!(20), None, dec!(0.7));
+        r2.composite_score = Some(dec!(19.0));
+        let mut r3 = make_result(dec!(5), None, dec!(0.5));
+        r3.composite_score = None; // Too few trades
+
+        let mut report = SweepReport {
+            results: vec![r1, r3, r2],
+            total_combinations: 3,
+            total_wall_time_secs: 3.0,
+            ignored_axes: vec![],
+        };
+        report.sort_by("composite");
+        assert_eq!(report.results[0].composite_score, Some(dec!(19.0)));
+        assert_eq!(report.results[1].composite_score, Some(dec!(9.5)));
+        assert_eq!(report.results[2].composite_score, None);
+    }
+
+    #[test]
+    fn sort_by_net_stop_value() {
+        let mut r1 = make_result(dec!(10), None, dec!(0.6));
+        r1.net_stop_value = dec!(3.0);
+        let mut r2 = make_result(dec!(20), None, dec!(0.7));
+        r2.net_stop_value = dec!(7.0);
+
+        let mut report = SweepReport {
+            results: vec![r1, r2],
+            total_combinations: 2,
+            total_wall_time_secs: 2.0,
+            ignored_axes: vec![],
+        };
+        report.sort_by("net_stop_value");
+        assert_eq!(report.results[0].net_stop_value, dec!(7.0));
+        assert_eq!(report.results[1].net_stop_value, dec!(3.0));
+    }
+
+    #[test]
+    fn csv_export_includes_new_columns() {
+        let mut r = make_result(dec!(10), Some(dec!(1.0)), dec!(0.6));
+        r.net_stop_value = dec!(3.50);
+        r.composite_score = Some(dec!(9.75));
+
+        let report = SweepReport {
+            results: vec![r],
+            total_combinations: 1,
+            total_wall_time_secs: 1.0,
+            ignored_axes: vec![],
+        };
+
+        let dir = std::env::temp_dir().join("sweep_test_csv");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test_new_cols.csv");
+        report.export_csv(path.to_str().unwrap()).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let header = content.lines().next().unwrap();
+        assert!(header.contains("net_stop_value"));
+        assert!(header.contains("composite_score"));
+
+        let data = content.lines().nth(1).unwrap();
+        assert!(data.contains("3.50"));
+        assert!(data.contains("9.75"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn json_export_includes_new_fields() {
+        let mut r = make_result(dec!(10), Some(dec!(1.0)), dec!(0.6));
+        r.net_stop_value = dec!(3.50);
+        r.composite_score = Some(dec!(9.75));
+
+        let report = SweepReport {
+            results: vec![r],
+            total_combinations: 1,
+            total_wall_time_secs: 1.0,
+            ignored_axes: vec![],
+        };
+
+        let dir = std::env::temp_dir().join("sweep_test_json");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test_new_fields.json");
+        report.export_json(path.to_str().unwrap()).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let result = &json["results"][0];
+        assert_eq!(result["net_stop_value"], "3.50");
+        assert_eq!(result["composite_score"], "9.75");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

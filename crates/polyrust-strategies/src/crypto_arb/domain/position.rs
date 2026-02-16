@@ -58,8 +58,8 @@ pub struct ArbitragePosition {
     pub entry_time: DateTime<Utc>,
     /// Kelly fraction used for sizing (None if fixed sizing was used).
     pub kelly_fraction: Option<Decimal>,
-    /// Highest bid price observed since position entry (for trailing stop-loss).
-    pub peak_bid: Decimal,
+    /// Highest unified price observed since position entry (for trailing stop-loss).
+    pub peak_price: Decimal,
     /// Estimated fee **per share** at entry (for P&L calculation).
     /// Total fee for position = `estimated_fee * size`.
     pub estimated_fee: Decimal,
@@ -103,7 +103,7 @@ impl ArbitragePosition {
             order_id,
             entry_time,
             kelly_fraction: lo.kelly_fraction,
-            peak_bid: fill_price,
+            peak_price: fill_price,
             estimated_fee: lo.estimated_fee,
             entry_market_price: fill_price,
             tick_size: lo.tick_size,

@@ -491,6 +491,21 @@ impl ParameterGrid {
     pub fn axis_names(&self) -> Vec<&str> {
         self.axes.iter().map(|a| a.name.as_str()).collect()
     }
+
+    /// Remove axes whose names are in the given set.
+    /// Returns the names of axes that were actually removed.
+    pub fn remove_axes(&mut self, names: &std::collections::HashSet<&str>) -> Vec<String> {
+        let mut removed = Vec::new();
+        self.axes.retain(|axis| {
+            if names.contains(axis.name.as_str()) {
+                removed.push(axis.name.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
 }
 
 #[cfg(test)]
@@ -801,5 +816,75 @@ mod tests {
             config.tailend.min_sell_delay_secs.unwrap().expand(),
             vec![8, 10, 12]
         );
+    }
+
+    #[test]
+    fn remove_axes_filters_inert() {
+        let config = SweepConfig {
+            tailend: TailEndSweepParams {
+                max_spread_bps: Some(ParamRange::Values(vec![dec!(100), dec!(200)])),
+                stale_ob_secs: Some(IntParamRange::Values(vec![30, 60])),
+                min_sustained_secs: Some(IntParamRange::Values(vec![3, 5])),
+                ..Default::default()
+            },
+            sizing: crate::sweep::config::SizingSweepParams {
+                kelly_multiplier: Some(ParamRange::Values(vec![dec!(0.15), dec!(0.25)])),
+                min_size: Some(ParamRange::Values(vec![dec!(5), dec!(10)])),
+                ..Default::default()
+            },
+            stop_loss: StopLossSweepParams {
+                min_remaining_secs: Some(IntParamRange::Values(vec![30, 60])),
+                reversal_pct: Some(ParamRange::Values(vec![dec!(0.003)])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut grid = ParameterGrid::from_config(&config);
+
+        // Before: 7 axes, 2*2*2*2*2*2*1 = 64 combinations
+        assert_eq!(grid.axis_names().len(), 7);
+
+        let inert: std::collections::HashSet<&str> = [
+            "tailend.stale_ob_secs",
+            "stop_loss.min_remaining_secs",
+            "sizing.kelly_multiplier",
+            "sizing.min_size",
+            "sizing.max_size", // not present — should not appear in removed
+        ]
+        .into();
+
+        let removed = grid.remove_axes(&inert);
+
+        // 4 inert axes were present (max_size was not in grid), so 4 removed
+        assert_eq!(removed.len(), 4);
+        assert!(removed.contains(&"tailend.stale_ob_secs".to_string()));
+        assert!(removed.contains(&"stop_loss.min_remaining_secs".to_string()));
+        assert!(removed.contains(&"sizing.kelly_multiplier".to_string()));
+        assert!(removed.contains(&"sizing.min_size".to_string()));
+
+        // After: 3 axes remain
+        let names = grid.axis_names();
+        assert_eq!(names.len(), 3);
+        assert!(names.contains(&"tailend.max_spread_bps"));
+        assert!(names.contains(&"tailend.min_sustained_secs"));
+        assert!(names.contains(&"stop_loss.reversal_pct"));
+
+        // 2 * 2 * 1 = 4 combinations
+        assert_eq!(grid.total_combinations(), 4);
+    }
+
+    #[test]
+    fn remove_axes_no_matches() {
+        let config = SweepConfig {
+            tailend: TailEndSweepParams {
+                max_spread_bps: Some(ParamRange::Values(vec![dec!(100)])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut grid = ParameterGrid::from_config(&config);
+        let removed = grid.remove_axes(&["nonexistent.axis"].into());
+        assert!(removed.is_empty());
+        assert_eq!(grid.axis_names().len(), 1);
     }
 }

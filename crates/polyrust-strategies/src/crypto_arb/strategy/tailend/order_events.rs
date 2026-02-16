@@ -298,7 +298,7 @@ impl TailEndStrategy {
             order_id: result.order_id.clone(),
             entry_time: now,
             kelly_fraction: pending.kelly_fraction,
-            peak_bid: pending.price,
+            peak_price: pending.price,
             estimated_fee: pending.estimated_fee,
             entry_market_price: pending.price,
             tick_size: pending.tick_size,

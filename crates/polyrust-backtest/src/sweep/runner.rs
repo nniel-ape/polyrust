@@ -1,12 +1,11 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{info, warn};
 
-use polyrust_strategies::{
-    ArbitrageConfig, CryptoArbRuntime, ReferenceQualityLevel, TailEndStrategy,
-};
+use polyrust_strategies::{ArbitrageConfig, CryptoArbRuntime, TailEndStrategy};
 
 use crate::config::BacktestConfig;
 use crate::data::store::HistoricalDataStore;
@@ -46,7 +45,11 @@ impl SweepRunner {
         let wall_start = Instant::now();
 
         // Generate parameter combinations
-        let grid = ParameterGrid::from_config(&self.sweep_config);
+        let mut grid = ParameterGrid::from_config(&self.sweep_config);
+
+        // Sanitize inert axes for crypto-arb-tailend
+        let ignored_axes = sanitize_inert_axes(&mut grid);
+
         let combinations = grid.combinations();
         let total = combinations.len();
 
@@ -159,13 +162,8 @@ impl SweepRunner {
             // Apply sweep params to config
             combo.apply_to(&mut arb_config);
 
-            // Backtest can't produce Historical quality
-            arb_config.tailend.min_reference_quality = ReferenceQualityLevel::Current;
-            arb_config.use_chainlink = false; // No RPC in backtest
-            arb_config.tailend.stale_ob_secs = i64::MAX; // Staleness meaningless in backtest
-            arb_config.tailend.use_composite_price = false; // Composite price gating meaningless with deterministic data
-            arb_config.stop_loss.sl_max_dispersion_bps = rust_decimal::Decimal::new(10000, 0); // Dispersion check disabled in backtest
-            arb_config.stop_loss.min_remaining_secs = 0; // Allow stop-loss evaluation until expiry (live default=45 suppresses most of the short position lifetime)
+            // Apply backtest overrides (reference quality, chainlink, staleness, etc.)
+            backtest_config.overrides.apply_to(&mut arb_config);
 
             let combo_index = combo.index;
 
@@ -222,6 +220,7 @@ impl SweepRunner {
             results,
             total_combinations: total,
             total_wall_time_secs,
+            ignored_axes,
         })
     }
 }
@@ -284,6 +283,18 @@ async fn run_single(
 
     let duration_secs = run_start.elapsed().as_secs_f64();
 
+    // Derived metrics
+    let net_stop_value = report.correct_stop_savings - report.premature_exit_cost;
+    let composite_score =
+        if report.closing_trades >= 3 && report.start_balance > rust_decimal::Decimal::ZERO {
+            Some(
+                report.total_pnl
+                    * (rust_decimal::Decimal::ONE - report.max_drawdown / report.start_balance),
+            )
+        } else {
+            None
+        };
+
     Ok(SweepResult {
         combination_index: combo_index,
         params: params_map,
@@ -301,14 +312,83 @@ async fn run_single(
         settled_worthless: report.settled_worthless,
         prediction_correct: report.prediction_correct,
         prediction_wrong: report.prediction_wrong,
+        prediction_unknown: report.prediction_unknown,
         prediction_accuracy: report.prediction_accuracy,
         premature_exits: report.premature_exits,
         correct_stops: report.correct_stops,
         premature_exit_cost: report.premature_exit_cost,
         correct_stop_savings: report.correct_stop_savings,
+        hedge_attempts: report.hedge_attempts,
+        hedge_pnl: report.hedge_pnl,
         reentry_count: report.reentry_count,
+        premature_hard_crash: report
+            .premature_by_trigger
+            .get("hard_crash")
+            .copied()
+            .unwrap_or(0),
+        premature_trailing: report
+            .premature_by_trigger
+            .get("trailing")
+            .copied()
+            .unwrap_or(0),
+        premature_post_entry: report
+            .premature_by_trigger
+            .get("post_entry")
+            .copied()
+            .unwrap_or(0),
+        correct_hard_crash: report
+            .correct_by_trigger
+            .get("hard_crash")
+            .copied()
+            .unwrap_or(0),
+        correct_trailing: report
+            .correct_by_trigger
+            .get("trailing")
+            .copied()
+            .unwrap_or(0),
+        correct_post_entry: report
+            .correct_by_trigger
+            .get("post_entry")
+            .copied()
+            .unwrap_or(0),
+        start_balance: report.start_balance,
+        net_stop_value,
+        composite_score,
         duration_secs,
     })
+}
+
+/// Axes that are inert for crypto-arb-tailend sweeps.
+///
+/// These are either overridden by the runner's forced backtest overrides
+/// or unused by the TailEnd strategy's sizing logic.
+const INERT_AXES_TAILEND: &[&str] = &[
+    "tailend.stale_ob_secs", // Overridden to i64::MAX (staleness meaningless in backtest)
+    "stop_loss.min_remaining_secs", // Overridden to 0 (allow stop-loss evaluation until expiry)
+    "sizing.kelly_multiplier", // TailEnd uses base_size / buy_price, not Kelly
+    "sizing.min_size",       // TailEnd doesn't use min_size check
+    "sizing.max_size",       // TailEnd doesn't use max_size check
+];
+
+/// Remove inert axes from the grid and log warnings.
+/// Returns the list of axis names that were removed.
+fn sanitize_inert_axes(grid: &mut ParameterGrid) -> Vec<String> {
+    let inert_set: HashSet<&str> = INERT_AXES_TAILEND.iter().copied().collect();
+    let removed = grid.remove_axes(&inert_set);
+    for name in &removed {
+        warn!(
+            "Sweep axis '{}' is inert for crypto-arb-tailend — overridden by runner or unused by strategy, ignoring",
+            name
+        );
+    }
+    if !removed.is_empty() {
+        info!(
+            ignored_count = removed.len(),
+            "Filtered {} inert axes from sweep grid",
+            removed.len()
+        );
+    }
+    removed
 }
 
 /// No-op strategy used only for event loading.

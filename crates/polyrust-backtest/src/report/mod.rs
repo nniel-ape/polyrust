@@ -45,6 +45,14 @@ pub struct BacktestReport {
     pub correct_stops: usize,
     pub premature_exit_cost: Decimal,
     pub correct_stop_savings: Decimal,
+    // --- Per-trigger breakdown (keyed by trigger short_name) ---
+    pub premature_by_trigger: HashMap<String, usize>,
+    pub correct_by_trigger: HashMap<String, usize>,
+    pub premature_cost_by_trigger: HashMap<String, Decimal>,
+    pub correct_savings_by_trigger: HashMap<String, Decimal>,
+    // --- Hedge analysis ---
+    pub hedge_attempts: usize,
+    pub hedge_pnl: Decimal,
     // --- Re-entry tracking ---
     pub reentry_count: usize,
     pub start_balance: Decimal,
@@ -66,6 +74,10 @@ struct PredictionMetrics {
     correct_stops: usize,
     premature_exit_cost: Decimal,
     correct_stop_savings: Decimal,
+    premature_by_trigger: HashMap<String, usize>,
+    correct_by_trigger: HashMap<String, usize>,
+    premature_cost_by_trigger: HashMap<String, Decimal>,
+    correct_savings_by_trigger: HashMap<String, Decimal>,
 }
 
 /// A trade record from the backtest with P&L information.
@@ -85,6 +97,10 @@ pub struct BacktestTrade {
     /// What the market settled at ($0 or $1), for counterfactual analysis.
     /// Some for strategy exits (filled from settlement_outcomes), None for buys.
     pub counterfactual_settlement: Option<Decimal>,
+    /// Whether this trade was a proactive hedge (opposite-side buy during stop-loss exit)
+    pub is_hedge: bool,
+    /// Which stop-loss trigger caused this exit (None for buys, settlements, hedges)
+    pub exit_trigger: Option<String>,
 }
 
 impl BacktestReport {
@@ -95,7 +111,7 @@ impl BacktestReport {
     pub async fn from_engine_results(
         store: Arc<Store>,
         engine_trades: Vec<crate::engine::BacktestTrade>,
-        settlement_outcomes: &HashMap<String, Decimal>,
+        settlement_outcomes: &HashMap<String, Option<Decimal>>,
         start_balance: Decimal,
         start_time: DateTime<Utc>,
         end_time: DateTime<Utc>,
@@ -112,6 +128,8 @@ impl BacktestReport {
             close_reason: Option<CloseReason>,
             market_id: String,
             entry_price: Option<Decimal>,
+            is_hedge: bool,
+            exit_trigger: Option<String>,
         }
         let mut meta_lookup: HashMap<String, EngineMeta> = HashMap::new();
         for et in &engine_trades {
@@ -122,6 +140,8 @@ impl BacktestReport {
                     close_reason: et.close_reason,
                     market_id: et.market_id.clone(),
                     entry_price: et.entry_price,
+                    is_hedge: et.is_hedge,
+                    exit_trigger: et.exit_trigger.clone(),
                 },
             );
         }
@@ -137,13 +157,19 @@ impl BacktestReport {
                 let entry_price = meta.and_then(|m| m.entry_price);
 
                 // Counterfactual settlement: for strategy exits, look up what market settled at
+                // settlement_outcomes values are Option<Decimal>: None = ambiguous
                 let counterfactual_settlement = match close_reason {
-                    Some(CloseReason::Strategy) => settlement_outcomes.get(&t.token_id).copied(),
+                    Some(CloseReason::Strategy) => {
+                        settlement_outcomes.get(&t.token_id).copied().flatten()
+                    }
                     Some(CloseReason::Settlement | CloseReason::ForceClose) => {
                         Some(t.price) // Already the settlement price
                     }
                     _ => None,
                 };
+
+                let is_hedge = meta.map(|m| m.is_hedge).unwrap_or(false);
+                let exit_trigger = meta.and_then(|m| m.exit_trigger.clone());
 
                 BacktestTrade {
                     timestamp: t.timestamp,
@@ -156,9 +182,14 @@ impl BacktestReport {
                     close_reason,
                     entry_price,
                     counterfactual_settlement,
+                    is_hedge,
+                    exit_trigger,
                 }
             })
             .collect();
+
+        // Compute hedge metrics
+        let (hedge_attempts, hedge_pnl) = Self::compute_hedge_metrics(&trades);
 
         // Compute realized P&L (sum of all closing trades)
         let realized_pnl: Decimal = trades.iter().filter_map(|t| t.realized_pnl).sum();
@@ -284,6 +315,12 @@ impl BacktestReport {
             correct_stops: prediction.correct_stops,
             premature_exit_cost: prediction.premature_exit_cost,
             correct_stop_savings: prediction.correct_stop_savings,
+            premature_by_trigger: prediction.premature_by_trigger,
+            correct_by_trigger: prediction.correct_by_trigger,
+            premature_cost_by_trigger: prediction.premature_cost_by_trigger,
+            correct_savings_by_trigger: prediction.correct_savings_by_trigger,
+            hedge_attempts,
+            hedge_pnl,
             reentry_count,
             start_balance,
             end_balance,
@@ -299,7 +336,7 @@ impl BacktestReport {
     /// returned `Vec<BacktestTrade>` already carries close_reason and realized_pnl.
     pub fn from_trades(
         engine_trades: Vec<crate::engine::BacktestTrade>,
-        settlement_outcomes: &HashMap<String, Decimal>,
+        settlement_outcomes: &HashMap<String, Option<Decimal>>,
         start_balance: Decimal,
         start_time: DateTime<Utc>,
         end_time: DateTime<Utc>,
@@ -309,7 +346,9 @@ impl BacktestReport {
             .into_iter()
             .map(|t| {
                 let counterfactual_settlement = match t.close_reason {
-                    Some(CloseReason::Strategy) => settlement_outcomes.get(&t.token_id).copied(),
+                    Some(CloseReason::Strategy) => {
+                        settlement_outcomes.get(&t.token_id).copied().flatten()
+                    }
                     Some(CloseReason::Settlement | CloseReason::ForceClose) => {
                         Some(t.price) // Already the settlement price
                     }
@@ -326,9 +365,14 @@ impl BacktestReport {
                     close_reason: t.close_reason,
                     entry_price: t.entry_price,
                     counterfactual_settlement,
+                    is_hedge: t.is_hedge,
+                    exit_trigger: t.exit_trigger,
                 }
             })
             .collect();
+
+        // Compute hedge metrics
+        let (hedge_attempts, hedge_pnl) = Self::compute_hedge_metrics(&trades);
 
         // Compute realized P&L
         let realized_pnl: Decimal = trades.iter().filter_map(|t| t.realized_pnl).sum();
@@ -441,6 +485,12 @@ impl BacktestReport {
             correct_stops: prediction.correct_stops,
             premature_exit_cost: prediction.premature_exit_cost,
             correct_stop_savings: prediction.correct_stop_savings,
+            premature_by_trigger: prediction.premature_by_trigger,
+            correct_by_trigger: prediction.correct_by_trigger,
+            premature_cost_by_trigger: prediction.premature_cost_by_trigger,
+            correct_savings_by_trigger: prediction.correct_savings_by_trigger,
+            hedge_attempts,
+            hedge_pnl,
             reentry_count,
             start_balance,
             end_balance,
@@ -459,6 +509,10 @@ impl BacktestReport {
         let mut correct_stops = 0usize;
         let mut premature_exit_cost = Decimal::ZERO;
         let mut correct_stop_savings = Decimal::ZERO;
+        let mut premature_by_trigger: HashMap<String, usize> = HashMap::new();
+        let mut correct_by_trigger: HashMap<String, usize> = HashMap::new();
+        let mut premature_cost_by_trigger: HashMap<String, Decimal> = HashMap::new();
+        let mut correct_savings_by_trigger: HashMap<String, Decimal> = HashMap::new();
 
         for t in closing_trades {
             match t.counterfactual_settlement {
@@ -467,12 +521,17 @@ impl BacktestReport {
                     // If strategy exited early on a correct prediction → premature exit
                     if t.close_reason == Some(CloseReason::Strategy) {
                         premature_exits += 1;
+                        let trigger_key = t
+                            .exit_trigger
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string());
+                        *premature_by_trigger.entry(trigger_key.clone()).or_default() += 1;
                         // Opportunity cost: what we would have earned at $1 minus what we actually earned
-                        // Counterfactual profit = (1 - entry_price) * size
-                        // Actual profit = realized_pnl
                         if let (Some(entry), Some(pnl)) = (t.entry_price, t.realized_pnl) {
                             let counterfactual_profit = (Decimal::ONE - entry) * t.size;
-                            premature_exit_cost += counterfactual_profit - pnl;
+                            let cost = counterfactual_profit - pnl;
+                            premature_exit_cost += cost;
+                            *premature_cost_by_trigger.entry(trigger_key).or_default() += cost;
                         }
                     }
                 }
@@ -481,12 +540,17 @@ impl BacktestReport {
                     // If strategy exited early on a wrong prediction → correct stop
                     if t.close_reason == Some(CloseReason::Strategy) {
                         correct_stops += 1;
+                        let trigger_key = t
+                            .exit_trigger
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string());
+                        *correct_by_trigger.entry(trigger_key.clone()).or_default() += 1;
                         // Savings: loss we would have had at $0 minus actual loss
-                        // Counterfactual loss = entry_price * size (total wipeout)
-                        // Actual loss = |realized_pnl|
                         if let (Some(entry), Some(pnl)) = (t.entry_price, t.realized_pnl) {
                             let counterfactual_loss = entry * t.size;
-                            correct_stop_savings += counterfactual_loss - pnl.abs();
+                            let savings = counterfactual_loss - pnl.abs();
+                            correct_stop_savings += savings;
+                            *correct_savings_by_trigger.entry(trigger_key).or_default() += savings;
                         }
                     }
                 }
@@ -512,7 +576,38 @@ impl BacktestReport {
             correct_stops,
             premature_exit_cost,
             correct_stop_savings,
+            premature_by_trigger,
+            correct_by_trigger,
+            premature_cost_by_trigger,
+            correct_savings_by_trigger,
         }
+    }
+
+    /// Compute hedge metrics: (hedge_attempts, hedge_pnl).
+    ///
+    /// hedge_attempts = count of Buy trades with is_hedge=true
+    /// hedge_pnl = sum of realized_pnl from sells that close hedge positions
+    /// (identified by token_id matching a hedge buy)
+    fn compute_hedge_metrics(trades: &[BacktestTrade]) -> (usize, Decimal) {
+        let mut hedge_token_ids: HashSet<&str> = HashSet::new();
+        let mut hedge_attempts = 0usize;
+
+        // First pass: collect token_ids from hedge buys
+        for t in trades {
+            if t.is_hedge && t.side == OrderSide::Buy {
+                hedge_attempts += 1;
+                hedge_token_ids.insert(&t.token_id);
+            }
+        }
+
+        // Second pass: sum realized_pnl from sells closing hedge positions
+        let hedge_pnl: Decimal = trades
+            .iter()
+            .filter(|t| t.side == OrderSide::Sell && hedge_token_ids.contains(t.token_id.as_str()))
+            .filter_map(|t| t.realized_pnl)
+            .sum();
+
+        (hedge_attempts, hedge_pnl)
     }
 
     /// Count tokens that were entered more than once (re-entries after stop-loss).
@@ -703,6 +798,42 @@ impl BacktestReport {
             ));
             let net_value = self.correct_stop_savings - self.premature_exit_cost;
             s.push_str(&format!("Net stop-loss value: ${:.2}\n", net_value));
+
+            // Per-trigger breakdown
+            let mut all_triggers: std::collections::BTreeSet<&str> =
+                std::collections::BTreeSet::new();
+            for k in self.premature_by_trigger.keys() {
+                all_triggers.insert(k.as_str());
+            }
+            for k in self.correct_by_trigger.keys() {
+                all_triggers.insert(k.as_str());
+            }
+            if !all_triggers.is_empty() {
+                s.push_str("  By trigger:\n");
+                for trigger in &all_triggers {
+                    let prem = self
+                        .premature_by_trigger
+                        .get(*trigger)
+                        .copied()
+                        .unwrap_or(0);
+                    let corr = self.correct_by_trigger.get(*trigger).copied().unwrap_or(0);
+                    let prem_cost = self
+                        .premature_cost_by_trigger
+                        .get(*trigger)
+                        .copied()
+                        .unwrap_or(Decimal::ZERO);
+                    let corr_sav = self
+                        .correct_savings_by_trigger
+                        .get(*trigger)
+                        .copied()
+                        .unwrap_or(Decimal::ZERO);
+                    let net = corr_sav - prem_cost;
+                    s.push_str(&format!(
+                        "    {:<13} {:>2} premature (${:.2} cost), {:>2} correct (${:.2} saved), net ${:.2}\n",
+                        trigger, prem, prem_cost, corr, corr_sav, net
+                    ));
+                }
+            }
         } else {
             s.push_str("No strategy exits with settlement data.\n");
         }
@@ -711,6 +842,13 @@ impl BacktestReport {
         if self.reentry_count > 0 {
             s.push_str("--- Re-Entry ---\n");
             s.push_str(&format!("Tokens re-entered:   {}\n", self.reentry_count));
+            s.push('\n');
+        }
+
+        if self.hedge_attempts > 0 {
+            s.push_str("--- Hedge Analysis ---\n");
+            s.push_str(&format!("Hedge attempts:      {}\n", self.hedge_attempts));
+            s.push_str(&format!("Hedge P&L:           ${:.2}\n", self.hedge_pnl));
             s.push('\n');
         }
 
@@ -778,6 +916,8 @@ mod tests {
                 market_id: String::new(),
                 entry_price: None,
                 counterfactual_settlement: None,
+                is_hedge: false,
+                exit_trigger: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(2000, 0).unwrap(),
@@ -790,6 +930,8 @@ mod tests {
                 market_id: String::new(),
                 entry_price: None,
                 counterfactual_settlement: None,
+                is_hedge: false,
+                exit_trigger: None,
             },
         ];
 
@@ -813,6 +955,8 @@ mod tests {
                 market_id: String::new(),
                 entry_price: None,
                 counterfactual_settlement: None,
+                is_hedge: false,
+                exit_trigger: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(2000, 0).unwrap(),
@@ -825,6 +969,8 @@ mod tests {
                 market_id: String::new(),
                 entry_price: None,
                 counterfactual_settlement: None,
+                is_hedge: false,
+                exit_trigger: None,
             },
         ];
 
@@ -846,6 +992,8 @@ mod tests {
                 market_id: String::new(),
                 entry_price: None,
                 counterfactual_settlement: None,
+                is_hedge: false,
+                exit_trigger: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(2000, 0).unwrap(),
@@ -858,6 +1006,8 @@ mod tests {
                 market_id: String::new(),
                 entry_price: None,
                 counterfactual_settlement: None,
+                is_hedge: false,
+                exit_trigger: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(3000, 0).unwrap(),
@@ -870,6 +1020,8 @@ mod tests {
                 market_id: String::new(),
                 entry_price: None,
                 counterfactual_settlement: None,
+                is_hedge: false,
+                exit_trigger: None,
             },
         ];
 
@@ -894,6 +1046,8 @@ mod tests {
             market_id: String::new(),
             entry_price: None,
             counterfactual_settlement: None,
+            is_hedge: false,
+            exit_trigger: None,
         }];
 
         let sharpe = BacktestReport::compute_sharpe_ratio(&trades);
@@ -914,6 +1068,8 @@ mod tests {
                 market_id: String::new(),
                 entry_price: None,
                 counterfactual_settlement: None,
+                is_hedge: false,
+                exit_trigger: None,
             },
             BacktestTrade {
                 timestamp: DateTime::from_timestamp(2000, 0).unwrap(),
@@ -926,6 +1082,8 @@ mod tests {
                 market_id: String::new(),
                 entry_price: None,
                 counterfactual_settlement: None,
+                is_hedge: false,
+                exit_trigger: None,
             },
         ];
 

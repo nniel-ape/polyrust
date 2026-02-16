@@ -34,3 +34,4 @@ tunnel-key.pub
 .cargo-home/
 .cargo/
 .rustup/
+backtest_trades.json

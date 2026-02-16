@@ -411,6 +411,16 @@ async fn sustained_direction_two_ticks_one_against() {
 }
 
 #[tokio::test]
+async fn check_sustained_direction_zero_secs_bypasses() {
+    let base = make_base_no_chainlink();
+    // No price history — should still pass with min_sustained_secs=0
+    let result = base
+        .check_sustained_direction("BTC", dec!(50000), OutcomeSide::Up, 0, 2, Utc::now())
+        .await;
+    assert!(result, "min_sustained_secs=0 should bypass entirely");
+}
+
+#[tokio::test]
 async fn max_recent_volatility_no_wick() {
     let base = make_base_no_chainlink();
 
@@ -497,7 +507,7 @@ async fn max_recent_volatility_with_wick() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn peak_bid_updates_on_higher_bid() {
+async fn peak_price_updates_on_higher_price() {
     let base = make_base_no_chainlink();
 
     let pos = make_position(
@@ -511,17 +521,17 @@ async fn peak_bid_updates_on_higher_bid() {
     );
     base.record_position(pos).await;
 
-    // Update with higher bid
-    base.update_peak_bid(&"token1".to_string(), dec!(0.95))
+    // Update with higher price
+    base.update_peak_price(&"token1".to_string(), dec!(0.95))
         .await;
 
     let positions = base.positions.read().await;
     let pos = &positions["m1"][0];
-    assert_eq!(pos.peak_bid, dec!(0.95));
+    assert_eq!(pos.peak_price, dec!(0.95));
 }
 
 #[tokio::test]
-async fn peak_bid_ignores_lower_bid() {
+async fn peak_price_ignores_lower_price() {
     let base = make_base_no_chainlink();
 
     let pos = make_position(
@@ -535,13 +545,13 @@ async fn peak_bid_ignores_lower_bid() {
     );
     base.record_position(pos).await;
 
-    // Try to update with lower bid
-    base.update_peak_bid(&"token1".to_string(), dec!(0.92))
+    // Try to update with lower price
+    base.update_peak_price(&"token1".to_string(), dec!(0.92))
         .await;
 
     let positions = base.positions.read().await;
     let pos = &positions["m1"][0];
-    assert_eq!(pos.peak_bid, dec!(0.95), "Peak bid should not decrease");
+    assert_eq!(pos.peak_price, dec!(0.95), "Peak price should not decrease");
 }
 
 // ---------------------------------------------------------------------------

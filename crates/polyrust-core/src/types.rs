@@ -62,6 +62,10 @@ pub struct OrderRequest {
     /// Post-only flag: if true, the order is rejected if it would match immediately.
     /// Enforces maker behavior (0% fee). Default: false.
     pub post_only: bool,
+    /// Optional tag for order attribution (e.g. "hedge" for proactive hedge orders).
+    /// Used by backtest reports to track hedge metrics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 impl OrderRequest {
@@ -84,6 +88,7 @@ impl OrderRequest {
             tick_size: Decimal::new(1, 2), // 0.01 default
             fee_rate_bps: 0,
             post_only: false,
+            tag: None,
         }
     }
 
@@ -102,6 +107,12 @@ impl OrderRequest {
     /// Set the post-only flag for this order
     pub fn with_post_only(mut self, post_only: bool) -> Self {
         self.post_only = post_only;
+        self
+    }
+
+    /// Set a tag for order attribution (e.g. "hedge")
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        self.tag = Some(tag.into());
         self
     }
 }

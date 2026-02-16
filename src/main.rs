@@ -14,7 +14,7 @@ use polyrust_market::{
 use polyrust_store::Store;
 use polyrust_strategies::{
     ArbitrageConfig, CryptoArbDashboard, CryptoArbRuntime, DutchBookConfig, DutchBookDashboard,
-    DutchBookState, DutchBookStrategy, ReferenceQualityLevel, TailEndStrategy,
+    DutchBookState, DutchBookStrategy, TailEndStrategy,
 };
 use serde::Deserialize;
 
@@ -728,13 +728,8 @@ async fn run_backtest() -> anyhow::Result<()> {
         info!("Offline mode: skipping Binance klines fetch (will use cached data if available)");
     }
 
-    // Backtest can't produce Historical quality (record_price uses wall clock)
-    arb_config.tailend.min_reference_quality = ReferenceQualityLevel::Current;
-    arb_config.use_chainlink = false; // No RPC in backtest
-    arb_config.tailend.stale_ob_secs = i64::MAX; // Staleness meaningless in backtest
-    arb_config.tailend.use_composite_price = false; // Composite price gating meaningless with deterministic data
-    arb_config.stop_loss.sl_max_dispersion_bps = Decimal::new(10000, 0); // Dispersion check disabled in backtest
-    arb_config.stop_loss.min_remaining_secs = 0; // Allow stop-loss evaluation until expiry (live default=45 suppresses most of the short position lifetime)
+    // Apply backtest overrides (reference quality, chainlink, staleness, etc.)
+    backtest_config.overrides.apply_to(&mut arb_config);
 
     // Apply backtest-specific sizing overrides (if configured)
     if let Some(ref sizing_override) = backtest_config.sizing {
@@ -805,7 +800,7 @@ async fn run_backtest_sweep() -> anyhow::Result<()> {
     use polyrust_backtest::{DataFetchConfig, SweepRunner};
 
     // Load configuration — parse errors are fatal
-    let (mut backtest_config, mut arb_config) = match std::fs::read_to_string("config.toml") {
+    let (mut backtest_config, arb_config) = match std::fs::read_to_string("config.toml") {
         Ok(contents) => {
             let wrapper: ConfigWrapper = toml::from_str(&contents)
                 .map_err(|e| anyhow::anyhow!("failed to parse config.toml: {e}"))?;
@@ -926,12 +921,6 @@ async fn run_backtest_sweep() -> anyhow::Result<()> {
 
     backtest_config.market_ids = market_ids;
 
-    // Backtest can't produce Historical quality
-    arb_config.tailend.min_reference_quality = ReferenceQualityLevel::Current;
-    arb_config.tailend.use_composite_price = false; // Composite price gating meaningless with deterministic data
-    arb_config.stop_loss.sl_max_dispersion_bps = Decimal::new(10000, 0); // Dispersion check disabled in backtest
-    arb_config.stop_loss.min_remaining_secs = 0; // Allow stop-loss evaluation until expiry (live default=45 suppresses most of the short position lifetime)
-
     // Run sweep
     let rank_by = sweep_config
         .rank_by
@@ -942,6 +931,16 @@ async fn run_backtest_sweep() -> anyhow::Result<()> {
         .output_dir
         .clone()
         .unwrap_or_else(|| "sweep_results".to_string());
+
+    // Capture values for run_manifest.json before moving into runner
+    let manifest_start_date = backtest_config.start_date;
+    let manifest_end_date = backtest_config.end_date;
+    let manifest_fidelity = backtest_config.data_fidelity_secs;
+    let manifest_coins = arb_config.coins.clone();
+    let manifest_overrides = backtest_config.overrides.clone();
+    let manifest_parallelism = sweep_config
+        .parallelism
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
 
     let runner = SweepRunner::new(sweep_config, backtest_config, arb_config, data_store);
     let mut report = runner.run().await?;
@@ -963,6 +962,24 @@ async fn run_backtest_sweep() -> anyhow::Result<()> {
     report.export_json(&format!("{}/results.json", run_dir))?;
     sensitivity.export_csv(&format!("{}/sensitivity.csv", run_dir))?;
     sensitivity.export_json(&format!("{}/sensitivity.json", run_dir))?;
+
+    // Write run manifest
+    let manifest = serde_json::json!({
+        "start_date": manifest_start_date.to_rfc3339(),
+        "end_date": manifest_end_date.to_rfc3339(),
+        "coins": manifest_coins,
+        "data_fidelity_secs": manifest_fidelity,
+        "total_combinations": report.total_combinations,
+        "parallelism": manifest_parallelism,
+        "ignored_axes": report.ignored_axes,
+        "overrides": serde_json::to_value(&manifest_overrides).unwrap_or_default(),
+        "rank_by": rank_by,
+        "wall_time_secs": report.total_wall_time_secs,
+    });
+    std::fs::write(
+        format!("{}/run_manifest.json", run_dir),
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
 
     info!("Sweep results exported to {}", run_dir);
     Ok(())

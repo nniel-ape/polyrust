@@ -5,10 +5,11 @@ use rust_decimal_macros::dec;
 use polyrust_core::prelude::*;
 
 use super::*;
-use crate::crypto_arb::config::{StopLossConfig, TailEndConfig};
+use crate::crypto_arb::config::{StopLossConfig, TailEndConfig, UnifiedPriceConfig};
 use crate::crypto_arb::domain::{
     ArbitragePosition, ExitOrderMeta, OpenLimitOrder, PositionLifecycle, PositionLifecycleState,
-    StopLossTriggerKind, TriggerEvalContext, compute_exit_clip,
+    StopLossTriggerKind, TriggerEvalContext, UnifiedSlPrice, compute_exit_clip,
+    compute_unified_sl_price,
 };
 use crate::crypto_arb::services::taker_fee;
 
@@ -270,8 +271,8 @@ fn stop_loss_trigger_kind_display() {
     assert!(s.contains("0.08"));
 
     let trigger = StopLossTriggerKind::TrailingStop {
-        peak_bid: dec!(0.97),
-        current_bid: dec!(0.92),
+        peak_price: dec!(0.97),
+        current_price: dec!(0.92),
         effective_distance: dec!(0.03),
     };
     let s = format!("{trigger}");
@@ -351,7 +352,7 @@ fn fok_entry_has_computed_taker_fee_per_share() {
         order_id: Some("fok-order-1".to_string()),
         entry_time: Utc::now(),
         kelly_fraction: None,
-        peak_bid: price,
+        peak_price: price,
         estimated_fee: expected_fee,
         entry_market_price: price,
         tick_size: dec!(0.01),
@@ -561,10 +562,35 @@ async fn remove_lifecycle_also_cleans_exit_orders() {
 // evaluate_triggers tests
 // ---------------------------------------------------------------------------
 
+/// Helper to build a `UnifiedSlPrice` for testing.
+/// When `external_price` is Some, computes implied price using default config.
+fn make_unified(
+    current_bid: Decimal,
+    entry_price: Decimal,
+    side: OutcomeSide,
+    reference_price: Decimal,
+    external_price: Option<Decimal>,
+) -> UnifiedSlPrice {
+    let config = UnifiedPriceConfig::default();
+    compute_unified_sl_price(
+        current_bid,
+        entry_price,
+        side,
+        reference_price,
+        external_price,
+        &config,
+    )
+}
+
 /// Helper to create a default TriggerEvalContext for testing.
+///
+/// Uses `current_bid` as `unified_price.price` (no blending) so trigger-logic
+/// tests are isolated from blending math — that's tested separately in the
+/// `compute_unified_sl_price` tests. `implied_price` is still computed correctly
+/// so reversal-based triggers can derive the crypto reversal percentage.
 fn make_trigger_ctx(
     entry_price: Decimal,
-    peak_bid: Decimal,
+    peak_price: Decimal,
     current_bid: Decimal,
     reference_price: Decimal,
     external_price: Option<Decimal>,
@@ -573,18 +599,26 @@ fn make_trigger_ctx(
 ) -> TriggerEvalContext {
     let now = Utc::now();
     let entry_time = now - Duration::seconds(seconds_since_entry);
+    // Compute unified to get correct implied_price, then override price to raw bid.
+    let mut unified = make_unified(
+        current_bid,
+        entry_price,
+        OutcomeSide::Up,
+        reference_price,
+        external_price,
+    );
+    unified.price = current_bid; // no blending — isolate trigger logic
     TriggerEvalContext {
         entry_price,
-        peak_bid,
+        peak_price,
         side: OutcomeSide::Up,
         reference_price,
         tick_size: dec!(0.01),
         entry_time,
-        current_bid,
+        unified_price: unified,
         book_age_ms: 500, // fresh by default
-        external_price,
-        external_age_ms: external_price.map(|_| 500i64), // fresh by default
-        composite_sources: external_price.map(|_| 3usize),
+        external_fresh: external_price.is_some(),
+        composite_ok: external_price.is_some(),
         time_remaining,
         now,
     }
@@ -662,18 +696,26 @@ fn evaluate_triggers_hard_crash_works_with_stale_composite() {
     let mut lifecycle = PositionLifecycle::new();
 
     let now = Utc::now();
+    // Fresh external but no composite — hard crash should still work.
+    let mut unified = make_unified(
+        dec!(0.86),
+        dec!(0.95),
+        OutcomeSide::Up,
+        dec!(90000),
+        Some(dec!(90000)),
+    );
+    unified.price = dec!(0.86); // no blending — isolate trigger logic
     let ctx = TriggerEvalContext {
         entry_price: dec!(0.95),
-        peak_bid: dec!(0.95),
+        peak_price: dec!(0.95),
         side: OutcomeSide::Up,
         reference_price: dec!(90000),
         tick_size: dec!(0.01),
         entry_time: now - Duration::seconds(15),
-        current_bid: dec!(0.86), // bid drop = 0.09 >= 0.08
+        unified_price: unified,
         book_age_ms: 500,
-        external_price: Some(dec!(90000)),
-        external_age_ms: Some(500), // fresh single source
-        composite_sources: None,    // NO composite available
+        external_fresh: true, // fresh single source
+        composite_ok: false,  // NO composite available
         time_remaining: 300,
         now,
     };
@@ -852,12 +894,12 @@ fn evaluate_triggers_trailing_at_normal_entry() {
     );
     match trigger.unwrap() {
         StopLossTriggerKind::TrailingStop {
-            peak_bid,
-            current_bid,
+            peak_price,
+            current_price,
             effective_distance,
         } => {
-            assert_eq!(peak_bid, dec!(0.96));
-            assert_eq!(current_bid, dec!(0.93));
+            assert_eq!(peak_price, dec!(0.96));
+            assert_eq!(current_price, dec!(0.93));
             assert_eq!(effective_distance, dec!(0.025));
         }
         other => panic!("Expected TrailingStop, got {other}"),
@@ -948,18 +990,25 @@ fn evaluate_triggers_stale_orderbook_suppresses_all_except_hard_crash() {
 
     let now = Utc::now();
     // Stale book, but conditions that would normally trigger dual trigger
+    let mut unified = make_unified(
+        dec!(0.90),
+        dec!(0.95),
+        OutcomeSide::Up,
+        dec!(90000),
+        Some(dec!(89700)),
+    );
+    unified.price = dec!(0.90); // no blending — isolate trigger logic
     let ctx = TriggerEvalContext {
         entry_price: dec!(0.95),
-        peak_bid: dec!(0.96),
+        peak_price: dec!(0.96),
         side: OutcomeSide::Up,
         reference_price: dec!(90000),
         tick_size: dec!(0.01),
         entry_time: now - Duration::seconds(15),
-        current_bid: dec!(0.90),
-        book_age_ms: 5000,                 // STALE book (> 1200ms)
-        external_price: Some(dec!(89700)), // crypto reversed
-        external_age_ms: Some(500),
-        composite_sources: Some(3),
+        unified_price: unified,
+        book_age_ms: 5000, // STALE book (> 1200ms)
+        external_fresh: true,
+        composite_ok: true,
         time_remaining: 300,
         now,
     };
@@ -1130,4 +1179,129 @@ fn sell_fills_before_hedge_position_resolved() {
         t,
     );
     assert!(result.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// compute_unified_sl_price tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unified_price_normal_blending() {
+    // 70% external weight, no adverse reversal → implied = entry_price
+    // unified = 0.3 * current_bid + 0.7 * implied
+    let config = UnifiedPriceConfig::default(); // weight=0.7, sensitivity=12.0
+    let result = compute_unified_sl_price(
+        dec!(0.90), // current_bid
+        dec!(0.95), // entry_price
+        OutcomeSide::Up,
+        dec!(90000), // reference (no reversal)
+        Some(dec!(90000)),
+        &config,
+    );
+
+    assert!(!result.degraded);
+    assert_eq!(result.raw_bid, dec!(0.90));
+    assert!(result.implied_price.is_some());
+    // implied = entry - max(0, 0) * 12 = 0.95
+    // unified = 0.3 * 0.90 + 0.7 * 0.95 = 0.27 + 0.665 = 0.935
+    assert_eq!(result.price, dec!(0.935));
+}
+
+#[test]
+fn unified_price_degraded_mode_no_external() {
+    let config = UnifiedPriceConfig::default();
+    let result = compute_unified_sl_price(
+        dec!(0.90),
+        dec!(0.95),
+        OutcomeSide::Up,
+        dec!(90000),
+        None, // no external
+        &config,
+    );
+
+    assert!(result.degraded);
+    assert_eq!(result.price, dec!(0.90)); // falls back to raw bid
+    assert_eq!(result.raw_bid, dec!(0.90));
+    assert!(result.implied_price.is_none());
+}
+
+#[test]
+fn unified_price_adverse_reversal_maps_to_drop() {
+    // Up position: reference=90000, external=89100 → reversal = 900/90000 = 1%
+    // implied_drop = 0.01 * 12 = 0.12
+    // implied = 0.95 - 0.12 = 0.83
+    // unified = 0.3 * 0.90 + 0.7 * 0.83 = 0.27 + 0.581 = 0.851
+    let config = UnifiedPriceConfig::default();
+    let result = compute_unified_sl_price(
+        dec!(0.90),
+        dec!(0.95),
+        OutcomeSide::Up,
+        dec!(90000),
+        Some(dec!(89100)), // 1% reversal
+        &config,
+    );
+
+    assert!(!result.degraded);
+    assert_eq!(result.implied_price, Some(dec!(0.83)));
+    assert_eq!(result.price, dec!(0.851));
+}
+
+#[test]
+fn unified_price_favorable_movement_no_implied_drop() {
+    // Up position: reference=90000, external=91000 → reversal = -1000/90000 < 0
+    // implied_drop = max(0, negative) * 12 = 0
+    // implied = entry_price = 0.95
+    let config = UnifiedPriceConfig::default();
+    let result = compute_unified_sl_price(
+        dec!(0.90),
+        dec!(0.95),
+        OutcomeSide::Up,
+        dec!(90000),
+        Some(dec!(91000)), // favorable
+        &config,
+    );
+
+    assert_eq!(result.implied_price, Some(dec!(0.95)));
+    // unified = 0.3 * 0.90 + 0.7 * 0.95 = 0.935
+    assert_eq!(result.price, dec!(0.935));
+}
+
+#[test]
+fn unified_price_zero_weight_degrades_to_bid() {
+    let config = UnifiedPriceConfig {
+        external_weight: Decimal::ZERO,
+        sensitivity: dec!(12.0),
+    };
+    let result = compute_unified_sl_price(
+        dec!(0.90),
+        dec!(0.95),
+        OutcomeSide::Up,
+        dec!(90000),
+        Some(dec!(89000)),
+        &config,
+    );
+
+    assert!(!result.degraded);
+    assert_eq!(result.price, dec!(0.90)); // pure CLOB bid
+    assert!(result.implied_price.is_none());
+}
+
+#[test]
+fn unified_price_implied_clamped_to_zero() {
+    // Extreme reversal: implied would go negative → clamped to 0
+    // reversal = 10% → implied_drop = 0.10 * 12 = 1.20
+    // implied = 0.95 - 1.20 = -0.25 → clamped to 0
+    let config = UnifiedPriceConfig::default();
+    let result = compute_unified_sl_price(
+        dec!(0.90),
+        dec!(0.95),
+        OutcomeSide::Up,
+        dec!(90000),
+        Some(dec!(81000)), // 10% reversal
+        &config,
+    );
+
+    assert_eq!(result.implied_price, Some(Decimal::ZERO));
+    // unified = 0.3 * 0.90 + 0.7 * 0.0 = 0.27
+    assert_eq!(result.price, dec!(0.27));
 }

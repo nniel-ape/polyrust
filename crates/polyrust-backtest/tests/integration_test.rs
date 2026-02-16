@@ -166,6 +166,7 @@ async fn test_full_backtest_pipeline() {
         realism: Default::default(),
         sizing: None,
         sweep: None,
+        overrides: Default::default(),
     };
 
     // Create in-memory results store
@@ -256,6 +257,7 @@ async fn test_backtest_with_no_data() {
         realism: Default::default(),
         sizing: None,
         sweep: None,
+        overrides: Default::default(),
     };
 
     let strategy = Box::new(SimpleTestStrategy::new());

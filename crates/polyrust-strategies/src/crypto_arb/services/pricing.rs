@@ -195,6 +195,11 @@ impl CryptoArbRuntime {
         min_ticks: usize,
         now: DateTime<Utc>,
     ) -> bool {
+        // min_sustained_secs=0 means "disable momentum filtering" — bypass entirely.
+        if min_sustained_secs == 0 {
+            return true;
+        }
+
         let history = self.price_history.read().await;
         let entries = match history.get(coin) {
             Some(e) => e,

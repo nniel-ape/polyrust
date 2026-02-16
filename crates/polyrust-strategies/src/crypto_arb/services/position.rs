@@ -216,13 +216,13 @@ impl CryptoArbRuntime {
         result
     }
 
-    /// Update peak_bid for trailing stop-loss tracking.
-    pub async fn update_peak_bid(&self, token_id: &TokenId, current_bid: Decimal) {
+    /// Update peak_price for trailing stop-loss tracking.
+    pub async fn update_peak_price(&self, token_id: &TokenId, current_price: Decimal) {
         let mut positions = self.positions.write().await;
         for pos_list in positions.values_mut() {
             for pos in pos_list.iter_mut() {
-                if &pos.token_id == token_id && current_bid > pos.peak_bid {
-                    pos.peak_bid = current_bid;
+                if &pos.token_id == token_id && current_price > pos.peak_price {
+                    pos.peak_price = current_price;
                 }
             }
         }

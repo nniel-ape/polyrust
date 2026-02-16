@@ -14,6 +14,7 @@ pub mod telemetry;
 // Re-export all public types for convenient access
 pub use lifecycle::{
     PositionLifecycle, PositionLifecycleState, StopLossTriggerKind, TriggerEvalContext,
+    UnifiedSlPrice, compute_unified_sl_price,
 };
 pub use market::{
     BoundarySnapshot, CompositePriceResult, CompositePriceSnapshot, MarketWithReference,

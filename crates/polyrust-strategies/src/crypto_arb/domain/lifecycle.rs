@@ -8,6 +8,8 @@ use rust_decimal::Decimal;
 
 use polyrust_core::prelude::*;
 
+use crate::crypto_arb::config::UnifiedPriceConfig;
+
 use super::market::CompositePriceSnapshot;
 
 /// Classification of stop-loss trigger that caused an exit evaluation.
@@ -29,12 +31,12 @@ pub enum StopLossTriggerKind {
         /// Number of consecutive ticks both conditions held.
         consecutive_ticks: usize,
     },
-    /// Level 3: Peak bid minus current bid exceeds trailing distance (with time decay).
+    /// Level 3: Peak price minus current price exceeds trailing distance (with time decay).
     TrailingStop {
-        /// Peak bid observed since entry.
-        peak_bid: Decimal,
-        /// Current bid that triggered the stop.
-        current_bid: Decimal,
+        /// Peak unified price observed since entry.
+        peak_price: Decimal,
+        /// Current unified price that triggered the stop.
+        current_price: Decimal,
         /// Effective trailing distance used (after headroom cap + time decay).
         effective_distance: Decimal,
     },
@@ -44,6 +46,18 @@ pub enum StopLossTriggerKind {
         /// Bid drop from entry that triggered the deferred exit.
         bid_drop: Decimal,
     },
+}
+
+impl StopLossTriggerKind {
+    /// Short stable name for tagging exit orders and per-trigger metrics.
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            Self::HardCrash { .. } => "hard_crash",
+            Self::DualTrigger { .. } => "dual_trigger",
+            Self::TrailingStop { .. } => "trailing",
+            Self::PostEntryExit { .. } => "post_entry",
+        }
+    }
 }
 
 impl fmt::Display for StopLossTriggerKind {
@@ -59,13 +73,13 @@ impl fmt::Display for StopLossTriggerKind {
                 write!(f, "DualTrigger(ticks={consecutive_ticks})")
             }
             Self::TrailingStop {
-                peak_bid,
-                current_bid,
+                peak_price,
+                current_price,
                 effective_distance,
             } => {
                 write!(
                     f,
-                    "TrailingStop(peak={peak_bid}, current={current_bid}, dist={effective_distance})"
+                    "TrailingStop(peak={peak_price}, current={current_price}, dist={effective_distance})"
                 )
             }
             Self::PostEntryExit { bid_drop } => {
@@ -231,6 +245,80 @@ impl PositionLifecycle {
 }
 
 // ---------------------------------------------------------------------------
+// Unified Stop-Loss Price
+// ---------------------------------------------------------------------------
+
+/// A blended price combining CLOB best bid with external-implied fair value.
+///
+/// Computed once per evaluation cycle, then used by all 4 trigger levels.
+/// When external price is stale/unavailable, degrades to `price == raw_bid`.
+#[derive(Debug, Clone)]
+pub struct UnifiedSlPrice {
+    /// Blended price for all trigger calculations.
+    pub price: Decimal,
+    /// Actual CLOB bid — used for order execution (not trigger math).
+    pub raw_bid: Decimal,
+    /// External-implied CLOB price (None if degraded).
+    pub implied_price: Option<Decimal>,
+    /// True when external price is unavailable (falls back to raw bid).
+    pub degraded: bool,
+}
+
+/// Compute the unified stop-loss price from CLOB bid and external crypto price.
+///
+/// Formula:
+/// ```text
+/// reversal = compute_reversal(side, reference_price, external_price)
+/// implied_drop = max(0, reversal) * sensitivity
+/// implied_price = clamp(entry_price - implied_drop, 0, 1)
+/// unified = (1 - external_weight) * current_bid + external_weight * implied_price
+/// ```
+///
+/// When `external_price` is `None`, returns degraded mode (unified = current_bid).
+pub fn compute_unified_sl_price(
+    current_bid: Decimal,
+    entry_price: Decimal,
+    side: OutcomeSide,
+    reference_price: Decimal,
+    external_price: Option<Decimal>,
+    config: &UnifiedPriceConfig,
+) -> UnifiedSlPrice {
+    let Some(ext_price) = external_price else {
+        return UnifiedSlPrice {
+            price: current_bid,
+            raw_bid: current_bid,
+            implied_price: None,
+            degraded: true,
+        };
+    };
+
+    if config.external_weight.is_zero() {
+        return UnifiedSlPrice {
+            price: current_bid,
+            raw_bid: current_bid,
+            implied_price: None,
+            degraded: false,
+        };
+    }
+
+    let reversal = compute_reversal(side, reference_price, ext_price);
+    let implied_drop = reversal.max(Decimal::ZERO) * config.sensitivity;
+    let implied = (entry_price - implied_drop)
+        .max(Decimal::ZERO)
+        .min(Decimal::ONE);
+
+    let w = config.external_weight;
+    let blended = (Decimal::ONE - w) * current_bid + w * implied;
+
+    UnifiedSlPrice {
+        price: blended,
+        raw_bid: current_bid,
+        implied_price: Some(implied),
+        degraded: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Trigger Evaluation
 // ---------------------------------------------------------------------------
 
@@ -242,8 +330,8 @@ impl PositionLifecycle {
 pub struct TriggerEvalContext {
     /// Entry price of the position.
     pub entry_price: Decimal,
-    /// Peak bid observed since entry.
-    pub peak_bid: Decimal,
+    /// Peak unified price observed since entry.
+    pub peak_price: Decimal,
     /// Which side the position is on (Up/Down).
     pub side: OutcomeSide,
     /// Reference crypto price at window start.
@@ -252,16 +340,14 @@ pub struct TriggerEvalContext {
     pub tick_size: Decimal,
     /// When the position was entered.
     pub entry_time: DateTime<Utc>,
-    /// Current best bid from the orderbook.
-    pub current_bid: Decimal,
+    /// Unified stop-loss price (blended CLOB bid + external-implied).
+    pub unified_price: UnifiedSlPrice,
     /// Age of the orderbook snapshot in milliseconds.
     pub book_age_ms: i64,
-    /// Latest external/composite crypto price (if fresh enough).
-    pub external_price: Option<Decimal>,
-    /// Age of the external price in milliseconds (None if no price).
-    pub external_age_ms: Option<i64>,
-    /// Number of sources in the composite (None if single source).
-    pub composite_sources: Option<usize>,
+    /// Whether external price data is fresh (within sl_max_external_age_ms).
+    pub external_fresh: bool,
+    /// Whether composite price meets quality requirements (enough sources).
+    pub composite_ok: bool,
     /// Seconds remaining on the market.
     pub time_remaining: i64,
     /// Current time.
@@ -274,8 +360,12 @@ impl PositionLifecycle {
     /// Returns the highest-priority trigger that fires, or `None`.
     /// Mutates `self.dual_trigger_ticks` and `self.trailing_unarmable` as side effects.
     ///
+    /// All 4 levels use `ctx.unified_price.price` — a blend of CLOB bid and
+    /// external-implied fair value. Reversal checks derive the crypto-domain
+    /// reversal percentage from the implied price.
+    ///
     /// Priority (highest first):
-    /// 1. Hard Crash — absolute bid drop or external reversal (1 fresh source + fresh book)
+    /// 1. Hard Crash — unified price drop or external reversal (1 fresh source + fresh book)
     /// 2. Dual Trigger — crypto reversed AND market dropped for N consecutive ticks
     /// 3. Trailing Stop — peak-to-current drop with headroom fix
     /// 4. Post-Entry Deferred — adverse move within sell delay window
@@ -286,59 +376,57 @@ impl PositionLifecycle {
         tailend_config: &crate::crypto_arb::config::TailEndConfig,
     ) -> Option<StopLossTriggerKind> {
         let book_fresh = ctx.book_age_ms <= sl_config.sl_max_book_age_ms;
-        let external_fresh = ctx
-            .external_age_ms
-            .is_some_and(|age| age <= sl_config.sl_max_external_age_ms);
-        let has_relaxed_fresh_source = ctx
-            .external_age_ms
-            .is_some_and(|age| age <= sl_config.sl_max_external_age_ms * 2);
+        let has_external = ctx.unified_price.implied_price.is_some();
+
+        // Helper: derive crypto reversal % from implied price.
+        // implied = entry - reversal * sensitivity ⟹ reversal = (entry - implied) / sensitivity
+        let derive_reversal = |implied: Decimal| -> Decimal {
+            let drop = (ctx.entry_price - implied).max(Decimal::ZERO);
+            if sl_config.unified_price.sensitivity.is_zero() {
+                Decimal::ZERO
+            } else {
+                drop / sl_config.unified_price.sensitivity
+            }
+        };
 
         // ── Level 1: Hard Crash ──────────────────────────────────────────
-        // Requires only 1 fresh external source + fresh book.
-        // Bypasses hysteresis — immediate exit.
-        if book_fresh && ctx.external_price.is_some() && has_relaxed_fresh_source {
-            let bid_drop = ctx.entry_price - ctx.current_bid;
-            let hard_bid = bid_drop >= sl_config.hard_drop_abs;
+        // Requires external available + fresh book. Caller pre-filters
+        // relaxed freshness (2x threshold) by omitting external when too stale.
+        if book_fresh && has_external {
+            let price_drop = ctx.entry_price - ctx.unified_price.price;
+            let hard_bid = price_drop >= sl_config.hard_drop_abs;
 
-            let hard_reversal = if let Some(ext_price) = ctx.external_price {
-                let reversal = compute_reversal(ctx.side, ctx.reference_price, ext_price);
-                reversal >= sl_config.hard_reversal_pct
-            } else {
-                false
-            };
+            let (hard_reversal, reversal_pct) = ctx
+                .unified_price
+                .implied_price
+                .map(|implied| {
+                    let r = derive_reversal(implied);
+                    (r >= sl_config.hard_reversal_pct, r)
+                })
+                .unwrap_or((false, Decimal::ZERO));
 
             if hard_bid || hard_reversal {
-                // Reset dual trigger counter on hard crash (supersedes)
                 self.dual_trigger_ticks = 0;
                 return Some(StopLossTriggerKind::HardCrash {
-                    bid_drop,
-                    reversal_pct: if let Some(ext_price) = ctx.external_price {
-                        compute_reversal(ctx.side, ctx.reference_price, ext_price)
-                    } else {
-                        Decimal::ZERO
-                    },
+                    bid_drop: price_drop,
+                    reversal_pct,
                 });
             }
         }
 
         // ── Level 2: Dual Trigger + Hysteresis ───────────────────────────
-        // Both crypto_reversed AND market_dropped must hold for
-        // `dual_trigger_consecutive_ticks` consecutive evaluations.
+        // Both crypto_reversed AND market_dropped for N consecutive ticks.
         // Requires fresh composite + fresh book.
-        if book_fresh && external_fresh {
-            let composite_ok = ctx
-                .composite_sources
-                .is_some_and(|s| s >= sl_config.sl_min_sources);
+        if book_fresh && ctx.external_fresh {
+            let crypto_reversed = ctx
+                .unified_price
+                .implied_price
+                .map(|implied| derive_reversal(implied) >= sl_config.reversal_pct)
+                .unwrap_or(false);
 
-            let crypto_reversed = if let Some(ext_price) = ctx.external_price {
-                compute_reversal(ctx.side, ctx.reference_price, ext_price) >= sl_config.reversal_pct
-            } else {
-                false
-            };
+            let market_dropped = (ctx.entry_price - ctx.unified_price.price) >= sl_config.min_drop;
 
-            let market_dropped = (ctx.entry_price - ctx.current_bid) >= sl_config.min_drop;
-
-            if composite_ok && crypto_reversed && market_dropped {
+            if ctx.composite_ok && crypto_reversed && market_dropped {
                 self.dual_trigger_ticks += 1;
                 if self.dual_trigger_ticks >= sl_config.dual_trigger_consecutive_ticks {
                     return Some(StopLossTriggerKind::DualTrigger {
@@ -346,13 +434,11 @@ impl PositionLifecycle {
                     });
                 }
             } else {
-                // Either condition cleared — reset counter
                 self.dual_trigger_ticks = 0;
             }
         }
 
         // ── Level 3: Trailing Stop with headroom fix ─────────────────────
-        // Prevents impossible arming at high entry prices.
         if book_fresh && sl_config.trailing_enabled {
             let price_cap = Decimal::ONE - ctx.tick_size;
             let headroom = (price_cap - ctx.entry_price).max(Decimal::ZERO);
@@ -361,10 +447,8 @@ impl PositionLifecycle {
             if effective_arm_distance < ctx.tick_size {
                 self.trailing_unarmable = true;
             } else {
-                // Arming check: peak_bid >= entry + effective_arm_distance
-                let armed = ctx.peak_bid >= ctx.entry_price + effective_arm_distance;
+                let armed = ctx.peak_price >= ctx.entry_price + effective_arm_distance;
                 if armed {
-                    // Compute effective trailing distance with time decay
                     let base_distance = sl_config.trailing_distance;
                     let effective_distance = if sl_config.time_decay {
                         let decay_factor =
@@ -375,11 +459,11 @@ impl PositionLifecycle {
                         base_distance
                     };
 
-                    let drop_from_peak = ctx.peak_bid - ctx.current_bid;
+                    let drop_from_peak = ctx.peak_price - ctx.unified_price.price;
                     if drop_from_peak >= effective_distance {
                         return Some(StopLossTriggerKind::TrailingStop {
-                            peak_bid: ctx.peak_bid,
-                            current_bid: ctx.current_bid,
+                            peak_price: ctx.peak_price,
+                            current_price: ctx.unified_price.price,
                             effective_distance,
                         });
                     }
@@ -388,16 +472,15 @@ impl PositionLifecycle {
         }
 
         // ── Level 4: Post-Entry Exit ────────────────────────────────────
-        // Fires within post_entry_window_secs of entry when adverse move detected.
-        // During sell delay: caller skips non-hard triggers, re-evaluates next tick.
-        // After sell delay but within window: caller executes exit immediately.
         let seconds_since_entry = ctx.now.signed_duration_since(ctx.entry_time).num_seconds();
         let within_post_entry_window = seconds_since_entry < tailend_config.post_entry_window_secs;
 
         if within_post_entry_window && book_fresh {
-            let bid_drop = ctx.entry_price - ctx.current_bid;
-            if bid_drop >= tailend_config.post_entry_exit_drop {
-                return Some(StopLossTriggerKind::PostEntryExit { bid_drop });
+            let price_drop = ctx.entry_price - ctx.unified_price.price;
+            if price_drop >= tailend_config.post_entry_exit_drop {
+                return Some(StopLossTriggerKind::PostEntryExit {
+                    bid_drop: price_drop,
+                });
             }
         }
 

@@ -8,7 +8,7 @@ use polyrust_core::prelude::*;
 
 use crate::crypto_arb::domain::{
     ArbitragePosition, ExitOrderMeta, PositionLifecycle, PositionLifecycleState,
-    StopLossTriggerKind, TriggerEvalContext, compute_exit_clip,
+    StopLossTriggerKind, TriggerEvalContext, compute_exit_clip, compute_unified_sl_price,
 };
 
 use super::TailEndStrategy;
@@ -115,18 +115,41 @@ impl TailEndStrategy {
             let (external_price, external_age_ms, composite_sources) =
                 self.get_sl_price_data(&pos.coin, sl_config, now).await;
 
+            // Determine freshness for unified price and trigger gating
+            let external_fresh = external_age_ms
+                .map(|age| age <= sl_config.sl_max_external_age_ms)
+                .unwrap_or(false);
+            let composite_ok = composite_sources
+                .map(|s| s >= sl_config.sl_min_sources)
+                .unwrap_or(false);
+
+            // Only pass external to unified computation when at least relaxed-fresh (2x)
+            let ext_for_unified = external_price.filter(|_| {
+                external_age_ms
+                    .map(|age| age <= sl_config.sl_max_external_age_ms * 2)
+                    .unwrap_or(false)
+            });
+
+            let unified_price = compute_unified_sl_price(
+                current_bid,
+                pos.entry_price,
+                pos.side,
+                pos.reference_price,
+                ext_for_unified,
+                &sl_config.unified_price,
+            );
+
             let trigger_ctx = TriggerEvalContext {
                 entry_price: pos.entry_price,
-                peak_bid: pos.peak_bid,
+                peak_price: pos.peak_price,
                 side: pos.side,
                 reference_price: pos.reference_price,
                 tick_size: pos.tick_size,
                 entry_time: pos.entry_time,
-                current_bid,
+                unified_price,
                 book_age_ms,
-                external_price,
-                external_age_ms,
-                composite_sources,
+                external_fresh,
+                composite_ok,
                 time_remaining,
                 now,
             };
@@ -191,10 +214,10 @@ impl TailEndStrategy {
             cached.insert(snapshot.token_id.clone(), best_ask.price);
         }
 
-        // Update peak_bid for trailing stop
+        // Update peak_price for trailing stop (using raw bid here; unified update below per-position)
         if let Some(current_bid) = snapshot.best_bid() {
             self.base
-                .update_peak_bid(&snapshot.token_id, current_bid)
+                .update_peak_price(&snapshot.token_id, current_bid)
                 .await;
         }
 
@@ -292,18 +315,46 @@ impl TailEndStrategy {
             let (external_price, external_age_ms, composite_sources) =
                 self.get_sl_price_data(&pos.coin, sl_config, now).await;
 
+            // Determine freshness for unified price and trigger gating
+            let external_fresh = external_age_ms
+                .map(|age| age <= sl_config.sl_max_external_age_ms)
+                .unwrap_or(false);
+            let composite_ok = composite_sources
+                .map(|s| s >= sl_config.sl_min_sources)
+                .unwrap_or(false);
+
+            // Only pass external to unified computation when at least relaxed-fresh (2x)
+            let ext_for_unified = external_price.filter(|_| {
+                external_age_ms
+                    .map(|age| age <= sl_config.sl_max_external_age_ms * 2)
+                    .unwrap_or(false)
+            });
+
+            let unified_price = compute_unified_sl_price(
+                current_bid,
+                pos.entry_price,
+                pos.side,
+                pos.reference_price,
+                ext_for_unified,
+                &sl_config.unified_price,
+            );
+
+            // Update peak with unified price (not raw bid) for consistent trailing stop
+            self.base
+                .update_peak_price(&pos.token_id, unified_price.price)
+                .await;
+
             let trigger_ctx = TriggerEvalContext {
                 entry_price: pos.entry_price,
-                peak_bid: pos.peak_bid,
+                peak_price: pos.peak_price.max(unified_price.price),
                 side: pos.side,
                 reference_price: pos.reference_price,
                 tick_size: pos.tick_size,
                 entry_time: pos.entry_time,
-                current_bid,
+                unified_price,
                 book_age_ms,
-                external_price,
-                external_age_ms,
-                composite_sources,
+                external_fresh,
+                composite_ok,
                 time_remaining,
                 now,
             };
@@ -404,7 +455,8 @@ impl TailEndStrategy {
             neg_risk,
         )
         .with_tick_size(pos.tick_size)
-        .with_fee_rate_bps(pos.fee_rate_bps);
+        .with_fee_rate_bps(pos.fee_rate_bps)
+        .with_tag(trigger_kind.short_name());
 
         // Generate a synthetic order ID for lifecycle tracking
         // (real order ID comes back from PlaceOrder result, but we need to track intent now)
@@ -536,7 +588,8 @@ impl TailEndStrategy {
             neg_risk,
         )
         .with_tick_size(pos.tick_size)
-        .with_fee_rate_bps(pos.fee_rate_bps);
+        .with_fee_rate_bps(pos.fee_rate_bps)
+        .with_tag("hedge");
 
         // Store hedge order meta for fill routing
         {

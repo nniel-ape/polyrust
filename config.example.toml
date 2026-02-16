@@ -286,59 +286,74 @@ settlement_delay_secs = 30    # Wait after resolution detected before redeeming 
 # typical_depth = 150            # Shares at best bid/ask (replaces default 1000)
 # depth_decay_near_expiry = true # Linearly reduce depth as market approaches expiration
 # gtc_taker_fee_heuristic = true # Charge taker fee on GTC orders that cross the spread
+# resolution_confidence_gap = 0.02  # Prices in [0.48, 0.52] at expiry → "unknown" settlement
+
+# ArbitrageConfig overrides applied during backtest/sweep runs.
+# All default true (matching prior hardcoded behavior). Set false to disable individual overrides.
+# [backtest.overrides]
+# force_min_reference_quality_current = true  # Downgrade to Current (backtest can't produce Historical)
+# force_chainlink_off = true                  # Disable Chainlink RPC
+# force_stale_ob_max = true                   # Set stale_ob_secs to i64::MAX
+# force_entry_composite_off = true            # Disable composite price gating
+# force_sl_dispersion_relaxed = true          # Set sl_max_dispersion_bps to 10000
+# force_sl_min_remaining_zero = true          # Set min_remaining_secs to 0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PARAMETER SWEEP
 # ─────────────────────────────────────────────────────────────────────────────
 # Grid search over strategy parameters. Run: cargo run -- --backtest-sweep
 #
-# Three recommended profiles:
+# Inert axes (auto-filtered by runner, no need to include):
+#   tailend.stale_ob_secs       — overridden to i64::MAX in backtest
+#   stop_loss.min_remaining_secs — overridden to 0 in backtest
+#   sizing.kelly_multiplier      — TailEnd uses base_size/buy_price, not Kelly
+#   sizing.min_size / max_size   — unused by TailEnd sizing
 #
-# --- Profile 1: Trigger Sensitivity (243 combos) ---
-# Focus: when exits fire — dual-trigger hysteresis + hard crash thresholds
+# dynamic_thresholds are NOT swept as independent axes — use profiles instead.
+# Set [arbitrage.tailend] dynamic_thresholds directly, then sweep entry/exit params.
 #
-# [backtest.sweep]
-# rank_by = "sharpe"
-# top_n = 15
-# output_dir = "sweep_results"
+# Three calibration phases (walk-forward compatible):
 #
-# [backtest.sweep.stop_loss]
-# dual_trigger_consecutive_ticks = [1, 2, 3]
-# hard_drop_abs = ["0.05", "0.08", "0.12"]
-# hard_reversal_pct = ["0.004", "0.006", "0.009"]
-# reversal_pct = ["0.002", "0.003", "0.005"]
-# min_drop = ["0.03", "0.05", "0.08"]
-#
-# --- Profile 2: Trailing Stop Tuning (144 combos) ---
-# Focus: profit capture — trailing distance + arming + floor
-#
-# [backtest.sweep]
-# rank_by = "pnl"
-# top_n = 15
-# output_dir = "sweep_results"
-#
-# [backtest.sweep.stop_loss]
-# trailing_distance = ["0.03", "0.04", "0.05", "0.07"]
-# trailing_min_distance = ["0.010", "0.015", "0.020"]
-# trailing_arm_distance = ["0.010", "0.015", "0.020", "0.025"]
-# min_remaining_secs = [30, 45, 60]
-#
-# --- Profile 3: Full Lifecycle (6,561 combos — set force = true) ---
-# Focus: narrow ranges from best of 1+2, plus recovery params
+# --- Phase 1: Entry Quality (16 combos) ---
+# Focus: entry selectivity — spread, sustain, volatility, strike distance
+# Run with each dynamic_thresholds profile (aggressive/balanced/conservative)
 #
 # [backtest.sweep]
 # rank_by = "sharpe"
-# top_n = 20
-# force = true
+# top_n = 16
 # output_dir = "sweep_results"
-#
-# [backtest.sweep.stop_loss]
-# dual_trigger_consecutive_ticks = [1, 2, 3]
-# hard_drop_abs = ["0.06", "0.08", "0.10"]
-# trailing_distance = ["0.03", "0.05", "0.07"]
-# trailing_arm_distance = ["0.010", "0.015", "0.020"]
-# recovery_max_set_cost = ["1.00", "1.01", "1.02"]
 #
 # [backtest.sweep.tailend]
-# post_entry_exit_drop = ["0.03", "0.05", "0.07"]
-# min_sell_delay_secs = [8, 10, 12]
+# max_spread_bps = ["150", "250"]
+# min_sustained_secs = [3, 7]
+# max_recent_volatility = ["0.015", "0.025"]
+# min_strike_distance_pct = ["0.003", "0.006"]
+#
+# --- Phase 2: Stop Triggers (16 combos) ---
+# Focus: dual-trigger + hard crash thresholds (lock entry params from Phase 1)
+#
+# [backtest.sweep]
+# rank_by = "sharpe"
+# top_n = 16
+# output_dir = "sweep_results"
+#
+# [backtest.sweep.stop_loss]
+# reversal_pct = ["0.002", "0.004"]
+# min_drop = ["0.04", "0.07"]
+# hard_drop_abs = ["0.06", "0.10"]
+# hard_reversal_pct = ["0.004", "0.008"]
+#
+# --- Phase 3: Exit Shaping (8 combos) ---
+# Focus: trailing stop + post-entry fail-fast + sell delay
+#
+# [backtest.sweep]
+# rank_by = "sharpe"
+# top_n = 8
+# output_dir = "sweep_results"
+#
+# [backtest.sweep.stop_loss]
+# trailing_distance = ["0.03", "0.06"]
+#
+# [backtest.sweep.tailend]
+# post_entry_exit_drop = ["0.03", "0.06"]
+# min_sell_delay_secs = [6, 12]

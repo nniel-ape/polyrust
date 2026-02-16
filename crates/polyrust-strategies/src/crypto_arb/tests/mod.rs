@@ -80,7 +80,7 @@ pub(super) fn make_position(
     entry_price: Decimal,
     size: Decimal,
     reference_price: Decimal,
-    peak_bid: Decimal,
+    peak_price: Decimal,
 ) -> ArbitragePosition {
     ArbitragePosition {
         market_id: market_id.to_string(),
@@ -93,7 +93,7 @@ pub(super) fn make_position(
         order_id: None,
         entry_time: Utc::now(),
         kelly_fraction: None,
-        peak_bid,
+        peak_price,
 
         estimated_fee: Decimal::ZERO,
         entry_market_price: entry_price,

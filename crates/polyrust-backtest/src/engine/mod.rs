@@ -51,6 +51,10 @@ pub struct BacktestTrade {
     pub close_reason: Option<CloseReason>,
     /// Entry price at time of sell (for counterfactual analysis)
     pub entry_price: Option<Decimal>,
+    /// Whether this trade was a proactive hedge (opposite-side buy during stop-loss exit)
+    pub is_hedge: bool,
+    /// Which stop-loss trigger caused this exit (None for buys, settlements, hedges)
+    pub exit_trigger: Option<String>,
 }
 
 /// Pre-built maps from load_events() for sharing across sweep engines.
@@ -97,9 +101,9 @@ pub struct BacktestEngine {
     token_best_prices: HashMap<String, (Decimal, Decimal)>,
     /// Market slug cache: market_id -> slug (for deriving coin symbol)
     market_slugs: HashMap<String, String>,
-    /// Settlement outcomes: token_id -> settlement_price ($0 or $1)
+    /// Settlement outcomes: token_id -> settlement_price ($0 or $1), or None for ambiguous.
     /// Recorded for ALL traded tokens (including strategy-exited ones) at MarketExpired/ForceClose.
-    settlement_outcomes: HashMap<String, Decimal>,
+    settlement_outcomes: HashMap<String, Option<Decimal>>,
     /// Optional progress bar for event replay (None in sweep mode).
     progress_bar: Option<ProgressBar>,
     // --- Funnel instrumentation counters ---
@@ -398,12 +402,16 @@ impl BacktestEngine {
                 && let Some((token_a, token_b)) = self.market_tokens.get(market_id).cloned()
             {
                 // Record settlement outcome for BOTH tokens (even if strategy already exited)
+                let gap = self.config.realism.resolution_confidence_gap;
+                let half = Decimal::new(5, 1);
                 for tid in [&token_a, &token_b] {
                     let last_price = self.token_prices.get(tid).copied().unwrap_or(Decimal::ZERO);
-                    let sp = if last_price > Decimal::new(5, 1) {
-                        Decimal::ONE
+                    let sp = if last_price > half + gap {
+                        Some(Decimal::ONE)
+                    } else if last_price < half - gap {
+                        Some(Decimal::ZERO)
                     } else {
-                        Decimal::ZERO
+                        None // Ambiguous — too close to 0.50
                     };
                     self.settlement_outcomes.insert(tid.clone(), sp);
                 }
@@ -504,6 +512,8 @@ impl BacktestEngine {
             );
         }
 
+        let gap = self.config.realism.resolution_confidence_gap;
+        let half = Decimal::new(5, 1);
         for (token_id, size) in remaining_tokens {
             let last_price = self
                 .token_prices
@@ -517,9 +527,15 @@ impl BacktestEngine {
                 Decimal::ZERO
             };
 
-            // Record settlement outcome for force-closed tokens
-            self.settlement_outcomes
-                .insert(token_id.clone(), settlement_price);
+            // Record settlement outcome for force-closed tokens (with ambiguity zone)
+            let sp = if last_price > half + gap {
+                Some(Decimal::ONE)
+            } else if last_price < half - gap {
+                Some(Decimal::ZERO)
+            } else {
+                None
+            };
+            self.settlement_outcomes.insert(token_id.clone(), sp);
 
             debug!(
                 token_id = %token_id,
@@ -585,8 +601,8 @@ impl BacktestEngine {
         self.market_slugs = maps.market_slugs;
     }
 
-    /// Settlement outcomes recorded during the backtest (token_id -> $0 or $1).
-    pub fn settlement_outcomes(&self) -> &HashMap<String, Decimal> {
+    /// Settlement outcomes recorded during the backtest (token_id -> $0/$1 or None for ambiguous).
+    pub fn settlement_outcomes(&self) -> &HashMap<String, Option<Decimal>> {
         &self.settlement_outcomes
     }
 
@@ -1360,6 +1376,7 @@ impl BacktestEngine {
                     .get(&order.token_id)
                     .cloned()
                     .unwrap_or_default();
+                let is_hedge = order.tag.as_deref() == Some("hedge");
                 Ok(Some(BacktestTrade {
                     timestamp: self.current_time,
                     token_id: order.token_id,
@@ -1370,6 +1387,8 @@ impl BacktestEngine {
                     realized_pnl: None,
                     close_reason: None,
                     entry_price: None,
+                    is_hedge,
+                    exit_trigger: None,
                 }))
             }
             OrderSide::Sell => {
@@ -1479,6 +1498,9 @@ impl BacktestEngine {
                     .get(&order.token_id)
                     .cloned()
                     .unwrap_or_default();
+                let is_hedge = order.tag.as_deref() == Some("hedge");
+                // Extract exit trigger from tag (filter out "hedge" which is not a trigger)
+                let exit_trigger = order.tag.filter(|t| t != "hedge");
                 Ok(Some(BacktestTrade {
                     timestamp: self.current_time,
                     token_id: order.token_id,
@@ -1489,6 +1511,8 @@ impl BacktestEngine {
                     realized_pnl: Some(realized_pnl),
                     close_reason: Some(CloseReason::Strategy),
                     entry_price: Some(entry_price),
+                    is_hedge,
+                    exit_trigger,
                 }))
             }
         }
@@ -1498,7 +1522,7 @@ impl BacktestEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{FeeConfig, RealismConfig};
+    use crate::config::{BacktestOverridesConfig, FeeConfig, RealismConfig};
     use async_trait::async_trait;
     use std::collections::BTreeMap;
 
@@ -1701,6 +1725,7 @@ mod tests {
             realism: RealismConfig::default(),
             sizing: None,
             sweep: None,
+            overrides: BacktestOverridesConfig::default(),
         };
 
         let strategy = Box::new(TestStrategy {
@@ -1786,6 +1811,7 @@ mod tests {
             realism: RealismConfig::default(),
             sizing: None,
             sweep: None,
+            overrides: BacktestOverridesConfig::default(),
         };
 
         let strategy = Box::new(TestStrategy {
@@ -1837,6 +1863,7 @@ mod tests {
             realism: RealismConfig::default(),
             sizing: None,
             sweep: None,
+            overrides: BacktestOverridesConfig::default(),
         };
 
         let strategy = Box::new(TestStrategy {
@@ -2041,6 +2068,7 @@ mod tests {
             realism: RealismConfig::default(),
             sizing: None,
             sweep: None,
+            overrides: BacktestOverridesConfig::default(),
         };
 
         let strategy = Box::new(PriceCountStrategy {
@@ -2108,6 +2136,7 @@ mod tests {
             },
             sizing: None,
             sweep: None,
+            overrides: BacktestOverridesConfig::default(),
         };
 
         let strategy = Box::new(TestStrategy {
@@ -2231,6 +2260,7 @@ mod tests {
             },
             sizing: None,
             sweep: None,
+            overrides: BacktestOverridesConfig::default(),
         };
 
         let strategy1 = Box::new(CrossingSpreadStrategy {
@@ -2264,6 +2294,7 @@ mod tests {
             },
             sizing: None,
             sweep: None,
+            overrides: BacktestOverridesConfig::default(),
         };
 
         let strategy2 = Box::new(CrossingSpreadStrategy {
@@ -2319,6 +2350,7 @@ mod tests {
             },
             sizing: None,
             sweep: None,
+            overrides: BacktestOverridesConfig::default(),
         };
 
         let strategy = Box::new(TestStrategy {
@@ -2356,6 +2388,7 @@ mod tests {
             },
             sizing: None,
             sweep: None,
+            overrides: BacktestOverridesConfig::default(),
         };
 
         let data_store = Arc::new(HistoricalDataStore::new(":memory:").await.unwrap());

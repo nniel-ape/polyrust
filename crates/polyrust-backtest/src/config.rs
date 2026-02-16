@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use polyrust_strategies::SizingConfig;
+use polyrust_strategies::{ArbitrageConfig, ReferenceQualityLevel, SizingConfig};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +39,64 @@ impl BacktestSizingOverride {
         }
         if let Some(v) = self.depth_cap_factor {
             sizing.depth_cap_factor = v;
+        }
+    }
+}
+
+/// Forced overrides applied to `ArbitrageConfig` during backtest/sweep runs.
+///
+/// These flags gate individual overrides so they can be toggled from config.
+/// All default `true` for backward compatibility (matching prior hardcoded behavior).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BacktestOverridesConfig {
+    /// Downgrade min_reference_quality to Current (backtest can't produce Historical).
+    pub force_min_reference_quality_current: bool,
+    /// Disable Chainlink RPC (no on-chain access in backtest).
+    pub force_chainlink_off: bool,
+    /// Set stale_ob_secs to i64::MAX (staleness meaningless in backtest).
+    pub force_stale_ob_max: bool,
+    /// Disable composite price gating (deterministic data).
+    pub force_entry_composite_off: bool,
+    /// Relax sl_max_dispersion_bps to 10000 (disable dispersion check).
+    pub force_sl_dispersion_relaxed: bool,
+    /// Set stop_loss.min_remaining_secs to 0 (evaluate until expiry).
+    pub force_sl_min_remaining_zero: bool,
+}
+
+impl Default for BacktestOverridesConfig {
+    fn default() -> Self {
+        Self {
+            force_min_reference_quality_current: true,
+            force_chainlink_off: true,
+            force_stale_ob_max: true,
+            force_entry_composite_off: true,
+            force_sl_dispersion_relaxed: true,
+            force_sl_min_remaining_zero: true,
+        }
+    }
+}
+
+impl BacktestOverridesConfig {
+    /// Apply each enabled override to the given `ArbitrageConfig`.
+    pub fn apply_to(&self, arb: &mut ArbitrageConfig) {
+        if self.force_min_reference_quality_current {
+            arb.tailend.min_reference_quality = ReferenceQualityLevel::Current;
+        }
+        if self.force_chainlink_off {
+            arb.use_chainlink = false;
+        }
+        if self.force_stale_ob_max {
+            arb.tailend.stale_ob_secs = i64::MAX;
+        }
+        if self.force_entry_composite_off {
+            arb.tailend.use_composite_price = false;
+        }
+        if self.force_sl_dispersion_relaxed {
+            arb.stop_loss.sl_max_dispersion_bps = Decimal::new(10000, 0);
+        }
+        if self.force_sl_min_remaining_zero {
+            arb.stop_loss.min_remaining_secs = 0;
         }
     }
 }
@@ -84,6 +142,9 @@ pub struct BacktestConfig {
     /// Optional parameter sweep configuration for grid search.
     #[serde(default)]
     pub sweep: Option<SweepConfig>,
+    /// Backtest-specific ArbitrageConfig overrides (all default true for backward compat).
+    #[serde(default)]
+    pub overrides: BacktestOverridesConfig,
 }
 
 /// Fee model configuration for backtesting.
@@ -127,6 +188,11 @@ pub struct RealismConfig {
     /// Charge taker fee on GTC orders that would match immediately in live
     /// (i.e., GTC BUY at price >= best_ask, GTC SELL at price <= best_bid).
     pub gtc_taker_fee_heuristic: bool,
+
+    /// Prices within [0.5 - gap, 0.5 + gap] at expiry are labeled "unknown" settlement
+    /// (neither clearly $1 nor $0). These trades are excluded from prediction accuracy
+    /// and stop-loss analysis. Default: 0.02 (prices in [0.48, 0.52] are ambiguous).
+    pub resolution_confidence_gap: Decimal,
 }
 
 impl Default for RealismConfig {
@@ -136,6 +202,7 @@ impl Default for RealismConfig {
             typical_depth: Decimal::new(1000, 0),
             depth_decay_near_expiry: false,
             gtc_taker_fee_heuristic: false,
+            resolution_confidence_gap: Decimal::new(2, 2), // 0.02
         }
     }
 }
@@ -170,6 +237,7 @@ impl Default for BacktestConfig {
             realism: RealismConfig::default(),
             sizing: None,
             sweep: None,
+            overrides: BacktestOverridesConfig::default(),
         }
     }
 }
@@ -298,6 +366,7 @@ mod tests {
             realism: RealismConfig::default(),
             sizing: None,
             sweep: None,
+            overrides: BacktestOverridesConfig::default(),
         };
         assert_eq!(config.strategy_name, "test-strategy");
         assert_eq!(config.market_ids.len(), 2);
