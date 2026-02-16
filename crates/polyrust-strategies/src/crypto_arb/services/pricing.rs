@@ -39,7 +39,8 @@ impl CryptoArbRuntime {
         // Deduplicate: when multiple strategy handlers share this base, the same
         // ExternalPrice event triggers record_price once per handler. Skip the
         // insert if the last entry already has the same price to avoid shrinking
-        // the effective history window.
+        // the effective history window. When the price is unchanged, update the
+        // timestamps so freshness gating (get_sl_single_fresh) stays accurate.
         {
             let mut history = self.price_history.write().await;
             let entry = history.entry(symbol.to_string()).or_default();
@@ -47,7 +48,14 @@ impl CryptoArbRuntime {
                 .back()
                 .map(|(_, last_price, _, _)| *last_price == price)
                 .unwrap_or(false);
-            if !is_duplicate {
+            if is_duplicate {
+                // Same price — update timestamps and source without adding a new entry.
+                if let Some(last) = entry.back_mut() {
+                    last.0 = now;
+                    last.2 = source.to_string();
+                    last.3 = source_timestamp;
+                }
+            } else {
                 entry.push_back((now, price, source.to_string(), source_timestamp));
                 if entry.len() > PRICE_HISTORY_SIZE {
                     entry.pop_front();
