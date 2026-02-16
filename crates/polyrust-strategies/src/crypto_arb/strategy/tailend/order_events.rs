@@ -60,13 +60,11 @@ impl TailEndStrategy {
                         let is_filled = result.status.as_deref() == Some("Filled");
                         if is_immediate && !is_filled && !is_hedge {
                             {
-                                let mut exit_orders =
-                                    self.base.exit_orders_by_id.write().await;
+                                let mut exit_orders = self.base.exit_orders_by_id.write().await;
                                 exit_orders.remove(real_oid);
                             }
                             let now = self.base.event_time().await;
-                            let mut lifecycle =
-                                self.base.ensure_lifecycle(&position_token).await;
+                            let mut lifecycle = self.base.ensure_lifecycle(&position_token).await;
                             lifecycle.pending_exit_order_id = None;
                             let _ = lifecycle.transition(
                                 PositionLifecycleState::Healthy,
@@ -1140,6 +1138,9 @@ impl TailEndStrategy {
                                 self.base
                                     .reduce_or_remove_position_by_token(&meta.token_id, remaining)
                                     .await;
+                                self.base
+                                    .record_recovery_exit_cooldown(&pos.market_id)
+                                    .await;
                                 warn!(
                                     token_id = %meta.token_id,
                                     dust_size = %remaining,
@@ -1160,6 +1161,13 @@ impl TailEndStrategy {
                                 }
                                 self.write_lifecycle(&meta.token_id, &lifecycle).await;
                             }
+                        } else {
+                            // fully_closed: reduce_or_remove already called
+                            // remove_lifecycle. Record cooldown to prevent rapid
+                            // re-entry after stop-loss exit.
+                            self.base
+                                .record_recovery_exit_cooldown(&pos.market_id)
+                                .await;
                         }
 
                         info!(
