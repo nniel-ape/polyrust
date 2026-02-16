@@ -9,7 +9,7 @@ use polyrust_core::prelude::*;
 use super::*;
 use crate::crypto_arb::config::SizingConfig;
 use crate::crypto_arb::domain::{BoundarySnapshot, CompositePriceResult, ReferenceQuality};
-use crate::crypto_arb::runtime::{CryptoArbRuntime, WINDOW_SECS};
+use crate::crypto_arb::runtime::WINDOW_SECS;
 use crate::crypto_arb::services::{kelly_position_size, net_profit_margin, parse_slug_timestamp, taker_fee};
 
 // ---------------------------------------------------------------------------
