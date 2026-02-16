@@ -198,12 +198,19 @@ Ported from Python (`../polymarket-trading-bot/`). Exploits mispricing in 15-min
 
 Configured via `[arbitrage]` in `config.toml`. Directory structure at `crates/polyrust-strategies/src/crypto_arb/` with shared state through `Arc<CryptoArbRuntime>`:
 
-- `TailEndStrategy` — high-confidence trades near expiration
-- `CryptoArbDashboard` — unified dashboard view
+- `config.rs` — `ArbitrageConfig` and all sub-configs
+- `runtime.rs` — `CryptoArbRuntime` struct definition, construction, and warm-up
+- `domain/` — pure data types: market, position, lifecycle FSM, telemetry (no runtime imports)
+- `services/` — `impl CryptoArbRuntime` method groups: fee_math, pricing, market, position, order, observability
+- `strategy/tailend/` — `TailEndStrategy` struct + event dispatch split into entry, exit, order_events
+- `dashboard/` — `CryptoArbDashboard` view provider: render, updates
+- `tests/` — organized test modules: domain, config, pricing, markets, orders, lifecycle, tailend integration
+
+`CryptoArbRuntime` methods are distributed across `services/*.rs` files using Rust's split `impl` blocks. The struct definition and constructor live in `runtime.rs`; each service file adds domain-specific methods. Cross-strategy utilities live in `crates/polyrust-strategies/src/shared.rs` (e.g., `escape_html`).
 
 Strategy is disabled by default; set `enabled = true` in `[arbitrage]` to activate.
 
-`ArbitrageConfig` has core settings (coins, max_positions, min_profit_margin) plus `TailEndConfig` and shared sub-configs: `FeeConfig` (taker fee model), `SpikeConfig` (price spike detection), `OrderConfig` (GTC/FOK), `SizingConfig` (Kelly criterion), `StopLossConfig` (lifecycle state machine + dual-trigger + trailing), `PerformanceConfig` (tracking + auto-disable). See `config.rs` for field details.
+`ArbitrageConfig` has core settings (coins, max_positions, min_profit_margin) plus `TailEndConfig` and shared sub-configs: `FeeConfig` (taker fee model), `SpikeConfig` (price spike detection), `OrderConfig` (GTC/FOK), `SizingConfig` (Kelly criterion), `StopLossConfig` (lifecycle state machine + dual-trigger + trailing), `PerformanceConfig` (tracking + auto-disable). See `crypto_arb/config.rs` for field details.
 
 ### Key Features
 
@@ -387,3 +394,4 @@ All outbound traffic from the polyrust container is routed through a proxy VPS (
 - `docs/research/stoploss-aggressiveness.md` — stop-loss aggressiveness sweep analysis and Pareto-optimal configs
 - `docs/research/fast-exit-architecture.md` — fast-exit v2 architecture: FAK+GTC hybrid, price-feed frontrunning, proactive hedge, lifecycle simplification
 - `docs/plans/dutch-book-strategy.md` — Dutch Book arbitrage strategy design and implementation plan
+- `docs/plans/2026-02-16-crypto-arb-refactor.md` — crypto_arb service-structured refactor plan (7 flat files → domain/services/strategy subfolders)

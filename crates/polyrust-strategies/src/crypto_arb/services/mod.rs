@@ -16,4 +16,5 @@ pub use fee_math::{kelly_position_size, net_profit_margin, taker_fee};
 pub use fee_math::parse_slug_timestamp;
 
 // Re-export formatting helpers used by dashboard
-pub use fee_math::{escape_html, fmt_market_price, fmt_usd};
+pub use fee_math::{fmt_market_price, fmt_usd};
+pub use crate::shared::escape_html;

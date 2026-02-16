@@ -284,6 +284,7 @@ const SKIP_GROUPS: &[SkipGroup] = &[
         reasons: &[
             "stale_cooldown",
             "rejection_cooldown",
+            "recovery_cooldown",
             "reservation",
             "auto_disabled",
         ],
