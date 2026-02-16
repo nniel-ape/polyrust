@@ -602,7 +602,10 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
 
         // For FAK orders with Matched status, query the actual fill size since
         // PostOrderResponse only carries the signed order amounts, not the fill.
-        let actual_fill_size = if order.order_type == OrderType::Fak
+        // Returns (fill_size, is_confirmed_fill): when the CLOB API returns
+        // size_matched=0 (eventual consistency race) or errors, we treat it as
+        // zero-fill rather than assuming the full request size was filled.
+        let (actual_fill_size, fak_confirmed_fill) = if order.order_type == OrderType::Fak
             && response.status == OrderStatusType::Matched
             && !response.order_id.is_empty()
         {
@@ -612,9 +615,9 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
                     if matched.is_zero() {
                         warn!(
                             order_id = %response.order_id,
-                            "FAK matched but size_matched=0, using request size"
+                            "FAK matched but size_matched=0 (API eventual consistency) — treating as zero fill"
                         );
-                        None
+                        (Some(Decimal::ZERO), false)
                     } else {
                         info!(
                             order_id = %response.order_id,
@@ -622,20 +625,35 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
                             fill_size = %matched,
                             "FAK partial fill detected"
                         );
-                        Some(matched)
+                        (Some(matched), true)
                     }
                 }
                 Err(e) => {
                     warn!(
                         order_id = %response.order_id,
                         error = %e,
-                        "Failed to query FAK fill size, using request size"
+                        "Failed to query FAK fill size — treating as zero fill to avoid overstating position"
                     );
-                    None
+                    (Some(Decimal::ZERO), false)
                 }
             }
         } else {
-            None
+            (None, true)
+        };
+
+        // Override status for FAK orders where we couldn't confirm actual fill:
+        // treat as Unmatched so the strategy's zero-fill detection transitions
+        // back to Healthy for re-evaluation.
+        let status_str = match response.status {
+            OrderStatusType::Matched if !fak_confirmed_fill => {
+                warn!(
+                    order_id = %response.order_id,
+                    "FAK Matched status overridden to Unmatched (unconfirmed fill size)"
+                );
+                "Unmatched".to_string()
+            }
+            OrderStatusType::Matched => "Filled".to_string(),
+            other => format!("{:?}", other),
         };
 
         let result = OrderResult {
@@ -649,10 +667,7 @@ impl<K: polymarket_client_sdk::auth::Kind, S: Signer + Send + Sync> LiveBackendI
             price,
             size: actual_fill_size.unwrap_or(size),
             side: order.side,
-            status: Some(match response.status {
-                OrderStatusType::Matched => "Filled".to_string(),
-                other => format!("{:?}", other),
-            }),
+            status: Some(status_str),
             message: response.error_msg.unwrap_or_else(|| "ok".to_string()),
         };
 
