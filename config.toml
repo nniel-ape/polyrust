@@ -84,7 +84,7 @@ base_size = 5                   # Base USDC position size per trade
 max_spread_bps = 150
 min_sustained_secs = 3
 max_recent_volatility = 0.025
-min_strike_distance_pct = 0.003
+min_strike_distance_pct = 0.005
 post_entry_exit_drop = 0.10            # Sweep 1 winner (was 0.06)
 min_sell_delay_secs = 6
 # Cooldown after FOK rejection before retrying (secs)
@@ -104,9 +104,9 @@ max_source_stale_secs = 5
 [arbitrage.stop_loss]
 trailing_enabled = true         # Enable trailing stop-loss
 time_decay = true               # Tighten trailing distance as expiry approaches
-trailing_distance = 0.50        # Base distance (bumped for Phase 3 sweep; must be >= max swept trailing_min_distance)
-hard_drop_abs = 0.50            # Phase 2: effectively disabled (was 0.12; hard_crash net-negative in backtest)
-trailing_min_distance = 0.50    # Phase 3: effectively disabled trailing (was 0.05; trailing net-negative in backtest)
+trailing_distance = 0.50        # Base distance (bumped to match floor)
+hard_drop_abs = 0.50            # Phase 2: very loose — only extreme 50¢+ bid drops (was 0.12)
+trailing_min_distance = 0.50    # Phase 3: very wide floor — only fires on massive reversals (was 0.05)
 hard_reversal_pct = 0.025       # Sweep 1 winner (was 0.006 default — far too sensitive)
 recovery_max_set_cost = 1.05    # Loosen hedge threshold (was 1.01 default, 0 hedges)
 
@@ -151,7 +151,6 @@ rank_by = "net_stop_value"
 top_n = 25
 
 [backtest.sweep.tailend]
-post_entry_exit_drop = ["0.10", "0.15", "0.25", "0.90"]
+min_strike_distance_pct = ["0.0005", "0.001", "0.002", "0.004", "0.005"]
 
 [backtest.sweep.stop_loss]
-trailing_min_distance = ["0.05", "0.08", "0.12", "0.50"]
