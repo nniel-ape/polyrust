@@ -19,9 +19,9 @@ Autonomous Polymarket trading bot framework in Rust with event-driven architectu
 │        ┌────────────┼──────┼───────┼────────────┐               │
 │        ▼            ▼      ▼       ▼            ▼               │
 │  ┌───────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐         │
-│  │ Strategy A│ │Strategy B│ │ Position │ │  Balance   │         │
-│  │ (crypto   │ │(user's)  │ │ State    │ │  State     │         │
-│  │  arb)     │ │          │ │ (shared) │ │            │         │
+│  │ Crypto    │ │Dutch Book│ │ Position │ │  Balance   │         │
+│  │ Arbitrage │ │Arbitrage │ │ State    │ │  State     │         │
+│  │           │ │          │ │ (shared) │ │            │         │
 │  └─────┬─────┘ └────┬─────┘ └──────────┘ └────────────┘         │
 │        │             │                                          │
 │        ▼             ▼                                          │
@@ -59,6 +59,12 @@ cargo run
 
 # Run in backtest mode
 cargo run -- --backtest
+
+# Parameter grid search over strategy configs
+cargo run -- --backtest-sweep
+
+# API connectivity smoke tests (Gamma, Chainlink, CLOB auth, approvals)
+cargo run -- --verify
 
 # Run the example strategy
 cargo run --example simple_strategy
@@ -119,13 +125,29 @@ services:
 - Database stored in `./data/polyrust.db` (persisted across container restarts)
 - To reset state: `rm -rf ./data && docker-compose restart`
 
+### Production Deployment
+
+Production runs on an ARM VPS via [Spot](https://github.com/umputun/spot) (`spot.yml`).
+
+```bash
+# Full deploy: build → push GHCR → pull on server → restart
+spot -p spot.yml -t prod -n deploy
+
+# Config only: decrypt secrets, copy files, restart
+spot -p spot.yml -t prod -n update-config
+
+# Just restart the container
+spot -p spot.yml -t prod -n restart
+```
+
+Secrets are SOPS-encrypted (`secrets/prod.yaml`) and decrypted to `.env` at deploy time. Outbound traffic is routed through an SSH SOCKS5 tunnel via a sidecar container.
+
 ### Production Considerations
 
-- **Secrets management**: Use Docker secrets or external secrets manager (not environment variables in production)
+- **Secrets management**: SOPS + Age encryption for all credentials (see `secrets/` directory)
 - **Live trading**: Set `[paper] enabled = false` in `config.toml` and provide credentials
-- **Dashboard access**: For external access (outside container), set `POLY_DASHBOARD_HOST=0.0.0.0` in `docker-compose.yml`
+- **Dashboard access**: Set `POLY_DASHBOARD_HOST=0.0.0.0` for access from outside the container
 - **Monitoring**: `docker-compose logs -f polyrust` for real-time logs
-- **Health checks**: Dashboard health endpoint (implementation pending)
 
 ## Configuration
 
@@ -147,13 +169,15 @@ Configuration is loaded from `config.example.toml` (copy to `config.toml`) with 
 
 > **Note:** Paper mode defaults to `true` via `config/default.toml`. If the config file is missing, the Rust struct default is `false` (live mode). Always ensure the config file is present or set `POLY_PAPER_TRADING=true`.
 
-> **Strategy Configuration:** The crypto arbitrage strategy is configured via the `[arbitrage]` section in `config.toml`. See `config.example.toml` for all available options and the [Reference Strategy](#reference-strategy-crypto-arbitrage) section below.
+> **Strategy Configuration:** Crypto arbitrage is configured via `[arbitrage]`, Dutch Book via `[dutch_book]` in `config.toml`. Both are disabled by default. See `config.example.toml` for all options.
 
 ## Strategy Plugin Example
 
 Implement the `Strategy` trait to create a custom trading strategy:
 
 ```rust
+use std::pin::Pin;
+use std::future::Future;
 use polyrust_core::prelude::*;
 
 struct MyStrategy { /* state */ }
@@ -173,6 +197,19 @@ impl Strategy for MyStrategy {
             }
             _ => Ok(vec![]),
         }
+    }
+
+    // Optional: expose a custom dashboard page at /strategy/my-strategy
+    fn dashboard_view(&self) -> Option<&dyn DashboardViewProvider> {
+        Some(self)
+    }
+}
+
+// Optional: render strategy-specific HTML for the dashboard
+impl DashboardViewProvider for MyStrategy {
+    fn view_name(&self) -> &str { "my-strategy" }
+    fn render_view(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+        Box::pin(async { Ok("<div>Strategy-specific HTML here</div>".to_string()) })
     }
 }
 ```
@@ -200,58 +237,52 @@ engine.run().await?;
 - `polyrust-backtest` — historical data pipeline + backtesting engine
 - `polyrust-dashboard` — Axum + HTMX monitoring UI
 
-## Reference Strategy: Crypto Arbitrage
+## Included Strategies
 
-The included crypto arbitrage strategy exploits mispricing in 15-minute Up/Down crypto markets using high-confidence tail-end trades (<2 min remaining, market >= 90% certainty).
+### Crypto Arbitrage
 
-### Key Features
+Exploits mispricing in 15-minute Up/Down crypto markets using high-confidence tail-end trades (<2 min remaining, market >= 90% certainty). Configured via `[arbitrage]` in `config.toml`.
 
-- **Fee-aware profit margins** — Net profit calculation accounts for Polymarket's dynamic taker fees (3.15% at 50/50, ~0% at extremes)
+**Key features:**
+- **Fee-aware profit margins** — accounts for Polymarket's dynamic taker fees (3.15% at 50/50, ~0% at extremes)
 - **Hybrid order execution** — GTC maker orders (0% fee) for entries, FAK taker orders for fast exits
-- **Kelly criterion sizing** — Position size scales with confidence and edge, clamped to configured min/max
-- **Spike detection** — Pre-filters small moves, triggers evaluation only on significant price changes
-- **Position lifecycle state machine** — Per-position 3-state lifecycle (Healthy -> ExitExecuting -> Hedged) with 4-level trigger hierarchy for stop-loss decisions. Hard crash triggers bypass sell delay for immediate exit.
-- **Composite price stop-loss** — All stop-loss decisions use freshness-gated composite price from multiple sources with source-priority fallback (binance-futures > binance-spot > coinbase > chainlink), preventing stale single-source exits
-- **Fast-path exit evaluation** — ExternalPrice events (Binance, Coinbase) trigger stop-loss evaluation using cached orderbook bids, enabling exits 50-200ms ahead of CLOB orderbook updates. Gated by book freshness threshold (`fast_path_max_book_age_ms`).
-- **FAK + GTC hybrid exits** — FAK (Fill-And-Kill) for immediate partial fills at current bid, GTC residual at bid minus tick offset for remaining size. GTC chase cycle refreshes stale resting orders every 2s. Proactive opposite-side hedge placed simultaneously when set completion cost is within threshold.
-- **Performance tracking** — Win rate and P&L tracking with optional auto-disable for underperforming trades
+- **Kelly criterion sizing** — position size scales with confidence and edge
+- **Position lifecycle state machine** — 3-state lifecycle (Healthy → ExitExecuting → Hedged) with 4-level trigger hierarchy: hard crash → dual-trigger + hysteresis → trailing stop → post-entry exit
+- **Composite price stop-loss** — freshness-gated multi-source price (binance-futures > binance-spot > coinbase > chainlink), preventing stale single-source exits
+- **Fast-path exit evaluation** — ExternalPrice events trigger exits 50-200ms ahead of CLOB updates using cached orderbook bids
+- **FAK + GTC hybrid exits** — FAK for immediate partial fills, GTC residual at bid-tick for remainder. Proactive opposite-side hedge when set completion cost is within threshold
+- **Performance tracking** — win rate and P&L tracking with optional auto-disable
 
-### Configuration
+**Dashboard** at `/strategy/crypto-arb`: live positions with P&L, open orders, active markets, spike events, and performance statistics. Real-time updates via SSE.
 
-Configure via `[arbitrage]` section in `config.toml`. Available sub-configs:
+### Dutch Book Arbitrage
 
-- **FeeConfig** — Taker fee model (default 3.15%)
-- **SpikeConfig** — Spike detection thresholds and history
-- **OrderConfig** — Hybrid maker/taker mode, limit order offset, max age
-- **SizingConfig** — Kelly criterion parameters, min/max position size
-- **StopLossConfig** — 3-state lifecycle + dual-trigger + trailing stops + hard crash detection (bypass sell delay) + proactive hedge
-- **PerformanceConfig** — Tracking, auto-disable thresholds
+Market-neutral arbitrage: buys both YES and NO tokens when their combined ask price is below $1.00, locking in guaranteed profit upon resolution. Works across all active Polymarket markets. Configured via `[dutch_book]` in `config.toml`.
 
-See `config.example.toml` for the complete reference and `CLAUDE.md` for detailed documentation.
+**Key features:**
+- **Paired FOK execution** — buys both sides simultaneously via `PlaceBatchOrder`
+- **Emergency unwind** — on partial fills (one side cancels), sells the filled side at a discount to avoid directional risk
+- **Background market discovery** — `GammaScanner` periodically queries Gamma API for markets matching liquidity and resolution filters
+- **Position tracking** — tracks paired positions from execution through resolution and redemption
 
-### Dashboard
+**Dashboard** at `/strategy/dutch-book`.
 
-Strategy-specific dashboard available at `http://127.0.0.1:3000/strategy/crypto-arb` shows:
-- Live positions with P&L and peak bid tracking
-- Open limit orders (GTC maker orders)
-- Active markets with reference prices and spreads
-- Recent spike events for cross-correlation
-- Performance statistics (win rate, total P&L, recent trades)
+Both strategies are disabled by default — set `enabled = true` in their respective config sections to activate. See `config.example.toml` for all options.
 
 ## Backtesting
 
-Test your strategies on historical data before deploying to paper or live trading.
+Test strategies on historical data before deploying to paper or live trading.
 
 ### Quick Start
 
-```fish
-# Configure backtest settings in config.toml
-# Edit [backtest] section: set strategy_name, date range, markets
-
-# Run backtest
+```bash
+# Single run with config.toml settings
 cargo run -- --backtest
 
-# Or use the minimal example
+# Parameter grid search over strategy configs
+cargo run -- --backtest-sweep
+
+# Minimal example
 cargo run --example run_backtest
 ```
 
@@ -262,12 +293,13 @@ Add a `[backtest]` section to your `config.toml`:
 ```toml
 [backtest]
 strategy_name = "crypto-arb-tailend"      # Strategy to test
-market_ids = []                            # Empty = auto-discover from coins
+market_ids = []                            # Empty = auto-discover via Gamma API
 start_date = "2025-01-01T00:00:00Z"       # Backtest period start (RFC3339)
 end_date = "2025-01-31T23:59:59Z"         # Backtest period end (RFC3339)
 initial_balance = 1000.00                  # Starting USDC balance
 data_fidelity_secs = 60                    # Price granularity in seconds (60 = 1min)
 data_db_path = "backtest_data.db"         # Historical data cache (persistent)
+fetch_concurrency = 10                     # Markets fetched in parallel
 
 [backtest.fees]
 taker_fee_rate = 0.0315  # Match live fee model (3.15% at 50/50)
@@ -277,29 +309,21 @@ Environment variable overrides: `POLY_BACKTEST_START`, `POLY_BACKTEST_END`, `POL
 
 ### How It Works
 
-1. **Data Pipeline**: Fetches and caches historical market data from Polymarket APIs and Goldsky subgraphs
-   - CLOB API: Last ~7 days (high-fidelity price timeseries)
-   - Goldsky subgraph: Unlimited history (on-chain trade data)
-   - Smart caching prevents duplicate API calls
-2. **Event Replay**: Deterministically replays historical events through your strategy
-3. **Simulated Fills**: Immediate fills at historical trade prices with configurable fee model
-4. **Performance Report**: Comprehensive metrics including P&L, win rate, max drawdown, Sharpe ratio
+1. **Data Pipeline**: Fetches and caches historical trade data from the Goldsky orderbook subgraph. Smart caching prevents duplicate API calls across runs.
+2. **Event Replay**: Deterministic chronological replay — synthesizes PriceChange events from trades at configured `data_fidelity_secs` granularity.
+3. **Simulated Fills**: Immediate fills at historical trade prices with configurable fee model.
+4. **Report**: P&L (total/realized/unrealized), win rate, max drawdown, Sharpe ratio, trade count.
 
-### Report Metrics
+### Parameter Sweep
 
-- Total/realized/unrealized P&L
-- Win rate and trade count
-- Maximum drawdown percentage
-- Sharpe ratio (annualized risk-adjusted returns)
-- Start/end balance
-- Backtest duration
+Grid search over strategy parameters via `[backtest.sweep]` in `config.toml` with `ParamRange` (explicit values or min/max/step). Sorts results by metric (sharpe, pnl, win_rate) with sensitivity analysis and CSV/JSON export.
 
 ### Supported Strategies
 
-Currently supported crypto arbitrage strategy:
-- `crypto-arb-tailend` - High-confidence tail-end trades (<2 min remaining)
+- `crypto-arb-tailend` — crypto arbitrage tail-end trades
+- `dutch-book` — Dutch Book arbitrage
 
-Any strategy implementing the `Strategy` trait works without modification. See `examples/run_backtest.rs` for custom strategy usage.
+Any `impl Strategy` works without modification — strategies receive the same event stream as in live/paper mode.
 
 ## License
 
