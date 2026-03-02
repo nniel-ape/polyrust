@@ -17,17 +17,9 @@ use polyrust_market::ChainlinkHistoricalClient;
 
 use crate::crypto_arb::config::ArbitrageConfig;
 use crate::crypto_arb::domain::{
-    ArbitragePosition, BoundarySnapshot, CompositePriceResult, ExitOrderMeta, MarketWithReference,
-    ModeStats, OpenLimitOrder, OrderTelemetry, PendingOrder, PositionLifecycle, SpikeEvent,
+    ArbitragePosition, ExitOrderMeta, MarketWithReference, ModeStats, OpenLimitOrder,
+    OrderTelemetry, PendingOrder, PositionLifecycle, SpikeEvent,
 };
-
-/// Number of price history entries to keep per coin.
-/// At ~5s RTDS intervals, 200 entries covers ~16 minutes — enough for a full
-/// 15-minute window plus discovery delay.
-pub const PRICE_HISTORY_SIZE: usize = 200;
-
-/// Maximum time (seconds) from a window boundary to consider a snapshot "exact".
-pub const BOUNDARY_TOLERANCE_SECS: i64 = 2;
 
 /// 15 minutes in seconds (window duration).
 pub const WINDOW_SECS: i64 = 900;
@@ -42,14 +34,6 @@ pub struct CryptoArbRuntime {
     pub(super) chainlink_client: Option<Arc<ChainlinkHistoricalClient>>,
     /// Active markets indexed by market ID.
     pub(super) active_markets: RwLock<HashMap<MarketId, MarketWithReference>>,
-    /// Price history per coin: (receive_time, price, source, source_timestamp).
-    /// Kept at PRICE_HISTORY_SIZE entries for retroactive reference lookup.
-    /// `receive_time` is wall-clock when the bot processed the event;
-    /// `source_timestamp` is when the upstream feed generated the price.
-    pub(super) price_history:
-        RwLock<HashMap<String, VecDeque<(DateTime<Utc>, Decimal, String, DateTime<Utc>)>>>,
-    /// Proactive price snapshots at 15-min window boundaries, keyed by "{COIN}-{unix_ts}".
-    pub(super) boundary_prices: RwLock<HashMap<String, BoundarySnapshot>>,
     /// Open positions indexed by market ID.
     pub(super) positions: RwLock<HashMap<MarketId, Vec<ArbitragePosition>>>,
     /// Orders submitted but not yet confirmed — keyed by token_id.
@@ -93,16 +77,9 @@ pub struct CryptoArbRuntime {
     pub(super) market_reservations: RwLock<HashMap<MarketId, usize>>,
     /// Order lifecycle telemetry (fill times, rejects, cancels).
     pub(super) order_telemetry: std::sync::Mutex<OrderTelemetry>,
-    /// Last time each feed source was seen (source name -> timestamp).
-    /// Updated on every price event via `record_price`. Used for stale-feed gating.
-    pub(super) feed_last_seen: RwLock<HashMap<String, DateTime<Utc>>>,
     /// Signal veto counters for diagnostics.
     /// Tracks why entries were vetoed (stale feeds, dispersion, etc.).
     pub(super) signal_veto_stats: std::sync::Mutex<HashMap<&'static str, u64>>,
-    /// Cached composite prices for stop-loss decisions, keyed by coin.
-    /// Updated on every ExternalPrice event in `record_price`.
-    /// Tuple: (composite result, timestamp when computed).
-    pub(super) sl_composite_cache: RwLock<HashMap<String, (CompositePriceResult, DateTime<Utc>)>>,
     /// Per-position lifecycle state machines, keyed by token_id.
     /// Tracks each position through Healthy → ExitExecuting → etc.
     pub(super) position_lifecycle: RwLock<HashMap<TokenId, PositionLifecycle>>,
@@ -137,8 +114,6 @@ impl CryptoArbRuntime {
             config,
             chainlink_client,
             active_markets: RwLock::new(HashMap::new()),
-            price_history: RwLock::new(HashMap::new()),
-            boundary_prices: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
             pending_orders: RwLock::new(HashMap::new()),
             open_limit_orders: RwLock::new(HashMap::new()),
@@ -154,9 +129,7 @@ impl CryptoArbRuntime {
             coin_nearest_expiry: RwLock::new(HashMap::new()),
             market_reservations: RwLock::new(HashMap::new()),
             order_telemetry: std::sync::Mutex::new(OrderTelemetry::default()),
-            feed_last_seen: RwLock::new(HashMap::new()),
             signal_veto_stats: std::sync::Mutex::new(HashMap::new()),
-            sl_composite_cache: RwLock::new(HashMap::new()),
             position_lifecycle: RwLock::new(HashMap::new()),
             exit_orders_by_id: RwLock::new(HashMap::new()),
             recovery_exit_cooldowns: RwLock::new(HashMap::new()),
@@ -165,10 +138,10 @@ impl CryptoArbRuntime {
         }
     }
 
-    /// Pre-seed price_history with Chainlink prices at recent 15-min boundaries.
+    /// Pre-seed PriceService with Chainlink prices at recent 15-min boundaries.
     /// Runs before feeds/discovery start so that `find_best_reference()` can use
     /// Historical-quality lookups for markets discovered shortly after startup.
-    pub async fn warm_up(&self) {
+    pub async fn warm_up(&self, price_service: &PriceService) {
         let Some(client) = &self.chainlink_client else {
             info!("Chainlink disabled, skipping price warm-up");
             return;
@@ -200,9 +173,9 @@ impl CryptoArbRuntime {
         while let Some(Ok((coin, _bts, result))) = join_set.join_next().await {
             if let Ok(Ok(cp)) = result {
                 let ts = DateTime::from_timestamp(cp.timestamp as i64, 0).unwrap_or_else(Utc::now);
-                let mut history = self.price_history.write().await;
-                let entry = history.entry(coin).or_default();
-                entry.push_back((ts, cp.price, "chainlink".to_string(), ts));
+                price_service
+                    .record_price(&coin, cp.price, "chainlink", ts, ts)
+                    .await;
                 success += 1;
             }
         }

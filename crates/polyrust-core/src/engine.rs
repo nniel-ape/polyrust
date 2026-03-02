@@ -85,7 +85,7 @@ impl EngineBuilder {
             .ok_or_else(|| PolyError::Config("Execution backend is required".into()))?;
 
         let event_bus = EventBus::with_capacity(config.engine.event_bus_capacity);
-        let context = StrategyContext::new();
+        let context = StrategyContext::with_price_config(config.price_service.clone());
 
         // Set initial balance from execution backend
         {
@@ -235,18 +235,12 @@ impl Engine {
                             source,
                             timestamp,
                         }) => {
-                            let mut md = context.market_data.write().await;
-                            md.external_prices.insert(symbol.clone(), *price);
-                            // Also update per-source price map
-                            md.sourced_prices.entry(symbol.clone()).or_default().insert(
-                                source.clone(),
-                                crate::context::SourcedPrice {
-                                    price: *price,
-                                    source: source.clone(),
-                                    timestamp: *timestamp,
-                                },
-                            );
-                            debug!(symbol = %symbol, price = %price, source = %source, "Updated external price in context");
+                            // Record in PriceService (eagerly computes composite)
+                            context
+                                .prices
+                                .record_price(symbol, *price, source, *timestamp, *timestamp)
+                                .await;
+                            debug!(symbol = %symbol, price = %price, source = %source, "Updated external price in PriceService");
                         }
                         Event::MarketData(MarketDataEvent::MarketDiscovered(info)) => {
                             let mut md = context.market_data.write().await;

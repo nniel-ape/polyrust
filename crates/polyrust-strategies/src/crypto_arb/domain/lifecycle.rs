@@ -10,8 +10,6 @@ use polyrust_core::prelude::*;
 
 use crate::crypto_arb::config::UnifiedPriceConfig;
 
-use super::market::CompositePriceSnapshot;
-
 /// Classification of stop-loss trigger that caused an exit evaluation.
 ///
 /// Priority order (highest first): HardCrash > DualTrigger > TrailingStop > PostEntryExit.

@@ -16,10 +16,9 @@ pub use lifecycle::{
     PositionLifecycle, PositionLifecycleState, StopLossTriggerKind, TriggerEvalContext,
     UnifiedSlPrice, compute_unified_sl_price,
 };
-pub use market::{
-    BoundarySnapshot, CompositePriceResult, CompositePriceSnapshot, MarketWithReference,
-    ReferenceQuality,
-};
+pub use market::{MarketWithReference, ReferenceQuality};
+// BoundarySnapshot, CompositePriceResult, CompositePriceSnapshot now in polyrust_core::prelude
+pub use polyrust_core::prelude::{BoundarySnapshot, CompositePriceResult, CompositePriceSnapshot};
 pub use position::{
     ArbitrageOpportunity, ArbitragePosition, ExitOrderMeta, OpenLimitOrder, PendingOrder,
     compute_exit_clip,

@@ -1,3 +1,4 @@
+use crate::price_service::{PriceService, PriceServiceConfig};
 use crate::strategy::Strategy;
 use crate::types::*;
 use chrono::{DateTime, Utc};
@@ -6,14 +7,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::RwLock;
-
-/// A price observation from a specific data source with timestamp.
-#[derive(Debug, Clone)]
-pub struct SourcedPrice {
-    pub price: Decimal,
-    pub source: String,
-    pub timestamp: DateTime<Utc>,
-}
 
 /// A thread-safe handle to a boxed strategy.
 pub type StrategyHandle = Arc<RwLock<Box<dyn Strategy>>>;
@@ -29,10 +22,16 @@ pub struct StrategyContext {
     pub strategy_views: Arc<RwLock<HashMap<String, StrategyHandle>>>,
     /// Simulated clock for backtesting. None = use Utc::now() (live mode).
     pub simulated_clock: Arc<RwLock<Option<DateTime<Utc>>>>,
+    /// Shared price service for all external price data.
+    pub prices: Arc<PriceService>,
 }
 
 impl StrategyContext {
     pub fn new() -> Self {
+        Self::with_price_config(PriceServiceConfig::default())
+    }
+
+    pub fn with_price_config(price_config: PriceServiceConfig) -> Self {
         Self {
             positions: Arc::new(RwLock::new(PositionState::default())),
             market_data: Arc::new(RwLock::new(MarketDataState::default())),
@@ -40,6 +39,7 @@ impl StrategyContext {
             strategy_count: Arc::new(AtomicUsize::new(0)),
             strategy_views: Arc::new(RwLock::new(HashMap::new())),
             simulated_clock: Arc::new(RwLock::new(None)),
+            prices: Arc::new(PriceService::new(price_config)),
         }
     }
 
@@ -71,6 +71,7 @@ impl std::fmt::Debug for StrategyContext {
             .field("balance", &self.balance)
             .field("strategy_count", &self.strategy_count)
             .field("strategy_views", &"<strategy_views>")
+            .field("prices", &"<price_service>")
             .finish()
     }
 }
@@ -105,11 +106,6 @@ impl PositionState {
 pub struct MarketDataState {
     pub orderbooks: HashMap<TokenId, OrderbookSnapshot>,
     pub markets: HashMap<MarketId, MarketInfo>,
-    /// Latest external price per symbol (any source). Used for quick lookups.
-    pub external_prices: HashMap<String, Decimal>,
-    /// Per-source price observations: symbol -> source -> SourcedPrice.
-    /// Used for composite fair price calculations and feed health monitoring.
-    pub sourced_prices: HashMap<String, HashMap<String, SourcedPrice>>,
 }
 
 #[derive(Debug)]

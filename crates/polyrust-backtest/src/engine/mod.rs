@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use polyrust_core::actions::Action;
-use polyrust_core::context::{BalanceState, SourcedPrice, StrategyContext};
+use polyrust_core::context::{BalanceState, StrategyContext};
 use polyrust_core::error::Result;
 use polyrust_core::events::{Event, MarketDataEvent, OrderEvent};
 use polyrust_core::strategy::Strategy;
@@ -305,18 +305,13 @@ impl BacktestEngine {
                     source,
                     timestamp,
                 }) => {
-                    // Store in external_prices keyed by coin symbol (used by strategy discovery)
+                    // Store in token_prices (CLOB token prices per token_id)
                     self.token_prices.insert(symbol.clone(), *price);
-                    let mut md = self.ctx.market_data.write().await;
-                    md.external_prices.insert(symbol.clone(), *price);
-                    md.sourced_prices.entry(symbol.clone()).or_default().insert(
-                        source.clone(),
-                        SourcedPrice {
-                            price: *price,
-                            source: source.clone(),
-                            timestamp: *timestamp,
-                        },
-                    );
+                    // Record in PriceService (external crypto prices per symbol)
+                    self.ctx
+                        .prices
+                        .record_price(symbol, *price, source, *timestamp, *timestamp)
+                        .await;
                 }
                 _ => {}
             }
@@ -366,19 +361,17 @@ impl BacktestEngine {
                             source: source.to_string(),
                             timestamp: self.current_time,
                         });
-                        // Update sourced_prices in market data state
-                        {
-                            let mut md = self.ctx.market_data.write().await;
-                            md.external_prices.insert(coin.clone(), ext_price);
-                            md.sourced_prices.entry(coin.clone()).or_default().insert(
-                                source.to_string(),
-                                SourcedPrice {
-                                    price: ext_price,
-                                    source: source.to_string(),
-                                    timestamp: self.current_time,
-                                },
-                            );
-                        }
+                        // Record in PriceService (eagerly computes composite)
+                        self.ctx
+                            .prices
+                            .record_price(
+                                &coin,
+                                ext_price,
+                                &source.to_string(),
+                                self.current_time,
+                                self.current_time,
+                            )
+                            .await;
                         let ext_actions = self.strategy.on_event(&ext_event, &self.ctx).await?;
                         trades.extend(self.execute_strategy_actions(ext_actions).await?);
                     }

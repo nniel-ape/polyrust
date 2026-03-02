@@ -52,15 +52,6 @@ impl ReferenceQuality {
     }
 }
 
-/// A price snapshot captured at a 15-minute window boundary.
-#[derive(Debug, Clone)]
-pub struct BoundarySnapshot {
-    pub timestamp: DateTime<Utc>,
-    pub price: Decimal,
-    /// Price source (e.g. "chainlink", "binance")
-    pub source: String,
-}
-
 /// Market enriched with the reference crypto price at discovery time.
 #[derive(Debug, Clone)]
 pub struct MarketWithReference {
@@ -126,39 +117,5 @@ impl MarketWithReference {
         };
 
         (raw * self.reference_quality.quality_factor()).min(Decimal::ONE)
-    }
-}
-
-/// Result of a composite fair price calculation from multiple data sources.
-#[derive(Debug, Clone)]
-pub struct CompositePriceResult {
-    /// Weighted average price across sources.
-    pub price: Decimal,
-    /// Number of sources that contributed.
-    pub sources_used: usize,
-    /// Maximum lag in milliseconds across contributing sources.
-    pub max_lag_ms: i64,
-    /// Maximum dispersion from composite in basis points.
-    pub dispersion_bps: Decimal,
-}
-
-/// Snapshot of composite price data for stop-loss decisions.
-#[derive(Debug, Clone)]
-pub struct CompositePriceSnapshot {
-    pub price: Decimal,
-    pub sources_used: usize,
-    pub max_lag_ms: i64,
-    pub dispersion_bps: Decimal,
-}
-
-impl CompositePriceSnapshot {
-    /// Create a snapshot from a `CompositePriceResult`.
-    pub fn from_result(r: &CompositePriceResult) -> Self {
-        Self {
-            price: r.price,
-            sources_used: r.sources_used,
-            max_lag_ms: r.max_lag_ms,
-            dispersion_bps: r.dispersion_bps,
-        }
     }
 }

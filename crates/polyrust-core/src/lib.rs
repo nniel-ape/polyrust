@@ -9,6 +9,7 @@ pub mod event_bus;
 pub mod events;
 pub mod execution;
 pub mod fees;
+pub mod price_service;
 pub mod strategy;
 pub mod types;
 
@@ -27,6 +28,10 @@ pub mod prelude {
     pub use crate::events::*;
     pub use crate::execution::ExecutionBackend;
     pub use crate::fees::{taker_fee, taker_fee_per_share};
+    pub use crate::price_service::{
+        BoundarySnapshot, CompositePriceResult, CompositePriceSnapshot, PriceObservation,
+        PriceService, PriceServiceConfig, SourcedPrice,
+    };
     pub use crate::strategy::Strategy;
     pub use crate::types::*;
     pub use async_trait::async_trait;

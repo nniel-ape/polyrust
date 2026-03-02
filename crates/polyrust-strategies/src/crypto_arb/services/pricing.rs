@@ -6,12 +6,8 @@ use tracing::{debug, info, warn};
 
 use polyrust_core::prelude::*;
 
-use crate::crypto_arb::domain::{
-    BoundarySnapshot, CompositePriceResult, ReferenceQuality, SpikeEvent,
-};
-use crate::crypto_arb::runtime::{
-    BOUNDARY_TOLERANCE_SECS, CryptoArbRuntime, PRICE_HISTORY_SIZE, WINDOW_SECS,
-};
+use crate::crypto_arb::domain::{ReferenceQuality, SpikeEvent};
+use crate::crypto_arb::runtime::{CryptoArbRuntime, WINDOW_SECS};
 
 impl CryptoArbRuntime {
     // -------------------------------------------------------------------------

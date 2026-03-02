@@ -1,3 +1,4 @@
+use crate::price_service::PriceServiceConfig;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -16,6 +17,8 @@ pub struct Config {
     pub paper: PaperConfig,
     #[serde(default)]
     pub auto_claim: AutoClaimConfig,
+    #[serde(default)]
+    pub price_service: PriceServiceConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

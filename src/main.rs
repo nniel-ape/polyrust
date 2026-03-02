@@ -192,7 +192,6 @@ async fn main() -> anyhow::Result<()> {
         arb_config.clone(),
         config.polymarket.rpc_urls.clone(),
     ));
-    base.warm_up().await;
 
     // Build engine with conditionally registered strategies based on config
     let mut builder = Engine::builder()
@@ -235,6 +234,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut engine = builder.build().await?;
+
+    // Warm up price history with Chainlink data
+    base.warm_up(&engine.context().prices).await;
 
     // Collect background task handles for clean shutdown
     let mut bg_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
